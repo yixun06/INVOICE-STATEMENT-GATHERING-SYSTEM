@@ -1,0 +1,38 @@
+﻿__pycache__/
+*.py[cod]
+.venv/
+venv/
+tmp/
+exports/
+.agents/
+.brief/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Local-only business source data and real regression fixtures
+/archive/
+/INVOICE TEST - Copy/
+/tests/fixtures/shopee_completeness_20260826/
+/tests/fixtures/shopee_weekly_statement/Income.released.my.20260427_20260503.xlsx
+
+# Local configuration and credentials
+/.streamlit/secrets.toml
+/.env
+/.env.*
+
+# Local test/cache output
+/.pytest-*
+/.pytest_cache/
+
+# Editor or patch leftovers
+*.orig
+*.rej
+
+# Generated coverage and test-report artifacts
+/.coverage
+/.coverage.*
+/coverage/
+/htmlcov/
+/test-results/
+/junit*.xml
