@@ -354,3 +354,16 @@ No changes were made to:
 
 - Synthetic promotion metadata and existing Shopee parser regression tests: `35 passed in 0.36s`.
 - Full regression suite: `180 passed in 77.71s`, using a workspace-local pytest basetemp.
+
+## 47. Shopee Product Pricing Calculation Engine
+
+- Added standalone `product_pricing` service that resolves Unit Selling Price exclusively through the existing Product Price Master and returns derived pricing results without changing parser rows or existing report fields.
+- Normal rows calculate Normal Selling Value from Product Master price × quantity, Actual Selling Value from `source_line_subtotal`, and Discount Given as the difference.
+- Complete same-price promotion groups allocate the source group total by member quantity with Decimal rounding and a deterministic final-member remainder, preserving exact group-total reconciliation.
+- Missing price, pricing conflict, incomplete promotion evidence, unresolved group-member price, and mixed-price promotion members return explicit unavailable/unsupported statuses without using zero or guessing. Negative discount below -RM0.02 is retained as a Pricing Anomaly.
+- Cross Platform Summary, Product Summary, Shopee parser behavior, Weekly Statement, and reconciliation remain unchanged.
+
+## 48. Product Pricing Calculation Engine verification
+
+- Focused Product Pricing, Product Master, and promotion metadata tests: `26 passed in 0.91s`.
+- Full regression suite: `190 passed in 76.74s`, using a workspace-local pytest basetemp.
