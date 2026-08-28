@@ -342,3 +342,15 @@ No changes were made to:
 - Restored the Self-Test interface: Data Import default entry; ADMIN / REPORTS / DEVELOPMENT / TESTING navigation; visible Settlement Test Lab; Current Batch / Discard Current Batch; and the Select Source → Upload → Validate → Reconcile → Review & Commit workflow.
 - Restored the existing temporary Accepted-order sync into Settlement Test Lab and the disabled Future Database Commit presentation. Weekly Statement parsing/service, reconciliation, validation recovery, session contracts, reporting, and parser semantics were preserved.
 - Rebuilt affected AppTest coverage around Self-Test navigation, accepted-only temporary sync, Settlement Test Lab availability, and restored legacy UI copy. Focused checks: 25 passed plus 6 Import Result contract tests; smoke checks: 76 passed; full regression: 164 passed in 72.31s.
+
+## 45. Shopee promotion source metadata
+
+- Preserved `source_line_subtotal` independently from the legacy derived `line_total` / `line_subtotal` behavior for Shopee product parser output.
+- For the existing deterministic `Any N at RM...` positioned-parser path, added promotion group ID, source label, source group total, target quantity, and per-product member quantity metadata. Legacy allocation remains unchanged.
+- When the existing section quantity check cannot verify membership, no group ID or member quantity is assigned; nearby source evidence is retained with `promotion_metadata_status = incomplete` and no allocation is applied.
+- Shopee product mapping now passes this source metadata through without changing Cross Platform Summary, Product Master lookup, Weekly Statement, reconciliation, or existing product amount fields.
+
+## 46. Shopee promotion source metadata verification
+
+- Synthetic promotion metadata and existing Shopee parser regression tests: `35 passed in 0.36s`.
+- Full regression suite: `180 passed in 77.71s`, using a workspace-local pytest basetemp.

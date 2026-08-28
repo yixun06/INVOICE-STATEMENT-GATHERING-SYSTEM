@@ -110,6 +110,8 @@ def reconcile_product_candidates(
                 merged["unit_price"] = fallback.get("unit_price", Decimal("0"))
             if merged.get("line_total", Decimal("0")) == 0:
                 merged["line_total"] = fallback.get("line_total", Decimal("0"))
+            if merged.get("source_line_subtotal") is None:
+                merged["source_line_subtotal"] = fallback.get("source_line_subtotal")
         result.append(merged)
         if sku:
             seen_skus.add(sku)
@@ -161,7 +163,11 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
                 page.number,
             )
 
-        _apply_group_promotion(section_items, rows[header_index + 1 : section_end])
+        _apply_group_promotion(
+            section_items,
+            rows[header_index + 1 : section_end],
+            promotion_group_id=_promotion_group_id(page.number, header_position + 1),
+        )
         items.extend(section_items)
 
     return items
@@ -218,11 +224,13 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     unit_price = Decimal("0")
     quantity = 0
     line_total = Decimal("0")
+    source_line_subtotal: Decimal | None = None
     for row in reversed(block[:-1]):
         metrics = _metrics_from_positioned_row(row, columns)
         if metrics is None:
             continue
-        unit_price, quantity, line_total = metrics
+        unit_price, quantity, source_line_subtotal = metrics
+        line_total = source_line_subtotal if source_line_subtotal is not None else Decimal("0")
         metric_row = row
         break
 
@@ -263,6 +271,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         "quantity": quantity,
         "unit_price": unit_price,
         "line_total": line_total,
+        "source_line_subtotal": source_line_subtotal,
         "variation": variation,
         "promotion": promotion,
         "evidence": "positioned",
@@ -270,7 +279,10 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     }
 
 
-def _metrics_from_positioned_row(row: _Row, columns: _Columns) -> tuple[Decimal, int, Decimal] | None:
+def _metrics_from_positioned_row(
+    row: _Row,
+    columns: _Columns,
+) -> tuple[Decimal, int, Decimal | None] | None:
     unit_words = [
         word
         for word in row.words
@@ -292,7 +304,7 @@ def _metrics_from_positioned_row(row: _Row, columns: _Columns) -> tuple[Decimal,
     quantity = parse_quantity(quantity_match.group(1))
     if quantity <= 0:
         return None
-    return unit_price, quantity, line_total or Decimal("0")
+    return unit_price, quantity, line_total
 
 
 def _parse_positioned_items_without_sku(
@@ -304,7 +316,7 @@ def _parse_positioned_items_without_sku(
     previous_metric = -1
     for metric_index, row in enumerate(rows):
         metrics = _metrics_from_positioned_row(row, columns)
-        if metrics is None or metrics[2] == 0:
+        if metrics is None or metrics[2] is None or metrics[2] == 0:
             continue
         unit_price, quantity, line_total = metrics
         name_parts: list[str] = []
@@ -333,6 +345,7 @@ def _parse_positioned_items_without_sku(
                 "quantity": quantity,
                 "unit_price": unit_price,
                 "line_total": line_total,
+                "source_line_subtotal": line_total,
                 "variation": variation,
                 "promotion": "",
                 "evidence": "positioned-no-sku",
@@ -344,7 +357,12 @@ def _parse_positioned_items_without_sku(
     return items
 
 
-def _apply_group_promotion(items: list[dict[str, Any]], rows: list[_Row]) -> None:
+def _apply_group_promotion(
+    items: list[dict[str, Any]],
+    rows: list[_Row],
+    *,
+    promotion_group_id: str,
+) -> None:
     promotion = next(
         (
             match
@@ -356,10 +374,27 @@ def _apply_group_promotion(items: list[dict[str, Any]], rows: list[_Row]) -> Non
     if not promotion or not items:
         return
 
+    promotion_label = normalize_whitespace(promotion.group(0))
+    promotion_total = parse_decimal(promotion.group(2)).quantize(Decimal("0.01"))
     expected_quantity = int(promotion.group(1))
     total_quantity = sum(int(item.get("quantity", 0) or 0) for item in items)
     if expected_quantity != total_quantity:
+        for item in items:
+            item["promotion_metadata_status"] = "incomplete"
+            item["promotion_label"] = promotion_label
+            item["promotion_group_total"] = promotion_total
+            item["promotion_target_qty"] = expected_quantity
+            item["promotion_incomplete_reason"] = (
+                "Promotion target quantity does not equal parsed section quantity."
+            )
         return
+
+    for item in items:
+        item["promotion_group_id"] = promotion_group_id
+        item["promotion_label"] = promotion_label
+        item["promotion_group_total"] = promotion_total
+        item["promotion_target_qty"] = expected_quantity
+        item["promotion_member_qty"] = int(item.get("quantity", 0) or 0)
 
     weights = [
         (item.get("unit_price") or Decimal("0")) * Decimal(int(item.get("quantity", 0) or 0))
@@ -369,7 +404,6 @@ def _apply_group_promotion(items: list[dict[str, Any]], rows: list[_Row]) -> Non
     if weight_total <= 0:
         return
 
-    promotion_total = parse_decimal(promotion.group(2)).quantize(Decimal("0.01"))
     allocated = Decimal("0")
     for index, (item, weight) in enumerate(zip(items, weights)):
         if index == len(items) - 1:
@@ -378,7 +412,11 @@ def _apply_group_promotion(items: list[dict[str, Any]], rows: list[_Row]) -> Non
             line_total = (promotion_total * weight / weight_total).quantize(Decimal("0.01"))
             allocated += line_total
         item["line_total"] = line_total
-        item["promotion"] = normalize_whitespace(promotion.group(0))
+        item["promotion"] = promotion_label
+
+
+def _promotion_group_id(page_number: int, section_number: int) -> str:
+    return f"shopee-promotion:p{page_number}:section{section_number}"
 
 
 def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
@@ -392,6 +430,7 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
     unit_price = Decimal("0")
     quantity = 0
     line_total = Decimal("0")
+    source_line_subtotal: Decimal | None = None
     metric_body = ""
     for index in range(len(block) - 2, -1, -1):
         match = re.match(
@@ -409,6 +448,7 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
         unit_price = parse_decimal(match.group("unit"))
         quantity = parse_quantity(match.group("qty"))
         line_total = subtotal
+        source_line_subtotal = subtotal
         break
 
     name_parts: list[str] = []
@@ -441,6 +481,7 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
         "quantity": quantity,
         "unit_price": unit_price,
         "line_total": line_total,
+        "source_line_subtotal": source_line_subtotal,
         "variation": variation,
         "promotion": promotion,
         "evidence": "text",
@@ -463,6 +504,7 @@ def _parse_complete_rows(lines: list[str]) -> list[dict[str, Any]]:
                 "quantity": parse_quantity(row.group("qty")),
                 "unit_price": parse_decimal(row.group("unit")),
                 "line_total": parse_decimal(row.group("subtotal")),
+                "source_line_subtotal": parse_decimal(row.group("subtotal")),
                 "variation": "",
                 "promotion": "",
                 "evidence": "complete-row",

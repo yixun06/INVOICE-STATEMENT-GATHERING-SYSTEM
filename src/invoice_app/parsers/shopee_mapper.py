@@ -170,24 +170,24 @@ def map_shopee_products(
             unit_price_text = _source_product_money(unit_price_value)
             line_total_text = _source_product_money(line_total_value)
 
-        products.append(
-            {
-                "batch_id": batch_id,
-                "platform": SHOPEE_PLATFORM,
-                "order_id": data.order_id,
-                "invoice_date": data.order_created_date,
-                "order_created_date": data.order_created_date,
-                "product_name": item["product_name"],
-                "seller_sku": item["seller_sku"],
-                "quantity": quantity,
-                "unit_price": unit_price_text,
-                "line_total": line_total_text,
-                "line_subtotal": line_total_text,
-                "sku_missing_in_source": bool(item.get("sku_missing_in_source")),
-                "source_pdf": data.source_pdf,
-                "status": status,
-            }
-        )
+        product = {
+            "batch_id": batch_id,
+            "platform": SHOPEE_PLATFORM,
+            "order_id": data.order_id,
+            "invoice_date": data.order_created_date,
+            "order_created_date": data.order_created_date,
+            "product_name": item["product_name"],
+            "seller_sku": item["seller_sku"],
+            "quantity": quantity,
+            "unit_price": unit_price_text,
+            "line_total": line_total_text,
+            "line_subtotal": line_total_text,
+            "sku_missing_in_source": bool(item.get("sku_missing_in_source")),
+            "source_pdf": data.source_pdf,
+            "status": status,
+        }
+        product.update(_promotion_source_metadata(item))
+        products.append(product)
     return products
 
 
@@ -197,3 +197,22 @@ def _source_product_money(value: Any) -> str:
     if isinstance(value, Decimal):
         return str(value.quantize(Decimal("0.01")))
     return str(value).strip()
+
+
+def _promotion_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """Expose parser source evidence without changing legacy product amounts."""
+    metadata: dict[str, Any] = {}
+    if "source_line_subtotal" in item:
+        metadata["source_line_subtotal"] = _source_product_money(item.get("source_line_subtotal"))
+
+    for field in ("promotion_group_id", "promotion_label", "promotion_metadata_status"):
+        if str(item.get(field, "")).strip():
+            metadata[field] = str(item[field]).strip()
+    if item.get("promotion_group_total") is not None:
+        metadata["promotion_group_total"] = _source_product_money(item["promotion_group_total"])
+    for field in ("promotion_target_qty", "promotion_member_qty"):
+        if field in item:
+            metadata[field] = item[field]
+    if str(item.get("promotion_incomplete_reason", "")).strip():
+        metadata["promotion_incomplete_reason"] = str(item["promotion_incomplete_reason"]).strip()
+    return metadata
