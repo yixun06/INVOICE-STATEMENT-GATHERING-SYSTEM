@@ -288,11 +288,11 @@ def test_all_tab_separates_incomplete_product_rows_without_exporting_them(tmp_pa
     assert all_products["Product Price"].tolist() == ["12.00"]
     assert "Data Status" not in all_products.columns
     product_summary = frames_by_columns[
-        ("Seller SKU", "Product Name", "Total Quantity", "Total Sales Amount")
+        ("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")
     ]
     assert product_summary["Seller SKU"].tolist() == ["SKU-A"]
     assert product_summary["Total Quantity"].tolist() == [1]
-    assert product_summary["Total Sales Amount"].tolist() == [9.0]
+    assert product_summary["Total Selling Price"].tolist() == [9.0]
     assert "Export All Products" in {
         button.label for button in app.get("download_button")
     }
@@ -680,7 +680,7 @@ def test_cross_platform_from_to_filters_share_the_same_detail_and_summary_popula
     detail = frames_by_columns[
         ("Order Created Date", "Product Name", "Product Price", "Seller SKU #", "Qty", "Platform")
     ]
-    summary = frames_by_columns[("Seller SKU", "Product Name", "Total Quantity", "Total Sales Amount")]
+    summary = frames_by_columns[("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")]
     assert detail["Product Name"].tolist() == ["Later product"]
     assert detail["Order Created Date"].iloc[0].date() == date(2026, 8, 15)
     assert summary["Seller SKU"].tolist() == ["SKU-LATER"]
@@ -691,7 +691,7 @@ def test_cross_platform_from_to_filters_share_the_same_detail_and_summary_popula
     detail = frames_by_columns[
         ("Order Created Date", "Product Name", "Product Price", "Seller SKU #", "Qty", "Platform")
     ]
-    summary = frames_by_columns[("Seller SKU", "Product Name", "Total Quantity", "Total Sales Amount")]
+    summary = frames_by_columns[("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")]
     assert detail["Product Name"].tolist() == ["Early product"]
     assert summary["Seller SKU"].tolist() == ["SKU-EARLY"]
 

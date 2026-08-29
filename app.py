@@ -8,8 +8,12 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from src.invoice_app.config import APP_TITLE
+from src.invoice_app.config import APP_TITLE, SHOPEE_PRODUCT_MASTER_PATH
 from src.invoice_app.services.auth_service import authenticate
+from src.invoice_app.services.product_price_master import (
+    ProductPriceMaster,
+    load_shopee_product_price_master,
+)
 from src.invoice_app.services.analytics import (
     compute_overall_dashboard,
     compute_platform_dashboard,
@@ -1188,9 +1192,10 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
 
     summary_df = frame_with_columns(summary_rows, CROSS_PLATFORM_SUMMARY_COLUMNS)
     summary_df["total_quantity"] = pd.to_numeric(summary_df["total_quantity"], errors="coerce").astype("Int64")
-    summary_df["total_sales_amount"] = summary_df["total_sales_amount"].map(
-        lambda value: float(value) if isinstance(value, Decimal) else value
-    )
+    for field in ("unit_selling_price", "total_selling_price", "total_discount_given"):
+        summary_df[field] = summary_df[field].map(
+            lambda value: float(value) if isinstance(value, Decimal) else value
+        )
     summary_labels = CROSS_PLATFORM_SUMMARY_FIELD_LABELS
     st.dataframe(
         summary_df[CROSS_PLATFORM_SUMMARY_COLUMNS].rename(columns=summary_labels),
@@ -1203,20 +1208,39 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
             summary_labels["product_name"]: st.column_config.TextColumn(
                 summary_labels["product_name"], pinned=True, width="large"
             ),
+            summary_labels["unit_selling_price"]: st.column_config.NumberColumn(
+                summary_labels["unit_selling_price"], format="RM %.2f", width="small", alignment="right"
+            ),
             summary_labels["total_quantity"]: st.column_config.NumberColumn(
                 summary_labels["total_quantity"], format="%d", width="small"
             ),
-            summary_labels["total_sales_amount"]: st.column_config.NumberColumn(
-                summary_labels["total_sales_amount"], format="%.2f", width="small", alignment="right"
+            summary_labels["total_selling_price"]: st.column_config.NumberColumn(
+                summary_labels["total_selling_price"], format="RM %.2f", width="small", alignment="right"
+            ),
+            summary_labels["total_discount_given"]: st.column_config.NumberColumn(
+                summary_labels["total_discount_given"], format="RM %.2f", width="small", alignment="right"
             ),
         },
         height=320,
     )
 
 
+def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
+    if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
+        return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
+    try:
+        return load_shopee_product_price_master(SHOPEE_PRODUCT_MASTER_PATH), None
+    except (OSError, ValueError) as error:
+        return None, f"Shopee Product Master could not be loaded: {error}"
 def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) -> None:
     all_product_rows, all_review_rows = build_all_product_views(orders, products, reviews)
-    reporting_product_rows = build_cross_platform_product_rows(orders, products, reviews)
+    price_master, price_master_message = _load_cross_platform_price_master()
+    reporting_product_rows = build_cross_platform_product_rows(
+        orders,
+        products,
+        reviews,
+        price_master=price_master,
+    )
     all_review_df = frame_with_columns(all_review_rows, [*ALL_PRODUCT_REVIEW_COLUMNS, "order_id"])
     st.title("Cross Platform Summary")
 
@@ -1232,9 +1256,19 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
     with product_summary_slot.container():
         show_table_section_heading(
             "Product Summary",
-            "Grouped by Seller SKU. Total Sales Amount uses the platform source line amount.",
+            "Grouped by Seller SKU, Product Name, and available Variation. Product pricing uses the Shopee Product Master.",
         )
         show_cross_platform_summary_table(summarize_cross_platform_products(filtered_product_rows))
+        if price_master_message:
+            st.caption(price_master_message)
+        incomplete_promotion_count = sum(
+            row.get("reporting_pricing_status") == "promotion_evidence_incomplete"
+            for row in filtered_product_rows
+        )
+        if incomplete_promotion_count:
+            st.caption(
+                f"{incomplete_promotion_count} product row(s) have incomplete promotion evidence; unavailable pricing values remain N/A."
+            )
         missing_sku_count = sum(
             str(row.get("seller_sku", "")).strip().upper() in {"", MISSING_VALUE_PLACEHOLDER}
             for row in filtered_product_rows

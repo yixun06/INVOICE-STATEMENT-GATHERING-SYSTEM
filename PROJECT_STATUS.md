@@ -3,7 +3,7 @@
 ## Current Baseline
 
 - Self-Test Version
-- 164 passed
+- 197 passed
 
 ## Completed
 
@@ -14,10 +14,10 @@
 - Current Session
 - Settlement Test Lab
 - Cross Platform Summary
+- Product Master / Promotion Pricing
 
 ## Next
 
-- Product Master / Promotion Pricing
 - UAT Presentation
 
 ## Pending

@@ -367,3 +367,17 @@ No changes were made to:
 
 - Focused Product Pricing, Product Master, and promotion metadata tests: `26 passed in 0.91s`.
 - Full regression suite: `190 passed in 76.74s`, using a workspace-local pytest basetemp.
+
+## 49. Promotion Pricing Phase 3 — Cross Platform Summary integration
+
+- Cross Platform Product Summary now consumes the existing Shopee Product Price Master and Product Pricing Engine without changing parser, Weekly Statement, reconciliation, payment, or All Products detail contracts.
+- Summary pricing identity is Seller SKU + normalized Product Name + available Variation. Variation is shown in the existing Product Name display label, so same SKU entries with different name/variation and resolved prices remain separate summary rows.
+- The six summary fields are Seller SKU, Product Name, Unit Selling Price, Total Quantity, Total Selling Price, and Total Discount Given. Product Master lookup remains generic: exact SKU first, then normalized Product Name and available Variation only when multi-price candidates need disambiguation.
+- Shopee pricing runs per Order ID before aggregation, preserving promotion-group boundaries. Lazada uses `paid_price` and ZENXIN uses `line_total_inc_tax` as their actual selling values; no voucher, fee, rebate, parser, or payment adjustment is deducted again.
+- Price Not Found / Pricing Conflict retain reliable actual selling amounts and quantity while Unit Selling Price and Discount Given remain `N/A`. Complete promotion groups with an unavailable member price retain only their source-supported allocated actual selling values; incomplete promotion metadata remains unavailable and is surfaced as `N/A`.
+
+## 50. Promotion Pricing Phase 3 verification
+
+- Local Product Master validation (read-only, not tracked): all 7 confirmed multi-price Seller SKUs and all 14 candidate records resolved uniquely through generic Seller SKU + Product Name + available Variation matching; no SKU or price was hardcoded.
+- Focused Summary, Product Master, Product Pricing, All Products, and Streamlit AppTest coverage: `54 passed in 16.39s`; additional promotion source-actual safety coverage: `17 passed in 0.96s`.
+- Full regression suite: `197 passed in 80.81s`, using a workspace-local pytest basetemp.

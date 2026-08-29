@@ -128,7 +128,12 @@ def _candidate(
 
 def _normal_pricing(candidate: _PricingCandidate) -> ProductPricingResult:
     if candidate.lookup.status not in _MATCHED_LOOKUP_STATUSES:
-        return _lookup_unavailable(candidate)
+        return _lookup_unavailable(
+            candidate,
+            actual_selling_value=candidate.source_line_subtotal,
+            allocation_method="source_line_subtotal" if candidate.source_line_subtotal is not None else None,
+            allocation_evidence=("source_line_subtotal",) if candidate.source_line_subtotal is not None else (),
+        )
 
     quantity = _positive_integer(candidate.row.get("quantity"))
     if quantity is None or candidate.source_line_subtotal is None:
@@ -166,16 +171,26 @@ def _promotion_group_pricing(
         None,
     )
     if lookup_failure is not None:
+        reason = "Promotion discount pricing is unavailable because a group member has no resolved price."
         return tuple(
-            _lookup_unavailable(member, group_reason="Promotion allocation is unavailable because a group member has no resolved price.")
+            _lookup_unavailable(
+                member,
+                group_reason=reason,
+                actual_selling_value=actual_value,
+                allocation_method=method,
+                allocation_evidence=evidence,
+            )
             if member.lookup.status not in _MATCHED_LOOKUP_STATUSES
             else _result(
                 member,
                 status=ProductPricingStatus.PROMOTION_UNSUPPORTED,
                 unit_selling_price=member.lookup.unit_selling_price,
-                reason="Promotion allocation is unavailable because a group member has no resolved price.",
+                actual_selling_value=actual_value,
+                allocation_method=method,
+                allocation_evidence=evidence,
+                reason=reason,
             )
-            for member in members
+            for member, actual_value, method, evidence in _promotion_actual_allocations(members)
         )
 
     prices = {member.lookup.unit_selling_price for member in members}
@@ -227,6 +242,39 @@ def _promotion_group_pricing(
     return tuple(results)
 
 
+def _promotion_actual_allocations(
+    members: list[_PricingCandidate],
+) -> tuple[tuple[_PricingCandidate, Decimal, str, tuple[str, ...]], ...]:
+    group_total = members[0].promotion_group_total
+    total_quantity = sum(member.promotion_member_qty or 0 for member in members)
+    allocated = Decimal("0")
+    results: list[tuple[_PricingCandidate, Decimal, str, tuple[str, ...]]] = []
+    for position, member in enumerate(members):
+        member_qty = member.promotion_member_qty or 0
+        if position == len(members) - 1:
+            actual_value = group_total - allocated
+            method = "promotion_group_last_member_remainder"
+        else:
+            actual_value = _money(group_total * Decimal(member_qty) / Decimal(total_quantity))
+            allocated += actual_value
+            method = "promotion_group_per_unit_with_remainder"
+        results.append(
+            (
+                member,
+                actual_value,
+                method,
+                (
+                    "promotion_group_id",
+                    "promotion_label",
+                    "promotion_group_total",
+                    "promotion_target_qty",
+                    "promotion_member_qty",
+                    f"participating_quantity={total_quantity}",
+                ),
+            )
+        )
+    return tuple(results)
+
 def _promotion_evidence_reason(
     group_id: str,
     members: list[_PricingCandidate],
@@ -274,6 +322,10 @@ def _promotion_incomplete(
 def _lookup_unavailable(
     candidate: _PricingCandidate,
     group_reason: str | None = None,
+    *,
+    actual_selling_value: Decimal | None = None,
+    allocation_method: str | None = None,
+    allocation_evidence: tuple[str, ...] = (),
 ) -> ProductPricingResult:
     status = (
         ProductPricingStatus.PRICING_CONFLICT
@@ -284,6 +336,9 @@ def _lookup_unavailable(
         candidate,
         status=status,
         unit_selling_price=None,
+        actual_selling_value=actual_selling_value,
+        allocation_method=allocation_method,
+        allocation_evidence=allocation_evidence,
         reason=group_reason or candidate.lookup.reason,
     )
 

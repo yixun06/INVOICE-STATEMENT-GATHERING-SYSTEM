@@ -6,6 +6,12 @@ from pathlib import Path
 APP_ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_DIR = APP_ROOT / "archive"
 SECRETS_PATH = APP_ROOT / ".streamlit" / "secrets.toml"
+SHOPEE_PRODUCT_MASTER_PATH = Path(
+    os.getenv(
+        "INV_SHOPEE_PRODUCT_MASTER_PATH",
+        str(APP_ROOT.parent / "UNIT PRICE BASED SKU (SHOPEE).xlsx"),
+    )
+)
 
 DEFAULT_USERNAME = os.getenv("INV_USERNAME", "admin")
 DEFAULT_PASSWORD_HASH = os.getenv(
