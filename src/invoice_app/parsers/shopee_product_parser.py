@@ -260,8 +260,9 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     if variation and variation.lower() not in product_name.lower():
         product_name = normalize_whitespace(f"{product_name} {variation}")
 
+    positioned_sku_row_subtotal = _subtotal_column_decimal(block[-1], columns)
     promotion_container_subtotal = (
-        _subtotal_column_decimal(block[-1], columns)
+        positioned_sku_row_subtotal
         if promotion and source_line_subtotal is None
         else None
     )
@@ -273,6 +274,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         "line_total": line_total,
         "source_line_subtotal": source_line_subtotal,
         "promotion_container_subtotal": promotion_container_subtotal,
+        "positioned_sku_row_subtotal": positioned_sku_row_subtotal,
         "variation": variation,
         "promotion": promotion,
         "evidence": "positioned",
@@ -383,14 +385,6 @@ def _apply_group_promotion(
             continue
 
         promotion_label, target_qty, advertised_amount, discount_percent = promotion
-        source_group_total = item.get("promotion_container_subtotal")
-        if not isinstance(source_group_total, Decimal):
-            _mark_incomplete_promotion(
-                item, promotion_label, target_qty, advertised_amount, discount_percent,
-                "Promotion container has no coordinate-confirmed source group subtotal.",
-            )
-            index += 1
-            continue
 
         members = [item]
         next_index = index + 1
@@ -410,6 +404,26 @@ def _apply_group_promotion(
             )
             index += 1
             continue
+
+        source_group_totals = {
+            value
+            for member in members
+            if isinstance(
+                value := (
+                    member.get("promotion_container_subtotal")
+                    or member.get("positioned_sku_row_subtotal")
+                ),
+                Decimal,
+            )
+        }
+        if len(source_group_totals) != 1:
+            _mark_incomplete_promotion(
+                item, promotion_label, target_qty, advertised_amount, discount_percent,
+                "Promotion container has no unique coordinate-confirmed source group subtotal.",
+            )
+            index += 1
+            continue
+        source_group_total = next(iter(source_group_totals))
 
         group_number += 1
         group_id = f"{promotion_group_id}:group{group_number}"

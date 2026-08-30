@@ -395,3 +395,15 @@ No changes were made to:
 - Real `260818N824EBFU` read-only verification: the two Popcorn rows form one group with `source_group_total = RM20.00`, `promotion_advertised_amount = RM20.00`, `participating_qty = 2`, missing individual source subtotals, and no Manual Review; the numbers remain separately sourced.
 - Focused synthetic and real parser/pricing/lookup regression: `53 passed in 18.00s`.
 - Full regression suite: `196 passed in 56.68s`, using a workspace-local pytest basetemp.
+
+
+## 53. Shopee promotion subtotal on later member row
+
+- Extended the coordinate-based container extractor to accept exactly one Subtotal-column amount positioned on any SKU-anchored member row inside the candidate region, not only the label's first product block.
+- The amount remains a source_group_total; it is never assigned as an individual member subtotal. Multiple or absent candidate Subtotal amounts remain incomplete rather than guessed.
+- Read-only supplied-PDF verification (discounted pdf.pdf): the Any 4 at RM15.00 group now has four members, one source group total of RM15.00, missing individual source subtotals, and is accepted as 1 order / 7 products / 0 Manual Review.
+
+## 54. Later-member promotion subtotal verification
+
+- Focused Shopee promotion parser, real-sample, and validation regression: 56 passed in 16.28s.
+- Full regression suite: 197 passed in 81.78s, using a workspace-local pytest basetemp.

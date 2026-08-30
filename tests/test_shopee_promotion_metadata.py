@@ -82,3 +82,21 @@ def test_percent_off_label_preserves_percent_and_container_total_separately():
     assert {item["source_group_total"] for item in (first, second, third)} == {Decimal("159.01")}
     assert all("promotion_advertised_amount" not in item for item in (first, second, third))
     assert all(item["source_line_subtotal"] is None for item in (first, second, third))
+
+def test_container_subtotal_may_be_on_a_later_member_sku_row():
+    first = _item("A", 1, None, "Any 4 at RM15.00")
+    second = _item("B", 1, None)
+    second["positioned_sku_row_subtotal"] = Decimal("15.00")
+    third = _item("C", 1, None)
+    fourth = _item("D", 1, None)
+    normal = _item("NORMAL", 1, Decimal("4.80"))
+
+    _apply_group_promotion(
+        [first, second, third, fourth, normal],
+        promotion_group_id="p1",
+    )
+
+    assert {item["source_group_total"] for item in (first, second, third, fourth)} == {Decimal("15.00")}
+    assert {item["participating_qty"] for item in (first, second, third, fourth)} == {4}
+    assert all(item["source_line_subtotal"] is None for item in (first, second, third, fourth))
+    assert normal.get("promotion_group_id") is None
