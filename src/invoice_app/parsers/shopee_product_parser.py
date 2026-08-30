@@ -165,7 +165,6 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
 
         _apply_group_promotion(
             section_items,
-            rows[header_index + 1 : section_end],
             promotion_group_id=_promotion_group_id(page.number, header_position + 1),
         )
         items.extend(section_items)
@@ -238,7 +237,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     variation = ""
     promotion = ""
     for row in block[:-1]:
-        if re.search(r"(?:Any\s+)?\d+\s+at\s+RM", row.text, flags=re.IGNORECASE):
+        if _promotion_details(row.text) is not None:
             promotion = row.text
             continue
         product_words = [
@@ -252,7 +251,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         if candidate.lower().startswith("variation:"):
             variation = candidate
             continue
-        if re.match(r"^(?:Any\s+)?\d+\s+at\s+RM", candidate, flags=re.IGNORECASE):
+        if _promotion_details(candidate) is not None:
             promotion = candidate
             continue
         name_parts.append(candidate)
@@ -261,10 +260,11 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     if variation and variation.lower() not in product_name.lower():
         product_name = normalize_whitespace(f"{product_name} {variation}")
 
-    promotion_total = _promotion_total(promotion)
-    if line_total == 0 and promotion_total is not None:
-        line_total = promotion_total
-
+    promotion_container_subtotal = (
+        _subtotal_column_decimal(block[-1], columns)
+        if promotion and source_line_subtotal is None
+        else None
+    )
     return {
         "product_name": product_name,
         "seller_sku": sku_match.group(1).strip(),
@@ -272,6 +272,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         "unit_price": unit_price,
         "line_total": line_total,
         "source_line_subtotal": source_line_subtotal,
+        "promotion_container_subtotal": promotion_container_subtotal,
         "variation": variation,
         "promotion": promotion,
         "evidence": "positioned",
@@ -306,6 +307,15 @@ def _metrics_from_positioned_row(
         return None
     return unit_price, quantity, line_total
 
+
+
+def _subtotal_column_decimal(row: _Row, columns: _Columns) -> Decimal | None:
+    subtotal_words = [
+        word
+        for word in row.words
+        if word.center_x >= columns.quantity_subtotal_boundary
+    ]
+    return _first_decimal(" ".join(word.text for word in subtotal_words))
 
 def _parse_positioned_items_without_sku(
     rows: list[_Row],
@@ -359,60 +369,115 @@ def _parse_positioned_items_without_sku(
 
 def _apply_group_promotion(
     items: list[dict[str, Any]],
-    rows: list[_Row],
     *,
     promotion_group_id: str,
 ) -> None:
-    promotion = next(
-        (
-            match
-            for row in rows
-            if (match := re.search(r"Any\s+(\d+)\s+at\s+RM\s*([\d,]+(?:\.\d+)?)", row.text, re.I))
-        ),
-        None,
-    )
-    if not promotion or not items:
-        return
+    """Preserve promotion facts only when a positioned container is clear."""
+    group_number = 0
+    index = 0
+    while index < len(items):
+        item = items[index]
+        promotion = _promotion_details(str(item.get("promotion", "")))
+        if promotion is None:
+            index += 1
+            continue
 
-    promotion_label = normalize_whitespace(promotion.group(0))
-    promotion_total = parse_decimal(promotion.group(2)).quantize(Decimal("0.01"))
-    expected_quantity = int(promotion.group(1))
-    total_quantity = sum(int(item.get("quantity", 0) or 0) for item in items)
-    if expected_quantity != total_quantity:
-        for item in items:
-            item["promotion_metadata_status"] = "incomplete"
-            item["promotion_label"] = promotion_label
-            item["promotion_group_total"] = promotion_total
-            item["promotion_target_qty"] = expected_quantity
-            item["promotion_incomplete_reason"] = (
-                "Promotion target quantity does not equal parsed section quantity."
+        promotion_label, target_qty, advertised_amount, discount_percent = promotion
+        source_group_total = item.get("promotion_container_subtotal")
+        if not isinstance(source_group_total, Decimal):
+            _mark_incomplete_promotion(
+                item, promotion_label, target_qty, advertised_amount, discount_percent,
+                "Promotion container has no coordinate-confirmed source group subtotal.",
             )
-        return
+            index += 1
+            continue
 
-    for item in items:
-        item["promotion_group_id"] = promotion_group_id
-        item["promotion_label"] = promotion_label
-        item["promotion_group_total"] = promotion_total
-        item["promotion_target_qty"] = expected_quantity
-        item["promotion_member_qty"] = int(item.get("quantity", 0) or 0)
+        members = [item]
+        next_index = index + 1
+        while next_index < len(items):
+            next_item = items[next_index]
+            if _promotion_details(str(next_item.get("promotion", ""))) is not None:
+                break
+            if next_item.get("source_line_subtotal") is not None:
+                break
+            members.append(next_item)
+            next_index += 1
 
-    weights = [
-        (item.get("unit_price") or Decimal("0")) * Decimal(int(item.get("quantity", 0) or 0))
-        for item in items
-    ]
-    weight_total = sum(weights, Decimal("0"))
-    if weight_total <= 0:
-        return
+        if any(int(member.get("quantity", 0) or 0) <= 0 for member in members):
+            _mark_incomplete_promotion(
+                item, promotion_label, target_qty, advertised_amount, discount_percent,
+                "Promotion container has a member with unavailable quantity.",
+            )
+            index += 1
+            continue
 
-    allocated = Decimal("0")
-    for index, (item, weight) in enumerate(zip(items, weights)):
-        if index == len(items) - 1:
-            line_total = promotion_total - allocated
-        else:
-            line_total = (promotion_total * weight / weight_total).quantize(Decimal("0.01"))
-            allocated += line_total
-        item["line_total"] = line_total
-        item["promotion"] = promotion_label
+        group_number += 1
+        group_id = f"{promotion_group_id}:group{group_number}"
+        participating_qty = sum(int(member.get("quantity", 0) or 0) for member in members)
+        for member in members:
+            member["promotion_group_id"] = group_id
+            member["promotion_label"] = promotion_label
+            member["promotion_target_qty"] = target_qty
+            if advertised_amount is not None:
+                member["promotion_advertised_amount"] = advertised_amount
+            if discount_percent is not None:
+                member["promotion_discount_percent"] = discount_percent
+            member["source_group_total"] = source_group_total
+            member["promotion_group_total"] = source_group_total
+            member["participating_qty"] = participating_qty
+            member["promotion_member_qty"] = int(member.get("quantity", 0) or 0)
+            member["promotion"] = promotion_label
+            member["source_line_subtotal"] = None
+            member["line_total"] = None
+        index = next_index
+
+
+def _promotion_details(
+    promotion: str,
+) -> tuple[str, int, Decimal | None, Decimal | None] | None:
+    amount_match = re.search(
+        r"Any\s+(\d+)\s+at\s+RM\s*([\d,]+(?:\.\d+)?)",
+        promotion,
+        re.I,
+    )
+    if amount_match:
+        return (
+            normalize_whitespace(amount_match.group(0)),
+            int(amount_match.group(1)),
+            parse_decimal(amount_match.group(2)).quantize(Decimal("0.01")),
+            None,
+        )
+    percent_match = re.search(
+        r"Any\s+(\d+)\s+enjoy\s+([\d,]+(?:\.\d+)?)\s*%\s*off",
+        promotion,
+        re.I,
+    )
+    if percent_match:
+        return (
+            normalize_whitespace(percent_match.group(0)),
+            int(percent_match.group(1)),
+            None,
+            parse_decimal(percent_match.group(2)),
+        )
+    return None
+
+
+def _mark_incomplete_promotion(
+    item: dict[str, Any],
+    promotion_label: str,
+    target_qty: int,
+    advertised_amount: Decimal | None,
+    discount_percent: Decimal | None,
+    reason: str,
+) -> None:
+    item["promotion_metadata_status"] = "incomplete"
+    item["promotion_label"] = promotion_label
+    item["promotion_target_qty"] = target_qty
+    if advertised_amount is not None:
+        item["promotion_advertised_amount"] = advertised_amount
+    if discount_percent is not None:
+        item["promotion_discount_percent"] = discount_percent
+    item["promotion_incomplete_reason"] = reason
 
 
 def _promotion_group_id(page_number: int, section_number: int) -> str:
@@ -470,10 +535,6 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
     product_name = normalize_whitespace(" ".join(name_parts))
     if variation and variation.lower() not in product_name.lower():
         product_name = normalize_whitespace(f"{product_name} {variation}")
-
-    promotion_total = _promotion_total(promotion)
-    if line_total == 0 and promotion_total is not None:
-        line_total = promotion_total
 
     return {
         "product_name": product_name,

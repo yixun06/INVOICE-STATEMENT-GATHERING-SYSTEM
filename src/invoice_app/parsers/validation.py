@@ -32,7 +32,14 @@ def validate_product_items(
             and not bool(item.get("sku_missing_in_source"))
         ):
             errors.append(f"{label} is missing Seller SKU.")
-        if require_line_total and not _has_decimal_value(item.get("line_total")):
+        if (
+            require_line_total
+            and not _has_decimal_value(item.get("line_total"))
+            and not (
+                item.get("promotion_group_id")
+                and _has_decimal_value(item.get("source_group_total"))
+            )
+        ):
             errors.append(f"{label} is missing Line Total.")
 
     return errors
@@ -63,20 +70,29 @@ def validate_shopee_product_amounts(
     items: list[dict[str, Any]],
     merchandise_subtotal: Any,
 ) -> str | None:
-    line_totals: list[Decimal] = []
+    totals: list[Decimal] = []
+    seen_promotion_groups: set[str] = set()
     for index, item in enumerate(items, start=1):
+        group_id = str(item.get("promotion_group_id") or "").strip()
+        source_group_total = _decimal_value(item.get("source_group_total"))
+        if group_id and source_group_total is not None:
+            if group_id not in seen_promotion_groups:
+                totals.append(source_group_total)
+                seen_promotion_groups.add(group_id)
+            # Complete promotion containers reconcile at group level. Individual
+            # members intentionally do not have source line subtotals.
+            continue
+
         quantity = parse_quantity(item.get("quantity"))
         unit_price = _decimal_value(item.get("unit_price"))
         line_total = _decimal_value(item.get("line_total"))
-        if quantity <= 0 or unit_price is None or line_total is None:
+        if line_total is None:
+            line_total = _decimal_value(item.get("source_line_subtotal"))
+        if line_total is None or unit_price is None or quantity <= 0:
             continue
-
-        line_totals.append(line_total)
+        totals.append(line_total)
         expected = unit_price * Decimal(quantity)
-        if (
-            abs(expected - line_total) > MONEY_TOLERANCE
-            and not _has_explicit_shopee_promotion(item)
-        ):
+        if abs(expected - line_total) > MONEY_TOLERANCE and not _has_explicit_shopee_promotion(item):
             return (
                 "Product Amount Reconciliation Failed: "
                 f"Item {index} quantity x unit price is {expected:.2f}, "
@@ -84,14 +100,13 @@ def validate_shopee_product_amounts(
             )
 
     seller_subtotal = _decimal_value(merchandise_subtotal)
-    if seller_subtotal is None or len(line_totals) != len(items):
+    if seller_subtotal is None or not totals:
         return None
-
-    extracted_total = sum(line_totals, Decimal("0"))
+    extracted_total = sum(totals, Decimal("0"))
     if abs(extracted_total - seller_subtotal) > MONEY_TOLERANCE:
         return (
             "Product Amount Reconciliation Failed: "
-            f"extracted line subtotals total {extracted_total:.2f}, "
+            f"extracted source subtotals total {extracted_total:.2f}, "
             f"but seller Merchandise Subtotal is {seller_subtotal:.2f}."
         )
     return None

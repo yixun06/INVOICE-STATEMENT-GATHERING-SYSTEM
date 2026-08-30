@@ -82,7 +82,7 @@ def test_price_not_found_never_uses_zero_or_derived_values():
     assert result.discount_given is None
 
 
-def test_complete_promotion_with_missing_price_preserves_group_actual_values():
+def test_complete_promotion_with_missing_price_does_not_allocate_actual_values():
     results = calculate_shopee_product_pricing(
         [
             _promotion_row("SKU-A", quantity=1, source_line_subtotal="20.00"),
@@ -91,13 +91,11 @@ def test_complete_promotion_with_missing_price_preserves_group_actual_values():
         _master(_master_row("SKU-A", "20.00")),
     )
 
-    assert [result.actual_selling_value for result in results] == [
-        Decimal("15.27"), Decimal("30.53")
-    ]
-    assert sum(result.actual_selling_value for result in results) == Decimal("45.80")
+    assert all(result.actual_selling_value is None for result in results)
     assert results[0].pricing_status is ProductPricingStatus.PROMOTION_UNSUPPORTED
     assert results[1].pricing_status is ProductPricingStatus.PRICE_NOT_FOUND
     assert all(result.discount_given is None for result in results)
+
 
 def test_pricing_conflict_never_guesses_a_price():
     result = calculate_shopee_product_pricing(
@@ -200,7 +198,7 @@ def test_mixed_resolved_prices_are_not_allocated():
         _master(_master_row("SKU-A", "10.00"), _master_row("SKU-B", "12.00")),
     )
 
-    assert all(result.pricing_status is ProductPricingStatus.PROMOTION_UNSUPPORTED for result in results)
+    assert all(result.pricing_status is ProductPricingStatus.PROMOTION_UNSUPPORTED_MIXED_PRICE for result in results)
     assert all(result.actual_selling_value is None for result in results)
 
 

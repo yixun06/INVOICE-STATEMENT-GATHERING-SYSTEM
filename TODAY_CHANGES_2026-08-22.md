@@ -381,3 +381,17 @@ No changes were made to:
 - Local Product Master validation (read-only, not tracked): all 7 confirmed multi-price Seller SKUs and all 14 candidate records resolved uniquely through generic Seller SKU + Product Name + available Variation matching; no SKU or price was hardcoded.
 - Focused Summary, Product Master, Product Pricing, All Products, and Streamlit AppTest coverage: `54 passed in 16.39s`; additional promotion source-actual safety coverage: `17 passed in 0.96s`.
 - Full regression suite: `197 passed in 80.81s`, using a workspace-local pytest basetemp.
+
+## 51. Shopee promotion container source facts and pricing safety
+
+- Replaced target-quantity-based Shopee promotion grouping with a coordinate-aware container rule: the promotion label starts a candidate region, SKU-anchored member blocks continue until the next independent normal subtotal, promotion label, section, or page boundary.
+- Added distinct source fields for label evidence (`promotion_advertised_amount` or `promotion_discount_percent`) and the coordinate-confirmed Subtotal-column `source_group_total`; matching numeric values are never treated as the same fact.
+- Promotion members no longer fabricate individual line subtotals. Complete groups validate against their source group total at group level; incomplete layout evidence remains unallocated.
+- Added `Any N enjoy P% off` label support. The percentage is retained as metadata only and is never used to derive the source group total.
+- Shopee Product Master resolution now combines exact Seller SKU and Parent SKU candidates before unique-price/name/variation resolution. Lazada and ZENXIN stay source-only and do not query the Shopee Master.
+
+## 52. Promotion container verification
+
+- Real `260818N824EBFU` read-only verification: the two Popcorn rows form one group with `source_group_total = RM20.00`, `promotion_advertised_amount = RM20.00`, `participating_qty = 2`, missing individual source subtotals, and no Manual Review; the numbers remain separately sourced.
+- Focused synthetic and real parser/pricing/lookup regression: `53 passed in 18.00s`.
+- Full regression suite: `196 passed in 56.68s`, using a workspace-local pytest basetemp.

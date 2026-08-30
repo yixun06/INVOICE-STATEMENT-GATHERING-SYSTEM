@@ -194,14 +194,17 @@ class ProductPriceMaster:
         """Resolve one price without parser, UI, allocation, or money guessing."""
         requested_seller_sku = _sku_text(seller_sku)
         if requested_seller_sku:
+            candidates = _unique_records(
+                self._seller_sku_index.get(requested_seller_sku, ())
+                + self._parent_sku_index.get(requested_seller_sku, ())
+            )
             return self._resolve(
-                self._seller_sku_index.get(requested_seller_sku, ()),
-                match_scope="seller_sku",
+                candidates,
+                match_scope="seller_sku_or_parent_sku",
                 requested_sku=requested_seller_sku,
                 product_name=product_name,
                 variation_name=variation_name,
             )
-
         requested_parent_sku = _sku_text(parent_sku)
         if requested_parent_sku:
             return self._resolve(
@@ -393,8 +396,12 @@ def _match_text(value: str | None) -> str:
     return normalize_whitespace(value or "").casefold()
 
 
+def _unique_records(records: Iterable[ProductPriceMasterRecord]) -> tuple[ProductPriceMasterRecord, ...]:
+    return tuple(dict.fromkeys(records))
+
+
 def _matched_status(match_scope: str, disambiguated: bool) -> PriceLookupStatus:
-    if match_scope == "seller_sku":
+    if match_scope in {"seller_sku", "seller_sku_or_parent_sku"}:
         return (
             PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION
             if disambiguated

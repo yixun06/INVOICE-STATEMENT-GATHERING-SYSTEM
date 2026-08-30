@@ -331,9 +331,9 @@ def test_cross_platform_summary_uses_dates_and_price_identity_rows():
     assert [row["reporting_order_created_date"] for row in reporting_rows] == [date(2026, 8, 7), date(2026, 8, 8), date(2026, 8, 9)]
     assert [row["reporting_sales_amount"] for row in reporting_rows] == ["20.00", "9.00", "35.70"]
     assert summarize_cross_platform_products(reporting_rows) == [
-        {"seller_sku": "SKU-SHARED", "product_name": "Different source label", "unit_selling_price": Decimal("10.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": Decimal("1.00")},
+        {"seller_sku": "SKU-SHARED", "product_name": "Different source label", "unit_selling_price": Decimal("12.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": "N/A"},
         {"seller_sku": "SKU-SHARED", "product_name": "Shared SKU first name", "unit_selling_price": Decimal("10.00"), "total_quantity": 2, "total_selling_price": Decimal("20.00"), "total_discount_given": Decimal("0.00")},
-        {"seller_sku": "SKU-ZENXIN", "product_name": "ZENXIN product", "unit_selling_price": Decimal("11.90"), "total_quantity": 3, "total_selling_price": Decimal("35.70"), "total_discount_given": Decimal("0.00")},
+        {"seller_sku": "SKU-ZENXIN", "product_name": "ZENXIN product", "unit_selling_price": Decimal("11.90"), "total_quantity": 3, "total_selling_price": Decimal("35.70"), "total_discount_given": "N/A"},
     ]
 
     assert filter_cross_platform_product_rows(reporting_rows, start_date=date(2026, 8, 8), end_date=date(2026, 8, 8)) == [reporting_rows[1]]
@@ -495,7 +495,7 @@ def test_cross_platform_summary_groups_same_price_identity_across_multiple_order
     assert summary_rows == [
         {"seller_sku": "SKU-SHARED", "product_name": "First source name", "unit_selling_price": Decimal("10.00"), "total_quantity": 2, "total_selling_price": Decimal("20.00"), "total_discount_given": Decimal("0.00")},
         {"seller_sku": "SKU-SHARED", "product_name": "Later source name", "unit_selling_price": Decimal("10.00"), "total_quantity": 4, "total_selling_price": Decimal("40.00"), "total_discount_given": Decimal("0.00")},
-        {"seller_sku": "SKU-SHARED", "product_name": "Platform label does not split the SKU", "unit_selling_price": Decimal("10.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": Decimal("1.00")},
+        {"seller_sku": "SKU-SHARED", "product_name": "Platform label does not split the SKU", "unit_selling_price": Decimal("9.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": "N/A"},
     ]
 def test_cross_platform_filters_support_independent_inclusive_from_and_to_dates():
     rows = [

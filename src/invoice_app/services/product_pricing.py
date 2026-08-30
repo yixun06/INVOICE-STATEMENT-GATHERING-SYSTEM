@@ -37,6 +37,7 @@ class ProductPricingStatus(str, Enum):
     SOURCE_VALUE_UNAVAILABLE = "source_value_unavailable"
     PROMOTION_EVIDENCE_INCOMPLETE = "promotion_evidence_incomplete"
     PROMOTION_UNSUPPORTED = "promotion_unsupported"
+    PROMOTION_UNSUPPORTED_MIXED_PRICE = "promotion_unsupported_mixed_price"
     PRICING_ANOMALY = "pricing_anomaly"
 
 
@@ -119,7 +120,10 @@ def _candidate(
         source_line_subtotal=_decimal_value(row.get("source_line_subtotal")),
         promotion_group_id=_text(row.get("promotion_group_id")) or None,
         promotion_label=_text(row.get("promotion_label")) or None,
-        promotion_group_total=_decimal_value(row.get("promotion_group_total")),
+        promotion_group_total=(
+            _decimal_value(row.get("source_group_total"))
+            or _decimal_value(row.get("promotion_group_total"))
+        ),
         promotion_target_qty=_positive_integer(row.get("promotion_target_qty")),
         promotion_member_qty=_positive_integer(row.get("promotion_member_qty")),
         promotion_metadata_status=_text(row.get("promotion_metadata_status")) or None,
@@ -171,26 +175,17 @@ def _promotion_group_pricing(
         None,
     )
     if lookup_failure is not None:
-        reason = "Promotion discount pricing is unavailable because a group member has no resolved price."
+        reason = "Promotion pricing is unavailable because every member must have a resolved Unit Selling Price before allocation."
         return tuple(
-            _lookup_unavailable(
-                member,
-                group_reason=reason,
-                actual_selling_value=actual_value,
-                allocation_method=method,
-                allocation_evidence=evidence,
-            )
+            _lookup_unavailable(member, group_reason=reason)
             if member.lookup.status not in _MATCHED_LOOKUP_STATUSES
             else _result(
                 member,
                 status=ProductPricingStatus.PROMOTION_UNSUPPORTED,
                 unit_selling_price=member.lookup.unit_selling_price,
-                actual_selling_value=actual_value,
-                allocation_method=method,
-                allocation_evidence=evidence,
                 reason=reason,
             )
-            for member, actual_value, method, evidence in _promotion_actual_allocations(members)
+            for member in members
         )
 
     prices = {member.lookup.unit_selling_price for member in members}
@@ -198,9 +193,9 @@ def _promotion_group_pricing(
         return tuple(
             _result(
                 member,
-                status=ProductPricingStatus.PROMOTION_UNSUPPORTED,
+                status=ProductPricingStatus.PROMOTION_UNSUPPORTED_MIXED_PRICE,
                 unit_selling_price=member.lookup.unit_selling_price,
-                reason="Promotion allocation supports only members with the same resolved Unit Selling Price.",
+                reason="Promotion source is complete, but mixed resolved Unit Selling Prices have no confirmed allocation rule.",
             )
             for member in members
         )
@@ -290,14 +285,10 @@ def _promotion_evidence_reason(
     totals = {member.promotion_group_total for member in members}
     if None in totals or len(totals) != 1:
         return "Promotion group total is unavailable or inconsistent."
-    targets = {member.promotion_target_qty for member in members}
-    if None in targets or len(targets) != 1:
-        return "Promotion target quantity is unavailable or inconsistent."
     if any(member.promotion_member_qty is None for member in members):
         return "Promotion member quantity is unavailable."
-    target_quantity = next(iter(targets))
-    if sum(member.promotion_member_qty or 0 for member in members) != target_quantity:
-        return "Promotion member quantities do not reconcile to the promotion target quantity."
+    # Any N is source metadata, not a membership boundary. The parser has
+    # already determined membership from the container layout.
     return None
 
 

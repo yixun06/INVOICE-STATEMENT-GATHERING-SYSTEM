@@ -238,7 +238,7 @@ def _apply_cross_platform_product_pricing(
             order_key = str(row.get("order_id") or "").strip() or f"__row_{index}"
             shopee_by_order.setdefault(order_key, []).append((index, row))
         else:
-            decorated[index] = _standard_platform_pricing(row, price_master)
+            decorated[index] = _standard_platform_pricing(row)
 
     for members in shopee_by_order.values():
         member_rows = [row for _, row in members]
@@ -273,60 +273,28 @@ def _shopee_pricing_input(row: dict[str, Any]) -> dict[str, Any]:
         "promotion_group_id": row.get("reporting_promotion_group_id"),
         "promotion_label": row.get("reporting_promotion_label"),
         "promotion_group_total": row.get("reporting_promotion_group_total"),
+        "source_group_total": row.get("reporting_source_group_total"),
         "promotion_target_qty": row.get("reporting_promotion_target_qty"),
         "promotion_member_qty": row.get("reporting_promotion_member_qty"),
         "promotion_metadata_status": row.get("reporting_promotion_metadata_status"),
     }
 
 
-def _standard_platform_pricing(
-    row: dict[str, Any],
-    price_master: ProductPriceMaster,
-) -> dict[str, Any]:
-    lookup = price_master.lookup(
-        seller_sku=_lookup_input_text(row.get("seller_sku")),
-        parent_sku=_lookup_input_text(row.get("reporting_parent_sku")),
-        product_name=_lookup_input_text(row.get("product_name")),
-        variation_name=_lookup_input_text(row.get("reporting_variation_name")),
-    )
+def _standard_platform_pricing(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep non-Shopee reporting strictly on its own invoice/source fields."""
     actual_value = _decimal_or_none(row.get("reporting_sales_amount"))
-    pricing = {
-        "reporting_unit_selling_price": lookup.unit_selling_price,
+    unit_price = _decimal_or_none(row.get("unit_price"))
+    return {
+        **row,
+        "reporting_unit_selling_price": unit_price,
         "reporting_normal_selling_value": None,
         "reporting_actual_selling_value": actual_value,
         "reporting_discount_given": None,
-        "reporting_price_lookup_status": lookup.status.value,
-        "reporting_pricing_reason": lookup.reason,
+        "reporting_pricing_status": "platform_source_only",
+        "reporting_price_lookup_status": "not_applicable",
+        "reporting_pricing_reason": None,
         "reporting_allocation_method": "platform_source_actual_selling_value",
-        "reporting_allocation_evidence": ("product_price_master", "platform_source_actual_selling_value"),
-    }
-    if lookup.status not in _matched_lookup_statuses():
-        return {**row, **pricing, "reporting_pricing_status": lookup.status.value}
-
-    quantity = parse_quantity(row.get("quantity"))
-    if quantity <= 0 or actual_value is None:
-        return {
-            **row,
-            **pricing,
-            "reporting_pricing_status": ProductPricingStatus.SOURCE_VALUE_UNAVAILABLE.value,
-            "reporting_pricing_reason": "Quantity or platform source actual selling value is unavailable.",
-        }
-
-    normal_value = (lookup.unit_selling_price * quantity).quantize(MONEY_QUANTUM)
-    discount = (normal_value - actual_value).quantize(MONEY_QUANTUM)
-    status = (
-        ProductPricingStatus.PRICING_ANOMALY.value
-        if discount < -PRICING_ANOMALY_TOLERANCE
-        else ProductPricingStatus.NORMAL_PRICED.value
-    )
-    reason = "Discount Given is below -RM0.02; retained without clamping." if status == ProductPricingStatus.PRICING_ANOMALY.value else None
-    return {
-        **row,
-        **pricing,
-        "reporting_normal_selling_value": normal_value,
-        "reporting_discount_given": discount,
-        "reporting_pricing_status": status,
-        "reporting_pricing_reason": reason,
+        "reporting_allocation_evidence": ("platform_source_actual_selling_value",),
     }
 
 
@@ -555,6 +523,7 @@ def _all_product_row(
                 "reporting_promotion_group_id": product.get("promotion_group_id"),
                 "reporting_promotion_label": product.get("promotion_label"),
                 "reporting_promotion_group_total": product.get("promotion_group_total"),
+                "reporting_source_group_total": product.get("source_group_total"),
                 "reporting_promotion_target_qty": product.get("promotion_target_qty"),
                 "reporting_promotion_member_qty": product.get("promotion_member_qty"),
                 "reporting_promotion_metadata_status": product.get("promotion_metadata_status"),

@@ -208,9 +208,12 @@ def _promotion_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
     for field in ("promotion_group_id", "promotion_label", "promotion_metadata_status"):
         if str(item.get(field, "")).strip():
             metadata[field] = str(item[field]).strip()
-    if item.get("promotion_group_total") is not None:
-        metadata["promotion_group_total"] = _source_product_money(item["promotion_group_total"])
-    for field in ("promotion_target_qty", "promotion_member_qty"):
+    for field in ("promotion_group_total", "source_group_total", "promotion_advertised_amount"):
+        if item.get(field) is not None:
+            metadata[field] = _source_product_money(item[field])
+    if item.get("promotion_discount_percent") is not None:
+        metadata["promotion_discount_percent"] = item["promotion_discount_percent"]
+    for field in ("promotion_target_qty", "participating_qty", "promotion_member_qty"):
         if field in item:
             metadata[field] = item[field]
     if str(item.get("promotion_incomplete_reason", "")).strip():

@@ -297,10 +297,10 @@ def test_parse_real_shopee_promotional_bundle_allocation():
     assert extracted.income["order_income"] == "N/A"
     assert extracted.income["income_type"] == "N/A"
     assert len(extracted.product_items) == 2
-    assert sum(item["line_total"] for item in extracted.product_items) == Decimal("178.00")
     assert {item["quantity"] for item in extracted.product_items} == {2}
     assert {item["unit_price"] for item in extracted.product_items} == {Decimal("58.80")}
-    assert {item["line_total"] for item in extracted.product_items} == {Decimal("89.00")}
+    assert {item["source_group_total"] for item in extracted.product_items} == {Decimal("178.00")}
+    assert {item["source_line_subtotal"] for item in extracted.product_items} == {None}
     assert {item["seller_sku"] for item in extracted.product_items} == {
         "9555208013969-New",
         "9555208013938",

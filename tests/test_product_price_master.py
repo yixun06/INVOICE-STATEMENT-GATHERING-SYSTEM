@@ -170,3 +170,12 @@ def _write_listing(path, *, seller_sku, price):
         price,
     ])
     workbook.save(path)
+
+def test_seller_sku_matches_master_parent_sku_without_column_priority():
+    result = _master([
+        _row(seller_sku="CHILD", parent_sku="SOURCE-SKU", unit_selling_price="12.50"),
+    ]).lookup(seller_sku="SOURCE-SKU")
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_SKU
+    assert result.unit_selling_price == Decimal("12.50")
+    assert result.matched_parent_sku == "SOURCE-SKU"
