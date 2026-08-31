@@ -1,7 +1,7 @@
 from decimal import Decimal
 from src.invoice_app.pdf_document import PdfHorizontalRule, PdfWord
 
-from src.invoice_app.parsers.shopee_product_parser import _apply_group_promotion, _is_struck_through, resolve_promotion_group_totals
+from src.invoice_app.parsers.shopee_product_parser import _Columns, _Row, _apply_group_promotion, _is_struck_through, _parse_positioned_item_block, resolve_promotion_group_totals
 from src.invoice_app.parsers.validation import count_product_anchor_items, validate_shopee_product_amounts, validate_shopee_promotion_evidence
 
 
@@ -96,7 +96,9 @@ def test_percent_off_label_preserves_percent_and_container_total_separately():
 def test_container_subtotal_may_be_on_a_later_member_sku_row():
     first = _item("A", 1, None, "Any 4 at RM15.00")
     second = _item("B", 1, None)
-    second["positioned_sku_row_subtotal"] = Decimal("15.00")
+    second["_promotion_subtotal_candidates"] = [
+        {"id": "later-member-source", "amount": Decimal("15.00"), "struck_through": False},
+    ]
     third = _item("C", 1, None)
     fourth = _item("D", 1, None)
     normal = _item("NORMAL", 1, Decimal("4.80"))
@@ -176,3 +178,45 @@ def test_multiple_promotion_groups_require_one_unique_combination():
     assert third["source_group_total"] == fourth["source_group_total"] == Decimal("20.00")
 
     assert normal.get("promotion_group_id") is None
+
+
+def test_unlabelled_later_member_block_retains_subtotal_candidate():
+    columns = _Columns(
+        product_left=80,
+        unit_left=325,
+        unit_quantity_boundary=375,
+        quantity_subtotal_boundary=410,
+    )
+    metric_row = _Row(
+        top=100,
+        bottom=107,
+        words=(
+            PdfWord(text="4.90", x0=360, x1=376, top=100, bottom=107),
+            PdfWord(text="1", x0=400, x1=404, top=100, bottom=107),
+        ),
+    )
+    later_member_sku_row = _Row(
+        top=110,
+        bottom=117,
+        words=(
+            PdfWord(text="SKU:", x0=110, x1=122, top=110, bottom=117),
+            PdfWord(text="LATER-MEMBER", x0=124, x1=170, top=110, bottom=117),
+            PdfWord(text="15.00", x0=424, x1=440, top=110, bottom=117),
+        ),
+    )
+
+    item = _parse_positioned_item_block([metric_row, later_member_sku_row], columns, ())
+
+    assert item is not None
+    assert item["promotion"] == ""
+    assert item["_promotion_subtotal_candidates"] == [
+        {
+            "id": "1:2:424.00:110.00",
+            "amount": Decimal("15.00"),
+            "x0": 424,
+            "x1": 440,
+            "top": 110,
+            "bottom": 117,
+            "struck_through": False,
+        }
+    ]

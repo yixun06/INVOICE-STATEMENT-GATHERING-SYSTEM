@@ -436,3 +436,17 @@ No changes were made to:
 - Supplied Manual Review ZIP re-audit: all 26 formerly promotion-related Product Amount failures now resolve to their source group totals and are accepted; promotion-related Product Amount failures are zero. Seven genuinely ambiguous/incomplete promotion cases remain `INCOMPLETE_PROMOTION_EVIDENCE`; the two Product Count mismatches remain; 37 income-incomplete documents remain outside this change.
 - `2608259RPJPYNG` remains the original Refund-related Product Amount discrepancy and was not changed.
 - Full regression suite: `201 passed in 88.07s`, using a workspace-local pytest basetemp.
+
+
+## 59. Later-member promotion subtotal collection
+
+- Corrected the evidence collector to scan every SKU-anchored member block for Subtotal-column candidates, not only the block that contains the promotion label. A valid group total may be physically aligned on a later member SKU row.
+- Container ownership, strict strikethrough rejection, and order-level unique-combination certification remain unchanged. This is a source-evidence parser correction, not an inference from the promotion label.
+- Existing pricing behavior already allocates a certified group total by member quantity only when every member has the same resolved Product Master Unit Selling Price; mixed-price groups remain unsupported and do not receive guessed SKU actuals.
+
+## 60. Later-member collection verification
+
+- Added a parser-level regression for an unlabelled later member carrying RM15.00 in the Subtotal column, plus promotion-container and real-fixture regression: `32 passed in 15.28s`.
+- Supplied Manual Review ZIP re-audit: 30 Accepted, 3 `INCOMPLETE_PROMOTION_EVIDENCE`, 2 Product Count mismatches, 37 Income Completion Anchor Missing, and the unchanged Refund discrepancy. Promotion-related Product Amount failures remain zero.
+- The corrected direct-evidence samples are `2608210MU8Y8CH`, `260821W03YK44W`, `260826D5BNTGNU`, and `260826D6JQ2Q8E`; their PDF group totals are RM15.00, RM15.00, RM15.00, and RM44.00 respectively.
+- Full regression suite: `202 passed in 86.65s`, using a workspace-local pytest basetemp.

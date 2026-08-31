@@ -268,9 +268,7 @@ def _parse_positioned_item_block(
     if variation and variation.lower() not in product_name.lower():
         product_name = normalize_whitespace(f"{product_name} {variation}")
 
-    promotion_candidates = _promotion_subtotal_candidates(
-        block, columns, horizontal_rules,
-    ) if promotion else []
+    promotion_candidates = _promotion_subtotal_candidates(block, columns, horizontal_rules)
     return {
         "product_name": product_name,
         "seller_sku": sku_match.group(1).strip(),
