@@ -1,3 +1,9 @@
+# 2026-08-31 - Product Master Quality Report
+
+- Added a read-only Product Master Quality Report service for exact Shopee Invoice Seller SKU candidate diagnostics against both Product Listing SKU and Parent SKU.
+- The report makes candidate rows, unique candidate prices, matched-via evidence, lookup status, and Product Name/Variation mismatches auditable without changing parser, pricing, validation, review, reconciliation, or Product Summary runtime results.
+- Added synthetic coverage for parent-only/both candidate pools, duplicate same-price candidates, exact Name/Variation disambiguation, unresolved conflicts, not-found SKUs, mismatch evidence, and opt-in developer CSV output.
+
 # InvoiceGather changes — 2026-08-22
 
 This note records the InvoiceGather changes completed in this Codex session.
