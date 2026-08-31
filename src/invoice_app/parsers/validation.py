@@ -61,9 +61,34 @@ def count_valid_product_items(
     )
 
 
+def count_product_anchor_items(
+    items: list[dict[str, Any]],
+    *,
+    require_sku: bool,
+) -> int:
+    return sum(
+        1
+        for item in items
+        if parse_quantity(item.get("quantity")) > 0
+        and (
+            not require_sku
+            or str(item.get("seller_sku", "")).strip()
+            or bool(item.get("sku_missing_in_source"))
+        )
+    )
+
+
 def extract_expected_product_count(text: str) -> int | None:
     match = re.search(r"\bTotal\s+(\d+)\s+products?\b", text, flags=re.IGNORECASE)
     return int(match.group(1)) if match else None
+
+
+def validate_shopee_promotion_evidence(items: list[dict[str, Any]]) -> str | None:
+    for item in items:
+        if item.get("promotion_metadata_status") == "incomplete":
+            reason = str(item.get("promotion_incomplete_reason") or "Promotion source evidence is incomplete.")
+            return f"INCOMPLETE_PROMOTION_EVIDENCE: {reason}"
+    return None
 
 
 def validate_shopee_product_amounts(
@@ -181,7 +206,7 @@ def _is_missing_money(value: Any) -> bool:
 def _has_explicit_shopee_promotion(item: dict[str, Any]) -> bool:
     return bool(
         re.search(
-            r"\bAny\s+\d+\s+at\s+RM\s*[\d,]+(?:\.\d+)?",
+            r"\bAny\s+\d+\s+(?:at\s+RM\s*[\d,]+(?:\.\d+)?|enjoy\s+[\d,]+(?:\.\d+)?\s*%\s*off)",
             str(item.get("promotion", "")),
             flags=re.IGNORECASE,
         )

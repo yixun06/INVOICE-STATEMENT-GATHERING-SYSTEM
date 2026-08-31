@@ -407,3 +407,17 @@ No changes were made to:
 
 - Focused Shopee promotion parser, real-sample, and validation regression: 56 passed in 16.28s.
 - Full regression suite: 197 passed in 81.78s, using a workspace-local pytest basetemp.
+
+
+## 55. Promotion parser and source validation contract
+
+- Product Count now uses reliable Seller SKU + Quantity anchors. Product Name and individual line subtotals do not suppress an extracted promotion member.
+- Positioned and text fallback paths preserve Any N at RM and Any N enjoy P% off labels through the same promotion-container validation path.
+- Normal source line subtotals plus each complete promotion source group total reconcile once against Merchandise Subtotal. Existing pricing allocation and Refund reconciliation are unchanged.
+- When a promotion container, member set, or source group total cannot be coordinate-confirmed, Manual Review now reports INCOMPLETE_PROMOTION_EVIDENCE rather than treating members as ordinary line arithmetic.
+
+## 56. Promotion parser and source validation verification
+
+- Focused parser, source-validation, pricing, and real-fixture regression: 47 passed in 1.36s.
+- Local supplied review samples: 13 of 19 accepted; two Product Count cases retain genuinely missing anchors, two remain Income Completion Anchor Missing, one is explicit incomplete promotion evidence, and the existing Refund-related amount discrepancy remains unchanged.
+- Full regression suite: 197 passed in 69.31s, using a workspace-local pytest basetemp.

@@ -67,13 +67,16 @@ def parse_text_products(text: str) -> list[dict[str, Any]]:
 
         section = lines[header_index + 1 : section_end]
         sku_indexes = [index for index, line in enumerate(section) if re.search(r"\bSKU\s*:", line, re.I)]
+        section_items: list[dict[str, Any]] = []
         previous_sku = -1
         for sku_index in sku_indexes:
             block = section[previous_sku + 1 : sku_index + 1]
             item = _parse_text_item_block(block)
             if item:
-                items.append(item)
+                section_items.append(item)
             previous_sku = sku_index
+        _apply_group_promotion(section_items, promotion_group_id=f"shopee-promotion:text:section{header_position + 1}")
+        items.extend(section_items)
 
     return items or _parse_complete_rows(lines)
 
@@ -118,7 +121,7 @@ def reconcile_product_candidates(
 
     for item in text_items:
         sku = str(item.get("seller_sku", "")).strip()
-        if sku and sku not in seen_skus and _is_complete_item(item):
+        if sku and sku not in seen_skus and _has_product_anchor(item):
             result.append(item)
 
     return result
@@ -261,11 +264,14 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         product_name = normalize_whitespace(f"{product_name} {variation}")
 
     positioned_sku_row_subtotal = _subtotal_column_decimal(block[-1], columns)
-    promotion_container_subtotal = (
-        positioned_sku_row_subtotal
-        if promotion and source_line_subtotal is None
-        else None
-    )
+    promotion_pre_metric_subtotal = _subtotal_before_metric_row(block, columns, metric_row)
+    promotion_container_subtotal = None
+    if promotion:
+        promotion_container_subtotal = promotion_pre_metric_subtotal
+        if promotion_container_subtotal is None:
+            promotion_container_subtotal = _subtotal_after_metric_row(block, columns, metric_row)
+        if promotion_container_subtotal is None:
+            promotion_container_subtotal = positioned_sku_row_subtotal
     return {
         "product_name": product_name,
         "seller_sku": sku_match.group(1).strip(),
@@ -274,6 +280,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         "line_total": line_total,
         "source_line_subtotal": source_line_subtotal,
         "promotion_container_subtotal": promotion_container_subtotal,
+        "promotion_pre_metric_subtotal": promotion_pre_metric_subtotal,
         "positioned_sku_row_subtotal": positioned_sku_row_subtotal,
         "variation": variation,
         "promotion": promotion,
@@ -309,6 +316,36 @@ def _metrics_from_positioned_row(
         return None
     return unit_price, quantity, line_total
 
+
+
+def _subtotal_before_metric_row(
+    block: list[_Row],
+    columns: _Columns,
+    metric_row: _Row | None,
+) -> Decimal | None:
+    if metric_row is None:
+        return None
+    candidates = [
+        _subtotal_column_decimal(row, columns)
+        for row in block[:-1]
+        if row.top < metric_row.top
+    ]
+    return next((value for value in reversed(candidates) if value is not None), None)
+
+
+def _subtotal_after_metric_row(
+    block: list[_Row],
+    columns: _Columns,
+    metric_row: _Row | None,
+) -> Decimal | None:
+    if metric_row is None:
+        return None
+    candidates = [
+        _subtotal_column_decimal(row, columns)
+        for row in block[:-1]
+        if row.top > metric_row.top
+    ]
+    return next((value for value in candidates if value is not None), None)
 
 
 def _subtotal_column_decimal(row: _Row, columns: _Columns) -> Decimal | None:
@@ -405,17 +442,19 @@ def _apply_group_promotion(
             index += 1
             continue
 
-        source_group_totals = {
+        labelled_group_totals = {
             value
             for member in members
-            if isinstance(
-                value := (
-                    member.get("promotion_container_subtotal")
-                    or member.get("positioned_sku_row_subtotal")
-                ),
-                Decimal,
-            )
+            if _promotion_details(str(member.get("promotion", ""))) is not None
+            and isinstance(value := member.get("promotion_container_subtotal"), Decimal)
         }
+        source_group_totals = labelled_group_totals
+        if not source_group_totals:
+            source_group_totals = {
+                value
+                for member in members
+                if isinstance(value := (member.get("promotion_pre_metric_subtotal") or member.get("positioned_sku_row_subtotal")), Decimal)
+            }
         if len(source_group_totals) != 1:
             _mark_incomplete_promotion(
                 item, promotion_label, target_qty, advertised_amount, discount_percent,
@@ -530,6 +569,17 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
         source_line_subtotal = subtotal
         break
 
+    if metric_index < 0:
+        for index in range(len(block) - 2, -1, -1):
+            match = re.search(r"^(?P<body>.*?)(?P<unit>-?\d+(?:\.\d+)?)\s+(?P<qty>\d+)\b", block[index])
+            if not match:
+                continue
+            metric_index = index
+            metric_body = normalize_whitespace(match.group("body"))
+            unit_price = parse_decimal(match.group("unit"))
+            quantity = parse_quantity(match.group("qty"))
+            break
+
     name_parts: list[str] = []
     variation = ""
     promotion = ""
@@ -537,12 +587,15 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
         candidates = [metric_body] if index == metric_index else [line]
         for candidate in candidates:
             candidate = normalize_whitespace(candidate)
-            if not candidate or _is_product_noise(candidate):
+            if not candidate:
+                continue
+            if _promotion_details(candidate) is not None:
+                promotion = candidate
+                continue
+            if _is_product_noise(candidate):
                 continue
             if candidate.lower().startswith("variation:"):
                 variation = candidate
-            elif re.match(r"^Any\s+\d+\s+at\s+RM", candidate, flags=re.IGNORECASE):
-                promotion = candidate
             else:
                 name_parts.append(candidate)
 
@@ -632,14 +685,17 @@ def _is_product_noise(value: str) -> bool:
         "subtotal",
     }:
         return True
-    if re.match(r"^(?:any\s+)?\d+\s+at\s+rm", lowered):
+    if _promotion_details(value) is not None:
         return True
     return bool(re.fullmatch(r"(?:no\.?)?\s*product\(s\)", lowered))
 
 
-def _is_complete_item(item: dict[str, Any]) -> bool:
+def _has_product_anchor(item: dict[str, Any]) -> bool:
     return bool(
-        str(item.get("product_name", "")).strip()
-        and str(item.get("seller_sku", "")).strip()
+        str(item.get("seller_sku", "")).strip()
         and int(item.get("quantity", 0) or 0) > 0
     )
+
+
+def _is_complete_item(item: dict[str, Any]) -> bool:
+    return bool(str(item.get("product_name", "")).strip() and _has_product_anchor(item))

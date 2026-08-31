@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from .shopee_extractor import ShopeeExtractedData
 from .shopee_financial_parser import missing_income_detail_fields
 from .validation import (
-    count_valid_product_items,
+    count_product_anchor_items,
     extract_expected_product_count,
     format_validation_errors,
     validate_product_items,
     validate_shopee_financial_reconciliation,
+    validate_shopee_promotion_evidence,
     validate_shopee_product_amounts,
 )
 
@@ -37,24 +38,27 @@ def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | N
         )
 
     product_items = list(data.product_items)
-    valid_product_count = count_valid_product_items(product_items, require_sku=True)
-    if valid_product_count == 0:
+    product_anchor_count = count_product_anchor_items(product_items, require_sku=True)
+    if product_anchor_count == 0:
         return ShopeeReviewIssue(
             order_id=data.order_id,
-            reason="No Valid Product Extracted: no product row passed required-field validation.",
+            reason="No Valid Product Extracted: no product row had reliable Seller SKU and Quantity anchors.",
         )
 
     expected_product_count = extract_expected_product_count(data.normalized_text)
-    if expected_product_count is not None and valid_product_count != expected_product_count:
+    if expected_product_count is not None and product_anchor_count != expected_product_count:
         return ShopeeReviewIssue(
             order_id=data.order_id,
             reason=(
                 "Product Count Mismatch: "
                 f"source declares {expected_product_count} products, "
-                f"but {valid_product_count} valid products were extracted."
+                f"but {product_anchor_count} product anchors were extracted."
             ),
         )
 
+    promotion_evidence_error = validate_shopee_promotion_evidence(product_items)
+    if promotion_evidence_error:
+        return ShopeeReviewIssue(order_id=data.order_id, reason=promotion_evidence_error)
     validation_errors = validate_product_items(product_items, require_sku=True)
     if validation_errors:
         return ShopeeReviewIssue(
