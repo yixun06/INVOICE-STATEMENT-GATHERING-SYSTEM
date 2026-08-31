@@ -1,6 +1,7 @@
 from decimal import Decimal
+from src.invoice_app.pdf_document import PdfHorizontalRule, PdfWord
 
-from src.invoice_app.parsers.shopee_product_parser import _apply_group_promotion
+from src.invoice_app.parsers.shopee_product_parser import _apply_group_promotion, _is_struck_through, resolve_promotion_group_totals
 from src.invoice_app.parsers.validation import count_product_anchor_items, validate_shopee_product_amounts, validate_shopee_promotion_evidence
 
 
@@ -33,6 +34,7 @@ def test_container_membership_is_not_limited_by_any_target_quantity():
     normal["unit_price"] = Decimal("10.00")
 
     _apply_group_promotion([first, second, normal], promotion_group_id="p1")
+    resolve_promotion_group_totals([first, second, normal], Decimal("304.00"))
 
     assert first["promotion_group_id"] == second["promotion_group_id"]
     assert first["participating_qty"] == second["participating_qty"] == 7
@@ -81,6 +83,7 @@ def test_percent_off_label_preserves_percent_and_container_total_separately():
     third = _item("C", 1, None)
 
     _apply_group_promotion([first, second, third], promotion_group_id="p1")
+    resolve_promotion_group_totals([first, second, third], Decimal("159.01"))
 
     assert {item["promotion_label"] for item in (first, second, third)} == {"Any 3 enjoy 33% off"}
     assert {item["promotion_target_qty"] for item in (first, second, third)} == {3}
@@ -103,7 +106,73 @@ def test_container_subtotal_may_be_on_a_later_member_sku_row():
         promotion_group_id="p1",
     )
 
+    resolve_promotion_group_totals([first, second, third, fourth, normal], Decimal("19.80"))
     assert {item["source_group_total"] for item in (first, second, third, fourth)} == {Decimal("15.00")}
     assert {item["participating_qty"] for item in (first, second, third, fourth)} == {4}
     assert all(item["source_line_subtotal"] is None for item in (first, second, third, fourth))
+
+
+def test_strike_through_requires_horizontal_overlap_across_amount_middle_band():
+    amount = PdfWord(text="208.80", x0=435.6, x1=453.1, top=508.7, bottom=514.4)
+    crossing_rule = PdfHorizontalRule(x0=435.6, x1=453.1, top=511.1, bottom=511.6)
+    nearby_table_rule = PdfHorizontalRule(x0=420.0, x1=470.0, top=515.2, bottom=515.7)
+
+    assert _is_struck_through(amount, (crossing_rule,))
+    assert not _is_struck_through(amount, (nearby_table_rule,))
+
+
+def test_struck_original_candidate_is_rejected_before_reconciliation():
+    first = _item("A", 4, None, "Any 4 at RM176.40")
+    first["_promotion_subtotal_candidates"] = [
+        {"id": "actual", "amount": Decimal("176.40"), "struck_through": False},
+        {"id": "original", "amount": Decimal("208.80"), "struck_through": True},
+    ]
+    second = _item("B", 3, None)
+    normal = _item("NORMAL", 1, Decimal("10.00"))
+
+    _apply_group_promotion([first, second, normal], promotion_group_id="p1")
+    resolve_promotion_group_totals([first, second, normal], Decimal("186.40"))
+
+    assert first["source_group_total"] == second["source_group_total"] == Decimal("176.40")
+    assert first["promotion_target_qty"] == 4
+    assert first["participating_qty"] == 7
+
+
+def test_equally_reconciling_candidates_remain_incomplete():
+    first = _item("A", 1, None, "Any 2 at RM20.00")
+    first["_promotion_subtotal_candidates"] = [
+        {"id": "left", "amount": Decimal("20.00"), "struck_through": False},
+        {"id": "right", "amount": Decimal("20.00"), "struck_through": False},
+    ]
+    second = _item("B", 1, None)
+
+    _apply_group_promotion([first, second], promotion_group_id="p1")
+    resolve_promotion_group_totals([first, second], Decimal("20.00"))
+
+    assert validate_shopee_promotion_evidence([first, second]).startswith("INCOMPLETE_PROMOTION_EVIDENCE:")
+    assert "source_group_total" not in first
+
+
+def test_multiple_promotion_groups_require_one_unique_combination():
+    first = _item("A", 1, None, "Any 2 at RM15.00")
+    first["_promotion_subtotal_candidates"] = [
+        {"id": "a-actual", "amount": Decimal("15.00"), "struck_through": False},
+        {"id": "a-other", "amount": Decimal("18.00"), "struck_through": False},
+    ]
+    second = _item("B", 1, None)
+    third = _item("C", 1, None, "Any 2 at RM20.00")
+    third["_promotion_subtotal_candidates"] = [
+        {"id": "b-actual", "amount": Decimal("20.00"), "struck_through": False},
+        {"id": "b-other", "amount": Decimal("23.00"), "struck_through": False},
+    ]
+    fourth = _item("D", 1, None)
+    normal = _item("NORMAL", 1, Decimal("10.00"))
+
+    items = [first, second, third, fourth, normal]
+    _apply_group_promotion(items, promotion_group_id="p1")
+    resolve_promotion_group_totals(items, Decimal("45.00"))
+
+    assert first["source_group_total"] == second["source_group_total"] == Decimal("15.00")
+    assert third["source_group_total"] == fourth["source_group_total"] == Decimal("20.00")
+
     assert normal.get("promotion_group_id") is None

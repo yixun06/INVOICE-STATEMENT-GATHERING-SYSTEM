@@ -421,3 +421,18 @@ No changes were made to:
 - Focused parser, source-validation, pricing, and real-fixture regression: 47 passed in 1.36s.
 - Local supplied review samples: 13 of 19 accepted; two Product Count cases retain genuinely missing anchors, two remain Income Completion Anchor Missing, one is explicit incomplete promotion evidence, and the existing Refund-related amount discrepancy remains unchanged.
 - Full regression suite: 197 passed in 69.31s, using a workspace-local pytest basetemp.
+
+
+## 57. Shopee promotion group-total evidence resolver
+
+- Replaced nearest-row promotion subtotal selection with a three-step source contract: parser collects every Subtotal-column candidate owned by a promotion container, source validation rejects only true strikethrough candidates using horizontal-rule overlap through the amount middle band, then order-level reconciliation certifies exactly one candidate combination.
+- Promotion labels, original/struck prices, Merchandise Subtotal, vouchers, shipping, fees, and amounts outside the product-container boundary are not candidate totals. Numeric equality with an `Any N at RM...` label is not itself an exclusion.
+- Supports both `Any N at RM...` and `% off` labels through one container pipeline. Target quantity remains metadata and never gates participating quantity or Product Count.
+- Ambiguous, missing, or non-certifiable candidates now produce `INCOMPLETE_PROMOTION_EVIDENCE`; complete groups retain one `source_group_total` for validation. Pricing allocation, Product Master, Refund reconciliation, UI, and main remain unchanged.
+
+## 58. Promotion evidence resolver verification
+
+- Focused synthetic promotion, source-validation, and real-fixture regression: `60 passed in 15.23s`.
+- Supplied Manual Review ZIP re-audit: all 26 formerly promotion-related Product Amount failures now resolve to their source group totals and are accepted; promotion-related Product Amount failures are zero. Seven genuinely ambiguous/incomplete promotion cases remain `INCOMPLETE_PROMOTION_EVIDENCE`; the two Product Count mismatches remain; 37 income-incomplete documents remain outside this change.
+- `2608259RPJPYNG` remains the original Refund-related Product Amount discrepancy and was not changed.
+- Full regression suite: `201 passed in 88.07s`, using a workspace-local pytest basetemp.

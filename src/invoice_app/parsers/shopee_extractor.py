@@ -11,7 +11,7 @@ from .shopee_financial_parser import (
     parse_income_details,
     parse_voucher_detail,
 )
-from .shopee_product_parser import parse_text_products, reconcile_product_candidates
+from .shopee_product_parser import parse_text_products, reconcile_product_candidates, resolve_promotion_group_totals
 
 
 SHOPEE_ORDER_STATUSES = (
@@ -54,11 +54,13 @@ def extract_shopee_data(
 ) -> ShopeeExtractedData:
     normalized_text = normalize_pdf_text(text)
     order_id = extract_order_id(normalized_text, source_pdf)
+    income = parse_income_details(normalized_text)
     product_items = reconcile_product_candidates(
         positioned_items or [],
         parse_text_products(normalized_text),
     )
 
+    product_items = resolve_promotion_group_totals(product_items, income.get("merchandise_subtotal"))
     return ShopeeExtractedData(
         source_pdf=source_pdf,
         normalized_text=normalized_text,
@@ -76,7 +78,7 @@ def extract_shopee_data(
         completed_date=extract_completed_date(normalized_text),
         fund_transfer_date=extract_fund_transfer_date(normalized_text),
         product_items=tuple(product_items),
-        income=parse_income_details(normalized_text),
+        income=income,
         buyer_payment=parse_buyer_payment(normalized_text),
         voucher=parse_voucher_detail(normalized_text),
     )

@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
+from itertools import product
 from typing import Any
 
-from ..pdf_document import PdfDocument, PdfPage, PdfWord
+from ..pdf_document import PdfDocument, PdfHorizontalRule, PdfPage, PdfWord
 from ..utils.normalize import normalize_whitespace, parse_decimal, parse_quantity
 
 
@@ -153,7 +154,7 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
         previous_sku = header_index
         for sku_index in sku_indexes:
             block = rows[previous_sku + 1 : sku_index + 1]
-            item = _parse_positioned_item_block(block, columns)
+            item = _parse_positioned_item_block(block, columns, page.horizontal_rules)
             if item:
                 item["source_page"] = page.number
                 section_items.append(item)
@@ -214,7 +215,11 @@ def _columns_from_header(header: _Row) -> _Columns | None:
     )
 
 
-def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[str, Any] | None:
+def _parse_positioned_item_block(
+    block: list[_Row],
+    columns: _Columns,
+    horizontal_rules: tuple[PdfHorizontalRule, ...],
+) -> dict[str, Any] | None:
     if not block:
         return None
 
@@ -263,15 +268,9 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
     if variation and variation.lower() not in product_name.lower():
         product_name = normalize_whitespace(f"{product_name} {variation}")
 
-    positioned_sku_row_subtotal = _subtotal_column_decimal(block[-1], columns)
-    promotion_pre_metric_subtotal = _subtotal_before_metric_row(block, columns, metric_row)
-    promotion_container_subtotal = None
-    if promotion:
-        promotion_container_subtotal = promotion_pre_metric_subtotal
-        if promotion_container_subtotal is None:
-            promotion_container_subtotal = _subtotal_after_metric_row(block, columns, metric_row)
-        if promotion_container_subtotal is None:
-            promotion_container_subtotal = positioned_sku_row_subtotal
+    promotion_candidates = _promotion_subtotal_candidates(
+        block, columns, horizontal_rules,
+    ) if promotion else []
     return {
         "product_name": product_name,
         "seller_sku": sku_match.group(1).strip(),
@@ -279,9 +278,7 @@ def _parse_positioned_item_block(block: list[_Row], columns: _Columns) -> dict[s
         "unit_price": unit_price,
         "line_total": line_total,
         "source_line_subtotal": source_line_subtotal,
-        "promotion_container_subtotal": promotion_container_subtotal,
-        "promotion_pre_metric_subtotal": promotion_pre_metric_subtotal,
-        "positioned_sku_row_subtotal": positioned_sku_row_subtotal,
+        "_promotion_subtotal_candidates": promotion_candidates,
         "variation": variation,
         "promotion": promotion,
         "evidence": "positioned",
@@ -318,6 +315,52 @@ def _metrics_from_positioned_row(
 
 
 
+def _promotion_subtotal_candidates(
+    block: list[_Row],
+    columns: _Columns,
+    horizontal_rules: tuple[PdfHorizontalRule, ...],
+) -> list[dict[str, Any]]:
+    """Collect every decimal token owned by this promotion container's subtotal column."""
+    candidates: list[dict[str, Any]] = []
+    for row_index, row in enumerate(block):
+        for word_index, word in enumerate(row.words):
+            if word.x1 < columns.quantity_subtotal_boundary:
+                continue
+            amount = _first_decimal(word.text)
+            if amount is None or not re.search(r"\d+\.\d{2}", word.text.replace(",", "")):
+                continue
+            candidates.append(
+                {
+                    "id": f"{row_index}:{word_index}:{word.x0:.2f}:{word.top:.2f}",
+                    "amount": amount.quantize(Decimal("0.01")),
+                    "x0": word.x0,
+                    "x1": word.x1,
+                    "top": word.top,
+                    "bottom": word.bottom,
+                    "struck_through": _is_struck_through(word, horizontal_rules),
+                }
+            )
+    return candidates
+
+
+def _is_struck_through(
+    amount_word: PdfWord,
+    horizontal_rules: tuple[PdfHorizontalRule, ...],
+) -> bool:
+    """A rule must cross most of the amount's middle band, not merely be nearby."""
+    width = amount_word.x1 - amount_word.x0
+    height = amount_word.bottom - amount_word.top
+    if width <= 0 or height <= 0:
+        return False
+    middle_top = amount_word.top + height * 0.25
+    middle_bottom = amount_word.bottom - height * 0.25
+    for rule in horizontal_rules:
+        overlap = min(amount_word.x1, rule.x1) - max(amount_word.x0, rule.x0)
+        if overlap < width * 0.70:
+            continue
+        if middle_top <= rule.center_y <= middle_bottom:
+            return True
+    return False
 def _subtotal_before_metric_row(
     block: list[_Row],
     columns: _Columns,
@@ -442,27 +485,19 @@ def _apply_group_promotion(
             index += 1
             continue
 
-        labelled_group_totals = {
-            value
+        candidates = [
+            candidate
             for member in members
-            if _promotion_details(str(member.get("promotion", ""))) is not None
-            and isinstance(value := member.get("promotion_container_subtotal"), Decimal)
-        }
-        source_group_totals = labelled_group_totals
-        if not source_group_totals:
-            source_group_totals = {
-                value
-                for member in members
-                if isinstance(value := (member.get("promotion_pre_metric_subtotal") or member.get("positioned_sku_row_subtotal")), Decimal)
-            }
-        if len(source_group_totals) != 1:
+            for candidate in _promotion_candidates_for_item(member)
+        ]
+        if not candidates:
             _mark_incomplete_promotion(
                 item, promotion_label, target_qty, advertised_amount, discount_percent,
-                "Promotion container has no unique coordinate-confirmed source group subtotal.",
+                "Promotion container has no subtotal candidate inside its source ownership boundary.",
             )
             index += 1
             continue
-        source_group_total = next(iter(source_group_totals))
+        item["_promotion_subtotal_candidates"] = candidates
 
         group_number += 1
         group_id = f"{promotion_group_id}:group{group_number}"
@@ -475,14 +510,148 @@ def _apply_group_promotion(
                 member["promotion_advertised_amount"] = advertised_amount
             if discount_percent is not None:
                 member["promotion_discount_percent"] = discount_percent
-            member["source_group_total"] = source_group_total
-            member["promotion_group_total"] = source_group_total
             member["participating_qty"] = participating_qty
             member["promotion_member_qty"] = int(member.get("quantity", 0) or 0)
             member["promotion"] = promotion_label
             member["source_line_subtotal"] = None
             member["line_total"] = None
         index = next_index
+
+
+def _promotion_candidates_for_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_candidates = item.get("_promotion_subtotal_candidates")
+    if isinstance(raw_candidates, list):
+        return [dict(candidate) for candidate in raw_candidates if isinstance(candidate, dict)]
+
+    candidates: list[dict[str, Any]] = []
+    for field in (
+        "promotion_container_subtotal",
+        "promotion_pre_metric_subtotal",
+        "positioned_sku_row_subtotal",
+    ):
+        value = item.get(field)
+        if isinstance(value, Decimal):
+            candidates.append(
+                {"id": f"legacy:{field}", "amount": value, "struck_through": False}
+            )
+    return candidates
+
+def resolve_promotion_group_totals(
+    items: list[dict[str, Any]],
+    merchandise_subtotal: Any,
+) -> list[dict[str, Any]]:
+    """Certify exactly one owned promotion subtotal per container at order level."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        group_id = str(item.get("promotion_group_id") or "").strip()
+        if group_id:
+            groups.setdefault(group_id, []).append(item)
+    if not groups:
+        return items
+
+    group_members = list(groups.values())
+    candidate_sets: list[list[dict[str, Any]]] = []
+    for members in group_members:
+        candidates: list[dict[str, Any]] = []
+        seen_candidate_ids: set[str] = set()
+        for member in members:
+            for candidate in _promotion_candidates_for_item(member):
+                amount = _candidate_amount(candidate)
+                candidate_id = str(candidate.get("id") or "")
+                if amount is None or candidate.get("struck_through") or candidate_id in seen_candidate_ids:
+                    continue
+                seen_candidate_ids.add(candidate_id)
+                candidates.append({**candidate, "amount": amount})
+        if not candidates:
+            _mark_groups_incomplete(
+                group_members,
+                "Promotion container has no non-struck subtotal candidate inside its source ownership boundary.",
+            )
+            return items
+        candidate_sets.append(candidates)
+
+    normal_total = Decimal("0")
+    normal_subtotal_missing = False
+    for item in items:
+        if str(item.get("promotion_group_id") or "").strip():
+            continue
+        source_line_subtotal = _decimal_value(
+            item.get("source_line_subtotal", item.get("line_total"))
+        )
+        if source_line_subtotal is None:
+            normal_subtotal_missing = True
+            continue
+        normal_total += source_line_subtotal
+
+    seller_subtotal = _decimal_value(merchandise_subtotal)
+    if seller_subtotal is None or normal_subtotal_missing:
+        reason = (
+            "Merchandise Subtotal is unavailable for promotion source certification."
+            if seller_subtotal is None
+            else "A normal source line subtotal is unavailable for promotion source certification."
+        )
+        _mark_groups_incomplete(group_members, reason)
+        return items
+
+    valid_combinations: list[tuple[dict[str, Any], ...]] = []
+    for selected in product(*candidate_sets):
+        total = normal_total + sum((candidate["amount"] for candidate in selected), Decimal("0"))
+        if abs(total - seller_subtotal) <= Decimal("0.02"):
+            valid_combinations.append(selected)
+            if len(valid_combinations) > 1:
+                break
+
+    if len(valid_combinations) != 1:
+        _mark_groups_incomplete(
+            group_members,
+            "Promotion source candidates cannot be uniquely certified against Merchandise Subtotal.",
+        )
+        return items
+
+    for members, candidate in zip(group_members, valid_combinations[0]):
+        _set_group_total(members, candidate["amount"])
+    return items
+
+
+def _candidate_amount(candidate: dict[str, Any]) -> Decimal | None:
+    value = candidate.get("amount")
+    if isinstance(value, Decimal):
+        return value.quantize(Decimal("0.01"))
+    return _decimal_value(value)
+
+
+def _decimal_value(value: Any) -> Decimal | None:
+    if value is None or str(value).strip() in {"", "N/A"}:
+        return None
+    try:
+        return Decimal(str(value).replace(",", "").replace("RM", "").strip())
+    except InvalidOperation:
+        return None
+
+
+def _set_group_total(members: list[dict[str, Any]], source_group_total: Decimal) -> None:
+    for member in members:
+        member["source_group_total"] = source_group_total
+        member["promotion_group_total"] = source_group_total
+
+
+def _mark_groups_incomplete(
+    groups: list[list[dict[str, Any]]],
+    reason: str,
+) -> None:
+    for members in groups:
+        leading = members[0]
+        _mark_incomplete_promotion(
+            leading,
+            str(leading.get("promotion_label") or leading.get("promotion") or ""),
+            int(leading.get("promotion_target_qty", 0) or 0),
+            leading.get("promotion_advertised_amount"),
+            leading.get("promotion_discount_percent"),
+            reason,
+        )
+        for member in members:
+            member.pop("source_group_total", None)
+            member.pop("promotion_group_total", None)
 
 
 def _promotion_details(
