@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..utils.normalize import normalize_whitespace, parse_quantity
+from ..utils.normalize import normalize_sku_text, normalize_whitespace, parse_quantity
 from .batch_service import (
     MISSING_VALUE_PLACEHOLDER,
     PLATFORMS,
@@ -157,7 +157,7 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
     """Aggregate pricing rows by SKU plus Product Name/Variation price identity."""
     summaries: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
-        seller_sku = str(row.get("seller_sku", "")).strip()
+        seller_sku = normalize_sku_text(row.get("seller_sku"))
         if _is_missing(seller_sku):
             continue
         identity = (
@@ -317,6 +317,9 @@ def _price_master_unavailable(row: dict[str, Any]) -> dict[str, Any]:
 def _matched_lookup_statuses() -> frozenset[PriceLookupStatus]:
     return frozenset(
         {
+            PriceLookupStatus.MATCHED,
+            PriceLookupStatus.MATCHED_BY_ALIAS,
+            PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
             PriceLookupStatus.MATCHED_BY_SKU,
             PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
             PriceLookupStatus.MATCHED_BY_PARENT_SKU,
@@ -504,7 +507,7 @@ def _all_product_row(
     row = {
         "product_name": _display_value(product.get("product_name")),
         "unit_price": _display_value(product.get("unit_price")),
-        "seller_sku": _display_value(product.get("seller_sku")),
+        "seller_sku": normalize_sku_text(product.get("seller_sku")),
         "quantity": _display_value(product.get("quantity")),
         "delivery_fee": _display_value(delivery_fee),
         "platform": _display_value(platform),
@@ -517,7 +520,7 @@ def _all_product_row(
                 "reporting_sales_amount": _display_value(
                     product.get(_SALES_FIELD_BY_PLATFORM.get(platform, ""))
                 ),
-                "reporting_parent_sku": product.get("parent_sku"),
+                "reporting_parent_sku": normalize_sku_text(product.get("parent_sku")),
                 "reporting_variation_name": product.get("variation_name") or product.get("variation"),
                 "reporting_source_line_subtotal": product.get("source_line_subtotal"),
                 "reporting_promotion_group_id": product.get("promotion_group_id"),

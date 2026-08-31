@@ -10,7 +10,9 @@ from .product_price_master import (
     PriceLookupStatus,
     ProductPriceLookupResult,
     ProductPriceMaster,
+
 )
+from src.invoice_app.utils.normalize import normalize_product_identity, normalize_sku_text
 
 
 MONEY_QUANTUM = Decimal("0.01")
@@ -22,6 +24,9 @@ _MONEY_TEXT = re.compile(
 _MATCHED_LOOKUP_STATUSES = frozenset(
     {
         PriceLookupStatus.MATCHED_BY_SKU,
+        PriceLookupStatus.MATCHED,
+        PriceLookupStatus.MATCHED_BY_ALIAS,
+        PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
         PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
         PriceLookupStatus.MATCHED_BY_PARENT_SKU,
         PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION,
@@ -107,11 +112,15 @@ def _candidate(
     row: Mapping[str, Any],
     price_master: ProductPriceMaster,
 ) -> _PricingCandidate:
+    product_name, variation_name = normalize_product_identity(
+        _text(row.get("product_name")),
+        _text(row.get("variation_name")) or _text(row.get("variation")),
+    )
     lookup = price_master.lookup(
-        seller_sku=_text(row.get("seller_sku")),
-        parent_sku=_text(row.get("parent_sku")),
-        product_name=_text(row.get("product_name")),
-        variation_name=_text(row.get("variation_name")) or _text(row.get("variation")),
+        seller_sku=normalize_sku_text(row.get("seller_sku")),
+        parent_sku=normalize_sku_text(row.get("parent_sku")),
+        product_name=product_name,
+        variation_name=variation_name,
     )
     return _PricingCandidate(
         row_index=row_index,

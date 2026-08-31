@@ -35,20 +35,19 @@ def _row(
 def test_exact_sku_with_unique_price_matches():
     result = _master([_row()]).lookup(seller_sku="SKU-1")
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_SKU
+    assert result.status is PriceLookupStatus.MATCHED
     assert result.unit_selling_price == Decimal("12.50")
-    assert result.matched_by == "matched_by_sku"
+    assert result.matched_by == "matched"
 
 
-def test_duplicate_sku_with_same_price_matches():
+def test_duplicate_sku_with_same_price_is_conflict_without_identity_evidence():
     result = _master([
         _row(product_name="Product One"),
         _row(product_name="Product Two"),
     ]).lookup(seller_sku="SKU-1")
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_SKU
-    assert result.unit_selling_price == Decimal("12.50")
-    assert result.source_rows == (1, 2)
+    assert result.status is PriceLookupStatus.PRICING_CONFLICT
+    assert result.unit_selling_price is None
 
 
 def test_multiple_sku_prices_resolve_by_product_name():
@@ -57,7 +56,7 @@ def test_multiple_sku_prices_resolve_by_product_name():
         _row(product_name="Product Two", unit_selling_price="16.00"),
     ]).lookup(seller_sku="SKU-1", product_name=" product two ")
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION
+    assert result.status is PriceLookupStatus.MATCHED
     assert result.unit_selling_price == Decimal("16.00")
     assert result.matched_product_name == "Product Two"
 
@@ -79,20 +78,24 @@ def test_present_seller_sku_not_found_does_not_fallback_to_parent_sku():
 
     assert result.status is PriceLookupStatus.PRICE_NOT_FOUND
     assert result.unit_selling_price is None
-    assert "seller_sku" in result.reason
+    assert "MISSING-SKU" in result.reason
 
 
-def test_empty_seller_sku_falls_back_to_parent_sku():
+def test_blank_seller_sku_requires_exact_name_variation_identity():
     result = _master([
         _row(seller_sku="CHILD-SKU", parent_sku="PARENT-1"),
-    ]).lookup(seller_sku="", parent_sku="PARENT-1")
+    ]).lookup(
+        seller_sku="",
+        parent_sku="PARENT-1",
+        product_name="Product One",
+        variation_name="Blue",
+    )
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_PARENT_SKU
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
     assert result.unit_selling_price == Decimal("12.50")
-    assert result.matched_parent_sku == "PARENT-1"
 
 
-def test_parent_sku_multiple_prices_resolve_by_variation_name():
+def test_invalid_sku_name_variation_requires_one_identity_not_one_price():
     result = _master([
         _row(
             seller_sku="CHILD-BLUE",
@@ -104,9 +107,13 @@ def test_parent_sku_multiple_prices_resolve_by_variation_name():
             variation_name="Red",
             unit_selling_price="16.00",
         ),
-    ]).lookup(seller_sku="", parent_sku="PARENT-1", variation_name="red")
+    ]).lookup(
+        seller_sku="exp",
+        product_name="Product One",
+        variation_name="red",
+    )
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
     assert result.unit_selling_price == Decimal("16.00")
     assert result.matched_sku == "CHILD-RED"
 
@@ -128,7 +135,7 @@ def test_sku_is_preserved_as_string_when_loaded(tmp_path):
     result = master.lookup(seller_sku="00123")
 
     assert master.records[0].seller_sku == "00123"
-    assert result.status is PriceLookupStatus.MATCHED_BY_SKU
+    assert result.status is PriceLookupStatus.MATCHED
     assert result.unit_selling_price == Decimal("9.90")
 
 
@@ -176,6 +183,34 @@ def test_seller_sku_matches_master_parent_sku_without_column_priority():
         _row(seller_sku="CHILD", parent_sku="SOURCE-SKU", unit_selling_price="12.50"),
     ]).lookup(seller_sku="SOURCE-SKU")
 
-    assert result.status is PriceLookupStatus.MATCHED_BY_SKU
+    assert result.status is PriceLookupStatus.MATCHED
     assert result.unit_selling_price == Decimal("12.50")
     assert result.matched_parent_sku == "SOURCE-SKU"
+
+
+def test_less_alias_is_only_used_after_the_original_sku_has_no_candidates():
+    result = _master([
+        _row(seller_sku="9555208106654", variation_name="25% Less Sweet"),
+    ]).lookup(
+        seller_sku="9555208106654-Less",
+        product_name="Product One",
+        variation_name="25%LessSweet",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_ALIAS
+    assert result.alias_rule == "REMOVE_SUFFIX_LESS"
+    assert result.unit_selling_price == Decimal("12.50")
+
+
+def test_unknown_sku_suffix_is_not_an_alias():
+    result = _master([_row(seller_sku="SKU-1")]).lookup(seller_sku="SKU-1-Other")
+
+    assert result.status is PriceLookupStatus.PRICE_NOT_FOUND
+
+
+def test_numeric_master_sku_is_normalized_without_inventing_leading_zero():
+    master = _master([_row(seller_sku=9555208106364.0)])
+    result = master.lookup(seller_sku=9555208106364.0)
+
+    assert master.records[0].seller_sku == "9555208106364"
+    assert result.status is PriceLookupStatus.MATCHED

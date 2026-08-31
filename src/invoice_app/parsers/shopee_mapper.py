@@ -177,6 +177,7 @@ def map_shopee_products(
             "invoice_date": data.order_created_date,
             "order_created_date": data.order_created_date,
             "product_name": item["product_name"],
+            "variation_name": item.get("variation", ""),
             "seller_sku": item["seller_sku"],
             "quantity": quantity,
             "unit_price": unit_price_text,

@@ -40,7 +40,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
                 "platform": "Shopee",
                 "order_id": "00123456789",
                 "product_name": "Organic vegetable bundle",
-                "seller_sku": "0000456",
+                "seller_sku": 9555208106364.0,
                 "quantity": "3",
                 "unit_price": "12.50",
             }
@@ -108,7 +108,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert orders["A4"].border.left.color.rgb == "00000000"
 
     products = workbook["Products"]
-    assert products["D4"].value == "0000456"
+    assert products["D4"].value == "9555208106364"
     assert products["D4"].number_format == "@"
     assert products["E4"].value == 3
     assert products["E4"].number_format == "#,##0"

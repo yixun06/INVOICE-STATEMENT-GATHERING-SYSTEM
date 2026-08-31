@@ -236,7 +236,8 @@ def test_parse_real_shopee_order_received_financials():
     assert products[0]["quantity"] == 1
     assert products[0]["unit_price"] == "18.00"
     assert products[0]["line_subtotal"] == "18.00"
-    assert products[2]["product_name"] == "Better Gourmet Multigrain Ring 40g (HALAL) Variation: Onion"
+    assert products[2]["product_name"] == "Better Gourmet Multigrain Ring 40g (HALAL)"
+    assert products[2]["variation_name"] == "Onion"
     assert products[2]["seller_sku"] == "9555208018803"
     assert products[2]["quantity"] == 2
     assert products[2]["unit_price"] == "3.51"
@@ -305,7 +306,7 @@ def test_parse_real_shopee_promotional_bundle_allocation():
         "9555208013969-New",
         "9555208013938",
     }
-    assert all("Variation: 500ml" in item["product_name"] for item in extracted.product_items)
+    assert {item["variation"] for item in extracted.product_items} == {"500ml"}
     assert any("蓝靛果汁" in item["product_name"] for item in extracted.product_items)
     assert any("沙棘果汁" in item["product_name"] for item in extracted.product_items)
     assert validate_shopee_product_amounts(

@@ -7,7 +7,7 @@ from itertools import product
 from typing import Any
 
 from ..pdf_document import PdfDocument, PdfHorizontalRule, PdfPage, PdfWord
-from ..utils.normalize import normalize_whitespace, parse_decimal, parse_quantity
+from ..utils.normalize import normalize_product_identity, normalize_whitespace, parse_decimal, parse_quantity
 
 
 PRODUCT_STOP_MARKERS = (
@@ -264,9 +264,7 @@ def _parse_positioned_item_block(
             continue
         name_parts.append(candidate)
 
-    product_name = normalize_whitespace(" ".join(name_parts))
-    if variation and variation.lower() not in product_name.lower():
-        product_name = normalize_whitespace(f"{product_name} {variation}")
+    product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
 
     promotion_candidates = _promotion_subtotal_candidates(block, columns, horizontal_rules)
     return {
@@ -425,9 +423,7 @@ def _parse_positioned_items_without_sku(
             elif not re.search(r"(?:Any\s+)?\d+\s+at\s+RM", candidate, flags=re.IGNORECASE):
                 name_parts.append(candidate)
 
-        product_name = normalize_whitespace(" ".join(name_parts))
-        if variation and variation.lower() not in product_name.lower():
-            product_name = normalize_whitespace(f"{product_name} {variation}")
+        product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
         items.append(
             {
                 "product_name": product_name,
@@ -766,9 +762,7 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
             else:
                 name_parts.append(candidate)
 
-    product_name = normalize_whitespace(" ".join(name_parts))
-    if variation and variation.lower() not in product_name.lower():
-        product_name = normalize_whitespace(f"{product_name} {variation}")
+    product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
 
     return {
         "product_name": product_name,

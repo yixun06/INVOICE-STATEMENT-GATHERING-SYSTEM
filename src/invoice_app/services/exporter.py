@@ -11,6 +11,8 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.workbook import Workbook
+from ..utils.normalize import normalize_sku_text
+
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -175,6 +177,9 @@ def _frame_for_export(
     column_labels: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     dataframe = pd.DataFrame(list(rows))
+    for sku_column in ("seller_sku", "parent_sku", "shop_sku"):
+        if sku_column in dataframe.columns:
+            dataframe[sku_column] = dataframe[sku_column].map(normalize_sku_text)
     if not columns:
         return dataframe.rename(columns=column_labels or {})
     for column in columns:

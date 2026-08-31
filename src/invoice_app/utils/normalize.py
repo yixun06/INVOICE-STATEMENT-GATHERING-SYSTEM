@@ -2,10 +2,61 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 
 def normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+_VARIATION_MARKER = re.compile(
+    r"^(?P<name>.*?)(?:\s+|^)variation\s*:\s*(?P<variation>.+)$",
+    re.IGNORECASE,
+)
+
+
+def normalize_sku_text(value: Any) -> str:
+    """Return a display-safe identifier without changing an existing string SKU."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, Decimal):
+        return format(value, "f").rstrip("0").rstrip(".") if value.as_tuple().exponent < 0 else format(value, "f")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not value.is_integer():
+            return format(value, "f").rstrip("0").rstrip(".")
+        return format(value, ".0f")
+    return str(value).strip()
+
+
+def normalize_match_text(value: str | None) -> str:
+    """Deterministic exact comparison key: case-insensitive with whitespace removed."""
+    return re.sub(r"\s+", "", normalize_whitespace(value or "")).casefold()
+
+
+def normalize_product_identity(
+    product_name: str | None,
+    variation_name: str | None,
+) -> tuple[str, str]:
+    """Keep product and Variation source fields independent when the marker is embedded."""
+    name = normalize_whitespace(product_name or "")
+    variation = normalize_whitespace(variation_name or "")
+    embedded = _VARIATION_MARKER.fullmatch(name)
+    if embedded:
+        name = normalize_whitespace(embedded.group("name"))
+        embedded_variation = normalize_whitespace(embedded.group("variation"))
+        if not variation:
+            variation = embedded_variation
+    if variation:
+        marker = re.fullmatch(r"variation\s*:\s*(.+)", variation, re.IGNORECASE)
+        if marker:
+            variation = normalize_whitespace(marker.group(1))
+    return name, variation
 
 
 def parse_decimal(value: str | float | int | Decimal | None) -> Decimal:

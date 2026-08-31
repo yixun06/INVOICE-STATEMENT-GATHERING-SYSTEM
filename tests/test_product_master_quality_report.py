@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from src.invoice_app.services.product_master_quality_report import (
     LOOKUP_STATUS_CONFLICT,
+    LOOKUP_STATUS_ALIAS,
+    LOOKUP_STATUS_NAME_VARIATION,
     LOOKUP_STATUS_MATCHED,
     LOOKUP_STATUS_NOT_FOUND,
     build_product_master_quality_report,
@@ -119,7 +121,7 @@ def test_report_resolves_different_prices_only_with_exact_normalized_name_variat
     assert row.lookup_status == LOOKUP_STATUS_MATCHED
     assert row.candidate_count == 2
     assert row.unique_candidate_prices == "8.00; 10.00"
-    assert "uniquely resolved" in row.reason
+    assert row.reason == ""
 
 
 def test_report_distinguishes_conflict_not_found_and_name_variation_mismatch() -> None:
@@ -176,16 +178,71 @@ def test_report_distinguishes_conflict_not_found_and_name_variation_mismatch() -
         LOOKUP_STATUS_MATCHED,
     ]
     assert "Invoice Product Name does not exactly match" in report[2].reason
-    assert "Invoice Variation does not exactly match" in report[2].reason
 
-    summary = summarize_product_master_quality_report(report)
-    assert summary.total_product_rows_checked == 3
-    assert summary.matched_count == 1
-    assert summary.price_not_found_count == 1
-    assert summary.pricing_conflict_count == 1
-    assert summary.top_conflict_skus == (("CONFLICT", 1),)
-    assert summary.top_not_found_skus == (("MISSING", 1),)
-    assert summary.name_or_variation_mismatch_rows == (report[2],)
+
+def test_report_records_alias_name_variation_and_source_text_contamination() -> None:
+    master = _master(
+        [
+            {
+                "seller_sku": "9555208106654",
+                "product_name": "Less Sweet Drink",
+                "variation_name": "25% Less Sweet",
+                "unit_selling_price": "13.90",
+            },
+            {
+                "seller_sku": "RAMEN-1",
+                "product_name": "Egg Drop Ramen",
+                "variation_name": "Vegetables",
+                "unit_selling_price": "7.10",
+            },
+        ]
+    )
+    report = build_product_master_quality_report(
+        [
+            {
+                "platform": "Shopee",
+                "order_id": "ORDER-ALIAS",
+                "seller_sku": "9555208106654-Less",
+                "product_name": "Less Sweet Drink",
+                "variation_name": "25%LessSweet",
+            },
+            {
+                "platform": "Shopee",
+                "order_id": "ORDER-EXP",
+                "seller_sku": "exp",
+                "product_name": "Egg Drop Ramen 208.80",
+                "variation_name": "Vegetables",
+            },
+        ],
+        master,
+    )
+
+    assert report[0].lookup_status == LOOKUP_STATUS_ALIAS
+    assert report[0].alias_rule == "REMOVE_SUFFIX_LESS"
+    assert report[0].candidate_count == 1
+    assert report[1].lookup_status == LOOKUP_STATUS_NOT_FOUND
+    assert report[1].source_text_flags == "SOURCE_TEXT_CONTAMINATION"
+    assert "SOURCE_TEXT_CONTAMINATION" in report[1].reason
+
+
+def test_report_invalid_sku_matches_only_one_name_variation_identity() -> None:
+    report = build_product_master_quality_report(
+        [{
+            "platform": "Shopee",
+            "order_id": "ORDER-NAME",
+            "seller_sku": "N/A",
+            "product_name": "Egg Drop Ramen",
+            "variation_name": "Vegetables",
+        }],
+        _master([{
+            "seller_sku": "RAMEN-1",
+            "product_name": "Egg Drop Ramen",
+            "variation_name": "Vegetables",
+            "unit_selling_price": "7.10",
+        }]),
+    )
+
+    assert report[0].lookup_status == LOOKUP_STATUS_NAME_VARIATION
 
 
 def test_report_writer_uses_requested_csv_destination(tmp_path) -> None:

@@ -11,7 +11,11 @@ from typing import Any, Iterable, Mapping
 
 from openpyxl import load_workbook
 
-from src.invoice_app.utils.normalize import normalize_whitespace
+from src.invoice_app.utils.normalize import (
+    normalize_match_text,
+    normalize_sku_text,
+    normalize_whitespace,
+)
 
 
 class PriceLookupStatus(str, Enum):
@@ -19,6 +23,9 @@ class PriceLookupStatus(str, Enum):
     MATCHED_BY_SKU_NAME_VARIATION = "matched_by_sku_name_variation"
     MATCHED_BY_PARENT_SKU = "matched_by_parent_sku"
     MATCHED_BY_PARENT_SKU_NAME_VARIATION = "matched_by_parent_sku_name_variation"
+    MATCHED = "matched"
+    MATCHED_BY_ALIAS = "matched_by_alias"
+    MATCHED_BY_NAME_VARIATION = "matched_by_name_variation"
     PRICING_CONFLICT = "pricing_conflict"
     PRICE_NOT_FOUND = "price_not_found"
 
@@ -57,6 +64,7 @@ class ProductPriceLookupResult:
     source_rows: tuple[int, ...]
     reason: str | None = None
 
+    alias_rule: str | None = None
 
 _REQUIRED_HEADERS = {
     "product_name": "product name",
@@ -104,8 +112,8 @@ class ProductPriceMaster:
                     field: row[index] if index < len(row) else None
                     for field, index in columns.items()
                 }
-                seller_sku = _sku_text(values["seller_sku"])
-                parent_sku = _sku_text(values["parent_sku"])
+                seller_sku = normalize_sku_text(values["seller_sku"])
+                parent_sku = normalize_sku_text(values["parent_sku"])
                 if not seller_sku and not parent_sku:
                     continue
 
@@ -151,8 +159,8 @@ class ProductPriceMaster:
         candidate_rows = 0
         invalid_prices = 0
         for source_row, row in enumerate(rows, start=1):
-            seller_sku = _sku_text(row.get("seller_sku"))
-            parent_sku = _sku_text(row.get("parent_sku"))
+            seller_sku = normalize_sku_text(row.get("seller_sku"))
+            parent_sku = normalize_sku_text(row.get("parent_sku"))
             if not seller_sku and not parent_sku:
                 continue
             candidate_rows += 1
@@ -191,61 +199,138 @@ class ProductPriceMaster:
         product_name: str | None = None,
         variation_name: str | None = None,
     ) -> ProductPriceLookupResult:
-        """Resolve one price without parser, UI, allocation, or money guessing."""
-        requested_seller_sku = _sku_text(seller_sku)
-        if requested_seller_sku:
-            candidates = _unique_records(
-                self._seller_sku_index.get(requested_seller_sku, ())
-                + self._parent_sku_index.get(requested_seller_sku, ())
-            )
-            return self._resolve(
-                candidates,
-                match_scope="seller_sku_or_parent_sku",
-                requested_sku=requested_seller_sku,
-                product_name=product_name,
-                variation_name=variation_name,
-            )
-        requested_parent_sku = _sku_text(parent_sku)
-        if requested_parent_sku:
-            return self._resolve(
-                self._parent_sku_index.get(requested_parent_sku, ()),
-                match_scope="parent_sku",
-                requested_sku=requested_parent_sku,
-                product_name=product_name,
-                variation_name=variation_name,
-            )
-        return self._not_found("Seller SKU and Parent SKU are both blank.")
+        """Resolve one price only when it identifies one master product identity."""
+        requested_seller_sku = normalize_sku_text(seller_sku)
+        if _is_invalid_sku(requested_seller_sku):
+            return self._resolve_name_variation(product_name, variation_name)
 
-    def _resolve(
+        candidates = self._sku_candidates(requested_seller_sku)
+        if candidates:
+            return self._resolve_sku_candidates(
+                candidates,
+                product_name=product_name,
+                variation_name=variation_name,
+            )
+
+        if requested_seller_sku.endswith("-Less"):
+            alias_candidates = self._sku_candidates(
+                requested_seller_sku.removesuffix("-Less")
+            )
+            if alias_candidates:
+                return self._resolve_sku_candidates(
+                    alias_candidates,
+                    product_name=product_name,
+                    variation_name=variation_name,
+                    alias_rule="REMOVE_SUFFIX_LESS",
+                )
+        return self._not_found(
+            f"No Product Listing SKU or Parent SKU matches '{requested_seller_sku}'."
+        )
+
+    def _sku_candidates(
+        self,
+        requested_sku: str,
+    ) -> tuple[ProductPriceMasterRecord, ...]:
+        return _unique_records(
+            self._seller_sku_index.get(requested_sku, ())
+            + self._parent_sku_index.get(requested_sku, ())
+        )
+
+    def _resolve_sku_candidates(
         self,
         candidates: tuple[ProductPriceMasterRecord, ...],
         *,
-        match_scope: str,
-        requested_sku: str,
+        product_name: str | None,
+        variation_name: str | None,
+        alias_rule: str | None = None,
+    ) -> ProductPriceLookupResult:
+        if _has_one_identity(candidates):
+            return self._matched_identity(
+                candidates,
+                status=(
+                    PriceLookupStatus.MATCHED_BY_ALIAS
+                    if alias_rule
+                    else PriceLookupStatus.MATCHED
+                ),
+                alias_rule=alias_rule,
+            )
+
+        narrowed = _match_name_variation(candidates, product_name, variation_name)
+        if narrowed and _has_one_identity(narrowed):
+            return self._matched_identity(
+                narrowed,
+                status=(
+                    PriceLookupStatus.MATCHED_BY_ALIAS
+                    if alias_rule
+                    else PriceLookupStatus.MATCHED
+                ),
+                alias_rule=alias_rule,
+            )
+
+        if narrowed:
+            evidence = narrowed
+            reason = (
+                "Multiple master identities remain after exact Product Name / "
+                "Variation matching."
+            )
+        elif _has_disambiguation_input(product_name, variation_name):
+            evidence = candidates
+            reason = (
+                "Product Name / Variation did not identify one candidate master identity."
+            )
+        else:
+            evidence = candidates
+            reason = (
+                "Multiple master identities require exact Product Name / Variation "
+                "disambiguation."
+            )
+        return self._conflict(evidence, reason)
+
+    def _resolve_name_variation(
+        self,
         product_name: str | None,
         variation_name: str | None,
     ) -> ProductPriceLookupResult:
+        if not _match_text(product_name):
+            return self._not_found(
+                "Seller SKU is blank, N/A, or exp and Product Name is unavailable."
+            )
+        candidates = _match_name_variation(self.records, product_name, variation_name)
         if not candidates:
             return self._not_found(
-                f"No Product Listing price matches {match_scope} '{requested_sku}'."
+                "No Product Listing identity exactly matches Product Name / Variation."
             )
-        if _has_one_price(candidates):
-            return self._matched(candidates, match_scope, disambiguated=False)
+        if _has_one_identity(candidates):
+            return self._matched_identity(
+                candidates,
+                status=PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
+            )
+        return self._conflict(
+            candidates,
+            "Product Name / Variation matches multiple master identities.",
+        )
 
-        narrowed = _match_name_variation(candidates, product_name, variation_name)
-        if narrowed and _has_one_price(narrowed):
-            return self._matched(narrowed, match_scope, disambiguated=True)
+    def _matched_identity(
+        self,
+        records: tuple[ProductPriceMasterRecord, ...],
+        *,
+        status: PriceLookupStatus,
+        alias_rule: str | None = None,
+    ) -> ProductPriceLookupResult:
+        record = min(records, key=lambda item: item.source_row)
+        return ProductPriceLookupResult(
+            status=status,
+            unit_selling_price=record.unit_selling_price,
+            matched_by=status.value,
+            matched_sku=record.seller_sku or None,
+            matched_parent_sku=record.parent_sku or None,
+            matched_product_name=record.product_name or None,
+            matched_variation_name=record.variation_name or None,
+            source_metadata=self.metadata,
+            source_rows=tuple(sorted(item.source_row for item in records)),
+            alias_rule=alias_rule,
+        )
 
-        if narrowed:
-            reason = "Multiple Product Listing prices remain after Product Name / Variation Name matching."
-            evidence = narrowed
-        elif _has_disambiguation_input(product_name, variation_name):
-            reason = "Product Name / Variation Name did not uniquely identify a Product Listing price."
-            evidence = candidates
-        else:
-            reason = "Multiple Product Listing prices require Product Name or Variation Name disambiguation."
-            evidence = candidates
-        return self._conflict(evidence, reason)
 
     def _matched(
         self,
@@ -393,7 +478,26 @@ def _match_name_variation(
 
 
 def _match_text(value: str | None) -> str:
-    return normalize_whitespace(value or "").casefold()
+    return normalize_match_text(value)
+
+
+def _is_invalid_sku(value: str) -> bool:
+    return not value or value.casefold() in {"n/a", "exp"}
+
+
+def _has_one_identity(records: tuple[ProductPriceMasterRecord, ...]) -> bool:
+    return len({_identity_key(record) for record in records}) == 1
+
+
+def _identity_key(record: ProductPriceMasterRecord) -> tuple[str, str, str, str, Decimal]:
+    return (
+        normalize_sku_text(record.seller_sku),
+        normalize_sku_text(record.parent_sku),
+        _match_text(record.product_name),
+        _match_text(record.variation_name),
+        record.unit_selling_price,
+    )
+
 
 
 def _unique_records(records: Iterable[ProductPriceMasterRecord]) -> tuple[ProductPriceMasterRecord, ...]:

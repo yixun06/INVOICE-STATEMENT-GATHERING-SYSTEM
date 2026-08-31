@@ -8,6 +8,8 @@ data without the application guessing a price.
 
 from __future__ import annotations
 
+import re
+
 import csv
 from collections import Counter
 from dataclasses import dataclass
@@ -16,15 +18,26 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from src.invoice_app.services.product_price_master import (
+    PriceLookupStatus,
     ProductPriceMaster,
     ProductPriceMasterRecord,
 )
-from src.invoice_app.utils.normalize import normalize_whitespace
+from src.invoice_app.utils.normalize import (
+    normalize_match_text,
+    normalize_product_identity,
+    normalize_sku_text,
+    normalize_whitespace,
+)
 
 
 LOOKUP_STATUS_MATCHED = "MATCHED"
 LOOKUP_STATUS_NOT_FOUND = "PRICE_NOT_FOUND"
 LOOKUP_STATUS_CONFLICT = "PRICING_CONFLICT"
+LOOKUP_STATUS_ALIAS = "MATCHED_BY_ALIAS"
+LOOKUP_STATUS_NAME_VARIATION = "MATCHED_BY_NAME_VARIATION"
+_MATCHED_STATUSES = frozenset(
+    {LOOKUP_STATUS_MATCHED, LOOKUP_STATUS_ALIAS, LOOKUP_STATUS_NAME_VARIATION}
+)
 _CSV_COLUMNS = (
     "Platform",
     "Order ID",
@@ -34,6 +47,8 @@ _CSV_COLUMNS = (
     "Matched Via",
     "Master Source Row(s)",
     "Master SKU",
+    "Alias Rule",
+    "Source Text Flags",
     "Master Parent SKU",
     "Master Product Name",
     "Master Variation",
@@ -59,6 +74,8 @@ class ProductMasterQualityReportRow:
     master_parent_sku: str
     master_product_name: str
     master_variation: str
+    alias_rule: str
+    source_text_flags: str
     candidate_count: int
     unique_candidate_prices: str
     lookup_status: str
@@ -81,6 +98,8 @@ class ProductMasterQualityReportRow:
             "Unique Candidate Prices": self.unique_candidate_prices,
             "Lookup Status": self.lookup_status,
             "Reason": self.reason,
+            "Alias Rule": self.alias_rule,
+            "Source Text Flags": self.source_text_flags,
         }
 
 
@@ -90,6 +109,8 @@ class ProductMasterQualityReportSummary:
     matched_count: int
     price_not_found_count: int
     pricing_conflict_count: int
+    matched_by_alias_count: int
+    matched_by_name_variation_count: int
     top_conflict_skus: tuple[tuple[str, int], ...]
     top_not_found_skus: tuple[tuple[str, int], ...]
     name_or_variation_mismatch_rows: tuple[ProductMasterQualityReportRow, ...]
@@ -133,7 +154,9 @@ def summarize_product_master_quality_report(
     )
     return ProductMasterQualityReportSummary(
         total_product_rows_checked=len(rows),
-        matched_count=sum(row.lookup_status == LOOKUP_STATUS_MATCHED for row in rows),
+        matched_count=sum(row.lookup_status in _MATCHED_STATUSES for row in rows),
+        matched_by_alias_count=sum(row.lookup_status == LOOKUP_STATUS_ALIAS for row in rows),
+        matched_by_name_variation_count=sum(row.lookup_status == LOOKUP_STATUS_NAME_VARIATION for row in rows),
         price_not_found_count=sum(
             row.lookup_status == LOOKUP_STATUS_NOT_FOUND for row in rows
         ),
@@ -166,18 +189,37 @@ def _diagnose_row(
 ) -> ProductMasterQualityReportRow:
     platform = _display(invoice_row.get("platform"))
     order_id = _display(invoice_row.get("order_id"))
-    seller_sku = _sku_text(invoice_row.get("seller_sku"))
-    product_name = _display(invoice_row.get("product_name"))
-    variation = _display(
+    seller_sku = normalize_sku_text(invoice_row.get("seller_sku"))
+    raw_product_name = _display(invoice_row.get("product_name"))
+    raw_variation = _display(
         invoice_row.get("variation_name")
         or invoice_row.get("variation")
         or invoice_row.get("reporting_variation_name")
     )
-    candidates = _exact_candidate_pool(price_master.records, seller_sku)
-    matched_via = _matched_via(candidates, seller_sku)
-    status, primary_reason = _lookup_outcome(candidates, seller_sku, product_name, variation)
-    mismatch_reasons = _identity_mismatch_reasons(candidates, product_name, variation)
-    reason = "; ".join((primary_reason, *mismatch_reasons))
+    product_name, variation = normalize_product_identity(raw_product_name, raw_variation)
+    lookup = price_master.lookup(
+        seller_sku=seller_sku,
+        product_name=product_name,
+        variation_name=variation,
+    )
+    direct_candidates = _exact_candidate_pool(price_master.records, seller_sku)
+    alias_candidates = (
+        _exact_candidate_pool(price_master.records, seller_sku.removesuffix("-Less"))
+        if not direct_candidates and seller_sku.endswith("-Less")
+        else ()
+    )
+    source_rows = set(lookup.source_rows)
+    resolved_records = tuple(
+        record for record in price_master.records if record.source_row in source_rows
+    )
+    evidence = direct_candidates or alias_candidates or resolved_records
+    mismatch_reasons = _identity_mismatch_reasons(
+        direct_candidates, product_name, variation
+    )
+    contamination = _source_text_flags(raw_product_name)
+    reason_parts = [part for part in (lookup.reason, *mismatch_reasons) if part]
+    if contamination:
+        reason_parts.append("SOURCE_TEXT_CONTAMINATION")
 
     return ProductMasterQualityReportRow(
         platform=platform,
@@ -185,17 +227,47 @@ def _diagnose_row(
         invoice_seller_sku=seller_sku,
         invoice_product_name=product_name,
         invoice_variation=variation,
-        matched_via=matched_via,
-        master_source_rows=_join(record.source_row for record in candidates),
-        master_sku=_join(record.seller_sku for record in candidates),
-        master_parent_sku=_join(record.parent_sku for record in candidates),
-        master_product_name=_join(record.product_name for record in candidates),
-        master_variation=_join(record.variation_name for record in candidates),
-        candidate_count=len(candidates),
-        unique_candidate_prices=_join_prices(candidates),
-        lookup_status=status,
-        reason=reason,
+        matched_via=_lookup_matched_via(lookup.status, evidence, seller_sku),
+        master_source_rows=_join(record.source_row for record in evidence),
+        master_sku=_join(record.seller_sku for record in evidence),
+        master_parent_sku=_join(record.parent_sku for record in evidence),
+        master_product_name=_join(record.product_name for record in evidence),
+        master_variation=_join(record.variation_name for record in evidence),
+        candidate_count=len(evidence),
+        unique_candidate_prices=_join_prices(evidence),
+        lookup_status=_report_status(lookup.status),
+        alias_rule=lookup.alias_rule or "",
+        source_text_flags="; ".join(contamination),
+        reason="; ".join(reason_parts),
     )
+
+
+def _report_status(status: PriceLookupStatus) -> str:
+    return {
+        PriceLookupStatus.MATCHED: LOOKUP_STATUS_MATCHED,
+        PriceLookupStatus.MATCHED_BY_ALIAS: LOOKUP_STATUS_ALIAS,
+        PriceLookupStatus.MATCHED_BY_NAME_VARIATION: LOOKUP_STATUS_NAME_VARIATION,
+        PriceLookupStatus.PRICE_NOT_FOUND: LOOKUP_STATUS_NOT_FOUND,
+        PriceLookupStatus.PRICING_CONFLICT: LOOKUP_STATUS_CONFLICT,
+    }.get(status, LOOKUP_STATUS_CONFLICT)
+
+
+def _lookup_matched_via(
+    status: PriceLookupStatus,
+    candidates: tuple[ProductPriceMasterRecord, ...],
+    seller_sku: str,
+) -> str:
+    if status == PriceLookupStatus.MATCHED_BY_NAME_VARIATION:
+        return "None"
+    if status == PriceLookupStatus.MATCHED_BY_ALIAS:
+        return "SKU"
+    return _matched_via(candidates, seller_sku)
+
+
+def _source_text_flags(product_name: str) -> tuple[str, ...]:
+    if re.search(r"(?:^|\s)(?:RM\s*)?\d{1,6}\.\d{2}(?=\s|$)", product_name):
+        return ("SOURCE_TEXT_CONTAMINATION",)
+    return ()
 
 
 def _exact_candidate_pool(
@@ -321,7 +393,7 @@ def _top_skus(counts: Counter[str], limit: int) -> tuple[tuple[str, int], ...]:
 
 
 def _sku_text(value: Any) -> str:
-    return "" if value is None else str(value).strip()
+    return normalize_sku_text(value)
 
 
 def _display(value: Any) -> str:
@@ -329,4 +401,4 @@ def _display(value: Any) -> str:
 
 
 def _match_text(value: str) -> str:
-    return normalize_whitespace(value).casefold()
+    return normalize_match_text(value)

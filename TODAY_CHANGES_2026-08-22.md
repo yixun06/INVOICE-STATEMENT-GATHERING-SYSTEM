@@ -456,3 +456,17 @@ No changes were made to:
 - Supplied Manual Review ZIP re-audit: 30 Accepted, 3 `INCOMPLETE_PROMOTION_EVIDENCE`, 2 Product Count mismatches, 37 Income Completion Anchor Missing, and the unchanged Refund discrepancy. Promotion-related Product Amount failures remain zero.
 - The corrected direct-evidence samples are `2608210MU8Y8CH`, `260821W03YK44W`, `260826D5BNTGNU`, and `260826D6JQ2Q8E`; their PDF group totals are RM15.00, RM15.00, RM15.00, and RM44.00 respectively.
 - Full regression suite: `202 passed in 86.65s`, using a workspace-local pytest basetemp.
+
+## 61. Product Master lookup normalization and identity safety
+
+- SKU identifiers are now normalized as text at Product Master load, pricing input, internal product rows, aggregation, and Excel export. Existing text and leading zeros are preserved; numeric values are rendered without decimal/scientific notation but missing leading zeros are not invented.
+- Shopee parser and mapper now keep `Variation:` content in an independent Variation field instead of appending it to Product Name. Lookup comparison uses only deterministic trim, casefold, and whitespace-insensitive exact matching.
+- Master lookup combines exact Seller SKU and Parent SKU candidates, but resolves only one Master identity. Multiple identities remain `PRICING_CONFLICT` even when their prices happen to be equal. Blank, `N/A`, and `exp` SKUs may resolve only through one exact Product Name plus available Variation identity.
+- Added the narrow auditable `-Less` alias: it runs only after the original SKU has no candidate, uses `REMOVE_SUFFIX_LESS`, and does not authorize any other suffix or fuzzy matching.
+- The read-only Product Master Quality Report now shares runtime lookup statuses, reports alias/name-variation outcomes separately, preserves the full candidate pool, and flags `SOURCE_TEXT_CONTAMINATION` without altering source Product Name text.
+
+## 62. Product Master lookup verification
+
+- Final focused lookup, quality-report, pricing, aggregation, parser, and export regression: `75 passed in 15.85s`.
+- Local Product Listing workbook was not present in the workspace, adjacent project materials, or supplied download materials, so the requested new 5,793-row real-master count was not generated. No substitute master or inferred pricing was used.
+- Full regression suite: `212 passed in 62.25s`, using a workspace-local pytest basetemp.
