@@ -32,6 +32,7 @@ from src.invoice_app.services.all_products import (
     CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
     build_all_product_views,
     build_cross_platform_product_rows,
+    build_shopee_product_level_rows,
     filter_cross_platform_product_rows,
     summarize_cross_platform_products,
 )
@@ -1026,7 +1027,14 @@ def show_platform_tab(
     )
     missing_value = MISSING_VALUE_PLACEHOLDER if platform_name == "Shopee" else None
     order_df = frame_with_columns(platform_orders, platform_order_columns, missing_value)
-    product_df = frame_with_columns(platform_products, platform_product_columns, missing_value)
+    product_display_rows = platform_products
+    if platform_name == "Shopee":
+        price_master, _ = _load_cross_platform_price_master()
+        product_display_rows = build_shopee_product_level_rows(
+            platform_products,
+            price_master=price_master,
+        )
+    product_df = frame_with_columns(product_display_rows, platform_product_columns, missing_value)
     order_df, product_df = apply_platform_filters(platform_name, order_df, product_df)
 
     if platform_orders:

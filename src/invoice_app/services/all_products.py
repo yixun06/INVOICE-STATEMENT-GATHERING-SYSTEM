@@ -129,6 +129,47 @@ def build_cross_platform_product_rows(
     normal_rows, _ = _build_all_product_views(orders, products, reviews, include_reporting=True)
     return _apply_cross_platform_product_pricing(normal_rows, price_master)
 
+
+def build_shopee_product_level_rows(
+    products: list[dict[str, Any]],
+    *,
+    price_master: ProductPriceMaster | None,
+) -> list[dict[str, Any]]:
+    """Create Shopee Product Level display rows without changing parsed source rows."""
+    display_rows = [
+        {
+            **product,
+            "product_name": _product_summary_label(
+                {
+                    "product_name": product.get("product_name"),
+                    "reporting_variation_name": product.get("variation_name") or product.get("variation"),
+                }
+            ),
+        }
+        for product in products
+    ]
+    if price_master is None:
+        return [{**row, "unit_price": MISSING_VALUE_PLACEHOLDER} for row in display_rows]
+
+    products_by_order: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, product in enumerate(products):
+        order_key = str(product.get("order_id") or "").strip() or f"__row_{index}"
+        products_by_order.setdefault(order_key, []).append((index, product))
+
+    for members in products_by_order.values():
+        pricing_results = calculate_shopee_product_pricing(
+            [product for _, product in members],
+            price_master,
+        )
+        for (index, _), pricing_result in zip(members, pricing_results):
+            display_rows[index]["unit_price"] = (
+                pricing_result.unit_selling_price
+                if pricing_result.unit_selling_price is not None
+                else MISSING_VALUE_PLACEHOLDER
+            )
+    return display_rows
+
+
 def filter_cross_platform_product_rows(
     rows: list[dict[str, Any]],
     *,
