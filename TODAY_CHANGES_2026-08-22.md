@@ -470,3 +470,27 @@ No changes were made to:
 - Final focused lookup, quality-report, pricing, aggregation, parser, and export regression: `75 passed in 15.85s`.
 - Local Product Listing workbook was not present in the workspace, adjacent project materials, or supplied download materials, so the requested new 5,793-row real-master count was not generated. No substitute master or inferred pricing was used.
 - Full regression suite: `212 passed in 62.25s`, using a workspace-local pytest basetemp.
+
+## 63. Platform full-batch and filtered-view exports
+
+- Replaced the ambiguous single platform export with two separate downloads: `Export full <Platform> batch` ignores search filters, while `Export current filtered view` exports only the visible filtered Orders and Products.
+- Full-batch and filtered-view reports use separate filenames and each Summary worksheet now matches the rows in its own report.
+- The full-batch path preserves the selected platform columns, typed Excel values, existing workbook layout, accepted-data scope, and all parser, validation, duplicate, Manual Review, analytics, and reconciliation behavior.
+
+## 64. Verification
+
+- Python compilation: `app.py` and `tests/test_app_batch_state.py` passed.
+- Focused AppTest verifies a filtered Shopee view produces a one-order report while the simultaneous full-batch report retains two orders; summary counts match each export.
+- Platform UI/export regression subset: `22 passed in 17.48s`.
+
+## 65. Shopee Product Summary source-subtotal fallback
+
+- Cross Platform Summary now passes a normal Shopee product's existing normalized `line_subtotal` into pricing only when the parser-specific `source_line_subtotal` is absent. This reconnects the same parsed source fact for retained/legacy rows, so Total Selling Price and Discount Given can be calculated with the Product Master price.
+- The fallback is disabled whenever promotion group, label, or metadata evidence is present. Promotion rows still require their own complete group-level source evidence and remain `N/A` when allocation is not supportable.
+
+## 66. Product Summary fallback verification
+
+- Added regression coverage for a normal Shopee row with only `line_subtotal`, asserting RM18.00 Total Selling Price and RM2.00 Discount Given from a RM10.00 Product Master price and quantity 2.
+- Strengthened the incomplete-promotion regression so an available normalized line subtotal cannot bypass the promotion-evidence guard.
+- Focused product pricing/reporting suite: `29 passed in 1.74s`.
+- Full regression suite: `221 passed in 61.15s`, using a workspace-local pytest basetemp.
