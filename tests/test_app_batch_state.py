@@ -3,6 +3,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.shopee_weekly_statement_service import (
@@ -634,10 +636,58 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     }
     assert app.expander == []
     assert len(app.dataframe) == 3
-    assert "Export Shopee" in {
+    assert {"Export full Shopee batch", "Export current filtered view"} <= {
         button.label for button in app.get("download_button")
     }
 
+
+def test_platform_export_keeps_full_batch_separate_from_filtered_view(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["orders"] = [
+        {"platform": "Shopee", "order_id": "SHP-1", "order_income": "10.00"},
+        {"platform": "Shopee", "order_id": "SHP-2", "order_income": "20.00"},
+    ]
+    app.session_state["products"] = [
+        {
+            "platform": "Shopee",
+            "order_id": "SHP-1",
+            "product_name": "First product",
+            "seller_sku": "SKU-1",
+            "quantity": 1,
+            "line_subtotal": "10.00",
+        },
+        {
+            "platform": "Shopee",
+            "order_id": "SHP-2",
+            "product_name": "Second product",
+            "seller_sku": "SKU-2",
+            "quantity": 2,
+            "line_subtotal": "20.00",
+        },
+    ]
+    app.session_state["reviews"] = []
+    app.session_state["batch_id"] = "batch-export-scopes"
+    app.session_state["pdf_count"] = 2
+    app.session_state["navigation"] = "Shopee"
+
+    app.run(timeout=20)
+    next(element for element in app.text_input if element.label == "Order ID").set_value("SHP-1").run(timeout=20)
+
+    assert app.exception == []
+    assert {"Export full Shopee batch", "Export current filtered view"} <= {
+        button.label for button in app.get("download_button")
+    }
+
+    full_workbook = load_workbook(tmp_path / "exports" / "batch-export-scopes-shopee-full-batch-report.xlsx")
+    filtered_workbook = load_workbook(tmp_path / "exports" / "batch-export-scopes-shopee-filtered-view-report.xlsx")
+    assert full_workbook["Orders"].max_row == 5
+    assert full_workbook["Products"].max_row == 5
+    assert filtered_workbook["Orders"].max_row == 4
+    assert filtered_workbook["Products"].max_row == 4
+    assert dict(full_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 2
+    assert dict(filtered_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 1
 
 def test_cross_platform_from_to_filters_share_the_same_detail_and_summary_population(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

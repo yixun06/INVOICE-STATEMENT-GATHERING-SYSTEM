@@ -201,17 +201,17 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
         [
             {
                 "Order ID": row.order_id,
-                "Order Created Date": row.order_created_date,
+                "Order Created Date": pd.to_datetime(row.order_created_date, errors="coerce", dayfirst=True) if row.order_created_date else None,
                 "Income Type": row.income_type,
-                "Final / Estimated Order Income": row.order_income,
+                "Final / Estimated Order Income": float(row.order_income) if row.order_income not in (None, "") else None,
                 "Invoice Payment Signal": row.invoice_payment_signal,
                 "Statement Match": "Matched" if row.statement_match else "No Statement Match",
                 "Effective Payment Status": row.effective_payment_status,
                 "Payment Evidence Source": row.payment_evidence_source,
                 "Settlement Status": row.settlement_status,
-                "Payout Completed Date": row.payout_completed_date,
-                "Released Amount": row.released_amount,
-                "Difference": row.difference,
+                "Payout Completed Date": pd.to_datetime(row.payout_completed_date, errors="coerce", dayfirst=True) if row.payout_completed_date else None,
+                "Released Amount": float(row.released_amount) if row.released_amount not in (None, "") else None,
+                "Difference": float(row.difference) if row.difference not in (None, "") else None,
             }
             for row in rows
         ]
@@ -219,6 +219,8 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
     st.dataframe(
         dataframe,
         column_config={
+            "Order Created Date": st.column_config.DatetimeColumn("Order Created Date", format="DD/MM/YYYY HH:mm"),
+            "Payout Completed Date": st.column_config.DateColumn("Payout Completed Date", format="DD/MM/YYYY"),
             "Final / Estimated Order Income": st.column_config.NumberColumn(format="RM %.2f"),
             "Released Amount": st.column_config.NumberColumn(format="RM %.2f"),
             "Difference": st.column_config.NumberColumn(format="RM %.2f"),
