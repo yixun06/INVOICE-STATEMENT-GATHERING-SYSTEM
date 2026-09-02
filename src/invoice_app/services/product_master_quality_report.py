@@ -27,11 +27,13 @@ from src.invoice_app.utils.normalize import (
     normalize_product_identity,
     normalize_sku_text,
     normalize_whitespace,
+    prepare_product_identity_for_matching,
 )
 
 
 LOOKUP_STATUS_MATCHED = "MATCHED"
 LOOKUP_STATUS_NOT_FOUND = "PRICE_NOT_FOUND"
+LOOKUP_STATUS_PRICE_CONFIRMED_IDENTITY_AMBIGUOUS = "PRICE_CONFIRMED_IDENTITY_AMBIGUOUS"
 LOOKUP_STATUS_CONFLICT = "PRICING_CONFLICT"
 LOOKUP_STATUS_ALIAS = "MATCHED_BY_ALIAS"
 LOOKUP_STATUS_NAME_VARIATION = "MATCHED_BY_NAME_VARIATION"
@@ -45,6 +47,10 @@ _CSV_COLUMNS = (
     "Invoice Product Name",
     "Invoice Variation",
     "Matched Via",
+    "Raw Invoice Product Name",
+    "Raw Invoice Variation",
+    "Removed Variation Token",
+    "Cleanup Reason",
     "Master Source Row(s)",
     "Master SKU",
     "Alias Rule",
@@ -69,6 +75,10 @@ class ProductMasterQualityReportRow:
     invoice_product_name: str
     invoice_variation: str
     matched_via: str
+    raw_invoice_product_name: str
+    raw_invoice_variation: str
+    removed_variation_token: str
+    cleanup_reason: str
     master_source_rows: str
     master_sku: str
     master_parent_sku: str
@@ -85,6 +95,10 @@ class ProductMasterQualityReportRow:
         return {
             "Platform": self.platform,
             "Order ID": self.order_id,
+            "Raw Invoice Product Name": self.raw_invoice_product_name,
+            "Raw Invoice Variation": self.raw_invoice_variation,
+            "Removed Variation Token": self.removed_variation_token,
+            "Cleanup Reason": self.cleanup_reason,
             "Invoice Seller SKU": self.invoice_seller_sku,
             "Invoice Product Name": self.invoice_product_name,
             "Invoice Variation": self.invoice_variation,
@@ -112,6 +126,7 @@ class ProductMasterQualityReportSummary:
     matched_by_alias_count: int
     matched_by_name_variation_count: int
     top_conflict_skus: tuple[tuple[str, int], ...]
+    price_confirmed_identity_ambiguous_count: int
     top_not_found_skus: tuple[tuple[str, int], ...]
     name_or_variation_mismatch_rows: tuple[ProductMasterQualityReportRow, ...]
 
@@ -157,6 +172,9 @@ def summarize_product_master_quality_report(
         matched_count=sum(row.lookup_status in _MATCHED_STATUSES for row in rows),
         matched_by_alias_count=sum(row.lookup_status == LOOKUP_STATUS_ALIAS for row in rows),
         matched_by_name_variation_count=sum(row.lookup_status == LOOKUP_STATUS_NAME_VARIATION for row in rows),
+        price_confirmed_identity_ambiguous_count=sum(
+            row.lookup_status == LOOKUP_STATUS_PRICE_CONFIRMED_IDENTITY_AMBIGUOUS for row in rows
+        ),
         price_not_found_count=sum(
             row.lookup_status == LOOKUP_STATUS_NOT_FOUND for row in rows
         ),
@@ -190,17 +208,21 @@ def _diagnose_row(
     platform = _display(invoice_row.get("platform"))
     order_id = _display(invoice_row.get("order_id"))
     seller_sku = normalize_sku_text(invoice_row.get("seller_sku"))
-    raw_product_name = _display(invoice_row.get("product_name"))
-    raw_variation = _display(
+    raw_product_name = _raw(invoice_row.get("product_name"))
+    raw_variation = _raw(
         invoice_row.get("variation_name")
         or invoice_row.get("variation")
         or invoice_row.get("reporting_variation_name")
     )
-    product_name, variation = normalize_product_identity(raw_product_name, raw_variation)
+    identity = prepare_product_identity_for_matching(
+        raw_product_name,
+        raw_variation,
+        coordinate_confirmed_amount=_coordinate_confirmed_group_total(invoice_row),
+    )
     lookup = price_master.lookup(
         seller_sku=seller_sku,
-        product_name=product_name,
-        variation_name=variation,
+        product_name=identity.product_name,
+        variation_name=identity.variation,
     )
     direct_candidates = _exact_candidate_pool(price_master.records, seller_sku)
     alias_candidates = (
@@ -214,9 +236,9 @@ def _diagnose_row(
     )
     evidence = direct_candidates or alias_candidates or resolved_records
     mismatch_reasons = _identity_mismatch_reasons(
-        direct_candidates, product_name, variation
+        direct_candidates, identity.product_name, identity.variation
     )
-    contamination = _source_text_flags(raw_product_name)
+    contamination = _source_text_flags(raw_product_name, raw_variation)
     reason_parts = [part for part in (lookup.reason, *mismatch_reasons) if part]
     if contamination:
         reason_parts.append("SOURCE_TEXT_CONTAMINATION")
@@ -225,8 +247,12 @@ def _diagnose_row(
         platform=platform,
         order_id=order_id,
         invoice_seller_sku=seller_sku,
-        invoice_product_name=product_name,
-        invoice_variation=variation,
+        invoice_product_name=identity.product_name,
+        invoice_variation=identity.variation,
+        raw_invoice_product_name=identity.raw_product_name,
+        raw_invoice_variation=identity.raw_variation,
+        removed_variation_token=identity.removed_variation_token,
+        cleanup_reason=identity.cleanup_reason,
         matched_via=_lookup_matched_via(lookup.status, evidence, seller_sku),
         master_source_rows=_join(record.source_row for record in evidence),
         master_sku=_join(record.seller_sku for record in evidence),
@@ -244,6 +270,7 @@ def _diagnose_row(
 
 def _report_status(status: PriceLookupStatus) -> str:
     return {
+        PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS: LOOKUP_STATUS_PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
         PriceLookupStatus.MATCHED: LOOKUP_STATUS_MATCHED,
         PriceLookupStatus.MATCHED_BY_ALIAS: LOOKUP_STATUS_ALIAS,
         PriceLookupStatus.MATCHED_BY_NAME_VARIATION: LOOKUP_STATUS_NAME_VARIATION,
@@ -257,6 +284,8 @@ def _lookup_matched_via(
     candidates: tuple[ProductPriceMasterRecord, ...],
     seller_sku: str,
 ) -> str:
+    if status == PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS:
+        return "SKU_UNIQUE_PRICE"
     if status == PriceLookupStatus.MATCHED_BY_NAME_VARIATION:
         return "None"
     if status == PriceLookupStatus.MATCHED_BY_ALIAS:
@@ -264,8 +293,8 @@ def _lookup_matched_via(
     return _matched_via(candidates, seller_sku)
 
 
-def _source_text_flags(product_name: str) -> tuple[str, ...]:
-    if re.search(r"(?:^|\s)(?:RM\s*)?\d{1,6}\.\d{2}(?=\s|$)", product_name):
+def _source_text_flags(*source_values: str) -> tuple[str, ...]:
+    if any(re.search(r"(?:^|\s)(?:RM\s*)?\d{1,6}\.\d{2}(?=\s|$)", value) for value in source_values):
         return ("SOURCE_TEXT_CONTAMINATION",)
     return ()
 
@@ -398,6 +427,27 @@ def _sku_text(value: Any) -> str:
 
 def _display(value: Any) -> str:
     return normalize_whitespace(str(value or ""))
+
+
+def _raw(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _coordinate_confirmed_group_total(invoice_row: Mapping[str, Any]) -> Decimal | None:
+    value = invoice_row.get("source_group_total")
+    if value is None or str(value).strip() == "":
+        return None
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip().replace(",", "")
+    if text.upper().startswith("RM"):
+        text = text[2:].strip()
+    if not re.fullmatch(r"-?\d+(?:\.\d{1,2})?", text):
+        return None
+    try:
+        return Decimal(text)
+    except Exception:
+        return None
 
 
 def _match_text(value: str) -> str:

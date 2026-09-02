@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -13,6 +15,23 @@ _VARIATION_MARKER = re.compile(
     r"^(?P<name>.*?)(?:\s+|^)variation\s*:\s*(?P<variation>.+)$",
     re.IGNORECASE,
 )
+
+_TRAILING_MONEY = re.compile(
+    r"^(?P<value>.*?)(?:\s+)(?P<token>(?:RM\s*)?\d{1,6}(?:,\d{3})*\.\d{2})\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ProductIdentityMatchText:
+    """Source-preserving product identity prepared for deterministic matching."""
+
+    raw_product_name: str
+    raw_variation: str
+    product_name: str
+    variation: str
+    removed_variation_token: str = ""
+    cleanup_reason: str = ""
 
 
 def normalize_sku_text(value: Any) -> str:
@@ -35,8 +54,9 @@ def normalize_sku_text(value: Any) -> str:
 
 
 def normalize_match_text(value: str | None) -> str:
-    """Deterministic exact comparison key: case-insensitive with whitespace removed."""
-    return re.sub(r"\s+", "", normalize_whitespace(value or "")).casefold()
+    """Matching-only deterministic key; source text remains unchanged elsewhere."""
+    compatibility_text = unicodedata.normalize("NFKC", value or "")
+    return re.sub(r"\s+", "", normalize_whitespace(compatibility_text)).casefold()
 
 
 def normalize_product_identity(
@@ -58,6 +78,60 @@ def normalize_product_identity(
             variation = normalize_whitespace(marker.group(1))
     return name, variation
 
+def prepare_product_identity_for_matching(
+    product_name: str | None,
+    variation_name: str | None,
+    *,
+    coordinate_confirmed_amount: Decimal | None = None,
+) -> ProductIdentityMatchText:
+    """Keep raw source text while producing a deterministic lookup identity.
+
+    A trailing money token is removed only when the caller supplies the
+    coordinate-confirmed source-group amount and the token equals that amount.
+    No arbitrary numeric suffix is removed.
+    """
+    raw_product_name = "" if product_name is None else str(product_name)
+    raw_variation = "" if variation_name is None else str(variation_name)
+    structured_name, structured_variation = normalize_product_identity(
+        raw_product_name,
+        raw_variation,
+    )
+    variation, removed_token = _remove_coordinate_confirmed_amount(
+        structured_variation,
+        coordinate_confirmed_amount,
+    )
+    return ProductIdentityMatchText(
+        raw_product_name=raw_product_name,
+        raw_variation=raw_variation,
+        product_name=structured_name,
+        variation=variation,
+        removed_variation_token=removed_token,
+        cleanup_reason=(
+            "COORDINATE_CONFIRMED_AMOUNT_CONTAMINATION" if removed_token else ""
+        ),
+    )
+
+
+def _remove_coordinate_confirmed_amount(
+    variation: str,
+    coordinate_confirmed_amount: Decimal | None,
+) -> tuple[str, str]:
+    if coordinate_confirmed_amount is None:
+        return variation, ""
+    match = _TRAILING_MONEY.fullmatch(variation)
+    if not match:
+        return variation, ""
+    try:
+        amount = Decimal(
+            match.group("token").replace("RM", "").replace(",", "").strip()
+        )
+    except InvalidOperation:
+        return variation, ""
+    if amount != coordinate_confirmed_amount:
+        return variation, ""
+
+    cleaned = normalize_whitespace(match.group("value"))
+    return (cleaned, match.group("token")) if cleaned else (variation, "")
 
 def parse_decimal(value: str | float | int | Decimal | None) -> Decimal:
     if value is None or value == "":

@@ -46,8 +46,11 @@ def test_duplicate_sku_with_same_price_is_conflict_without_identity_evidence():
         _row(product_name="Product Two"),
     ]).lookup(seller_sku="SKU-1")
 
-    assert result.status is PriceLookupStatus.PRICING_CONFLICT
-    assert result.unit_selling_price is None
+    assert result.status is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
+    assert result.unit_selling_price == Decimal("12.50")
+    assert result.matched_sku is None
+    assert result.matched_product_name is None
+    assert result.source_rows == (1, 2)
 
 
 def test_multiple_sku_prices_resolve_by_product_name():
@@ -214,3 +217,34 @@ def test_numeric_master_sku_is_normalized_without_inventing_leading_zero():
 
     assert master.records[0].seller_sku == "9555208106364"
     assert result.status is PriceLookupStatus.MATCHED
+
+
+def test_multiple_identity_prices_resolve_from_exact_variation_without_name_match():
+    result = _master([
+        _row(product_name="Master Blue", variation_name="Blue", unit_selling_price="10.00"),
+        _row(product_name="Master Red", variation_name="Red", unit_selling_price="12.00"),
+    ]).lookup(
+        seller_sku="SKU-1",
+        product_name="Invoice text changed by layout",
+        variation_name="blue",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.unit_selling_price == Decimal("10.00")
+    assert result.matched_product_name == "Master Blue"
+    assert result.matched_by == "sku_unique_exact_variation"
+
+
+def test_unicode_compatibility_normalization_is_matching_only_and_deterministic():
+    result = _master([
+        _row(product_name="Organic 牛 Oil", variation_name="250ml", unit_selling_price="17.90"),
+        _row(product_name="Vegetable Oil", variation_name="250ml x 2", unit_selling_price="31.90"),
+    ]).lookup(
+        seller_sku="SKU-1",
+        product_name="Organic ⽜ Oil",
+        variation_name="250ml",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.unit_selling_price == Decimal("17.90")
+    assert result.matched_product_name == "Organic 牛 Oil"

@@ -22,6 +22,7 @@ class PriceLookupStatus(str, Enum):
     MATCHED_BY_SKU = "matched_by_sku"
     MATCHED_BY_SKU_NAME_VARIATION = "matched_by_sku_name_variation"
     MATCHED_BY_PARENT_SKU = "matched_by_parent_sku"
+    PRICE_CONFIRMED_IDENTITY_AMBIGUOUS = "price_confirmed_identity_ambiguous"
     MATCHED_BY_PARENT_SKU_NAME_VARIATION = "matched_by_parent_sku_name_variation"
     MATCHED = "matched"
     MATCHED_BY_ALIAS = "matched_by_alias"
@@ -266,6 +267,25 @@ class ProductPriceMaster:
                 ),
                 alias_rule=alias_rule,
             )
+        variation_narrowed = _match_variation(candidates, variation_name)
+        if variation_narrowed and _has_one_identity(variation_narrowed):
+            return self._matched_identity(
+                variation_narrowed,
+                status=(
+                    PriceLookupStatus.MATCHED_BY_ALIAS
+                    if alias_rule
+                    else PriceLookupStatus.MATCHED
+                ),
+                alias_rule=alias_rule,
+                matched_by="sku_unique_exact_variation",
+            )
+
+        if _has_one_price(candidates):
+            return self._price_confirmed_identity_ambiguous(
+                candidates,
+                alias_rule=alias_rule,
+            )
+
 
         if narrowed:
             evidence = narrowed
@@ -316,12 +336,13 @@ class ProductPriceMaster:
         *,
         status: PriceLookupStatus,
         alias_rule: str | None = None,
+        matched_by: str | None = None,
     ) -> ProductPriceLookupResult:
         record = min(records, key=lambda item: item.source_row)
         return ProductPriceLookupResult(
             status=status,
             unit_selling_price=record.unit_selling_price,
-            matched_by=status.value,
+            matched_by=matched_by or status.value,
             matched_sku=record.seller_sku or None,
             matched_parent_sku=record.parent_sku or None,
             matched_product_name=record.product_name or None,
@@ -331,6 +352,30 @@ class ProductPriceMaster:
             alias_rule=alias_rule,
         )
 
+
+    def _price_confirmed_identity_ambiguous(
+        self,
+        records: tuple[ProductPriceMasterRecord, ...],
+        *,
+        alias_rule: str | None = None,
+    ) -> ProductPriceLookupResult:
+        price = records[0].unit_selling_price
+        return ProductPriceLookupResult(
+            status=PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
+            unit_selling_price=price,
+            matched_by="unique_candidate_price",
+            matched_sku=None,
+            matched_parent_sku=None,
+            matched_product_name=None,
+            matched_variation_name=None,
+            source_metadata=self.metadata,
+            source_rows=tuple(sorted(item.source_row for item in records)),
+            alias_rule=alias_rule,
+            reason=(
+                "Candidate identities remain unresolved, but all exact SKU / Parent SKU "
+                "candidates share one unique Unit Selling Price."
+            ),
+        )
 
     def _matched(
         self,
@@ -477,6 +522,16 @@ def _match_name_variation(
     )
 
 
+def _match_variation(
+    records: tuple[ProductPriceMasterRecord, ...],
+    variation_name: str | None,
+) -> tuple[ProductPriceMasterRecord, ...]:
+    variation_key = _match_text(variation_name)
+    if not variation_key:
+        return ()
+    return tuple(
+        record for record in records if _match_text(record.variation_name) == variation_key
+    )
 def _match_text(value: str | None) -> str:
     return normalize_match_text(value)
 

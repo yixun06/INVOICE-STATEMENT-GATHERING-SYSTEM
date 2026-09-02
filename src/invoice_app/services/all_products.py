@@ -437,6 +437,7 @@ def _matched_lookup_statuses() -> frozenset[PriceLookupStatus]:
             PriceLookupStatus.MATCHED,
             PriceLookupStatus.MATCHED_BY_ALIAS,
             PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
+            PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
             PriceLookupStatus.MATCHED_BY_SKU,
             PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
             PriceLookupStatus.MATCHED_BY_PARENT_SKU,
