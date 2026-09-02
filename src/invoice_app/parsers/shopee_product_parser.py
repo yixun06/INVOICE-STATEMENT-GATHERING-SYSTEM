@@ -104,10 +104,18 @@ def reconcile_product_candidates(
         sku = str(merged.get("seller_sku", "")).strip()
         fallback = text_by_sku.get(sku)
         if fallback:
-            # Text flow preserves multilingual product-name order more reliably,
-            # while positioned words remain authoritative for numeric columns.
-            if fallback.get("product_name") and int(fallback.get("quantity", 0) or 0) > 0:
+            # Text flow has no column ownership, so it may interleave page chrome
+            # or adjacent numeric columns with an otherwise valid SKU block.
+            # Preserve a non-empty coordinate-owned identity and use text flow
+            # only when the positioned block could not establish one.
+            if (
+                not str(merged.get("product_name", "")).strip()
+                and fallback.get("product_name")
+                and int(fallback.get("quantity", 0) or 0) > 0
+            ):
                 merged["product_name"] = fallback.get("product_name", "")
+            if not str(merged.get("variation", "")).strip() and fallback.get("variation"):
+                merged["variation"] = fallback.get("variation", "")
             if int(merged.get("quantity", 0) or 0) <= 0:
                 merged["quantity"] = fallback.get("quantity", 0)
             if merged.get("unit_price", Decimal("0")) == 0:
