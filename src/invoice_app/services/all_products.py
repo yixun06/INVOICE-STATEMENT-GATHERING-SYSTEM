@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from ..review_reason_codes import PRODUCT_SUMMARY_EXCLUSION_REASON_CODES
 from ..utils.normalize import normalize_sku_text, normalize_whitespace, parse_quantity
 from .batch_service import (
     MISSING_VALUE_PLACEHOLDER,
@@ -128,6 +129,71 @@ def build_cross_platform_product_rows(
     """Return eligible All rows enriched with pricing inputs and derived reporting facts."""
     normal_rows, _ = _build_all_product_views(orders, products, reviews, include_reporting=True)
     return _apply_cross_platform_product_pricing(normal_rows, price_master)
+
+
+def partition_cross_platform_product_summary_rows(
+    rows: list[dict[str, Any]],
+    reviews: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep exclusion-coded review orders out of Product Summary only."""
+    exclusions: dict[tuple[str, str], dict[str, Any]] = {}
+    for review in reviews or []:
+        if not is_manual_review_record(review):
+            continue
+        reason_code = str(review.get("reason_code") or "").strip()
+        if reason_code not in PRODUCT_SUMMARY_EXCLUSION_REASON_CODES:
+            continue
+        order_payload = review.get("order_payload")
+        if not isinstance(order_payload, dict):
+            order_payload = {}
+        identity = _review_identity(review, order_payload)
+        if identity is None:
+            continue
+
+        platform, order_id = identity
+        reason = str(review.get("reason") or reason_code).strip() or reason_code
+        source_pdf = str(review.get("source_pdf") or "").strip()
+        exclusion = exclusions.setdefault(
+            identity,
+            {
+                "platform": platform,
+                "order_id": order_id,
+                "reason": reason,
+                "reason_code": reason_code,
+                "source_pdf": source_pdf,
+                "reporting_order_created_date": _preferred_reporting_order_date(
+                    platform, order_payload, {}
+                ),
+                "_reason_codes": [reason_code],
+                "_reasons": [reason],
+            },
+        )
+        if reason_code not in exclusion["_reason_codes"]:
+            exclusion["_reason_codes"].append(reason_code)
+        if reason not in exclusion["_reasons"]:
+            exclusion["_reasons"].append(reason)
+        if not exclusion["source_pdf"] and source_pdf:
+            exclusion["source_pdf"] = source_pdf
+
+    excluded_identities = set(exclusions)
+    summary_rows = [
+        row
+        for row in rows
+        if canonical_order_identity(row.get("platform"), row.get("order_id")) not in excluded_identities
+    ]
+    exclusion_rows: list[dict[str, Any]] = []
+    for exclusion in exclusions.values():
+        exclusion_rows.append(
+            {
+                **exclusion,
+                "reason_code": ", ".join(exclusion["_reason_codes"]),
+                "reason": "\n".join(exclusion["_reasons"]),
+            }
+        )
+    return summary_rows, sorted(
+        exclusion_rows,
+        key=lambda row: (str(row["platform"]).casefold(), str(row["order_id"]).casefold()),
+    )
 
 
 def build_shopee_product_level_rows(

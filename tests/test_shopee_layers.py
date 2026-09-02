@@ -117,6 +117,7 @@ def test_shopee_product_count_mismatch_requires_manual_review():
 
     assert issue is not None
     assert issue.reason.startswith("Product Count Mismatch:")
+    assert issue.reason_code == "PRODUCT_COUNT_MISMATCH"
 
 
 def test_shopee_no_valid_product_requires_manual_review():
@@ -129,6 +130,7 @@ def test_shopee_no_valid_product_requires_manual_review():
 
     assert issue is not None
     assert issue.reason.startswith("No Valid Product Extracted:")
+    assert issue.reason_code == "NO_VALID_PRODUCTS"
 
 
 def test_shopee_normal_line_arithmetic_failure_requires_manual_review():
@@ -141,6 +143,7 @@ def test_shopee_normal_line_arithmetic_failure_requires_manual_review():
     assert issue is not None
     assert issue.reason.startswith("Product Amount Reconciliation Failed:")
     assert "quantity x unit price" in issue.reason
+    assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
 
 
 def test_shopee_product_subtotal_mismatch_requires_manual_review():
@@ -153,6 +156,7 @@ def test_shopee_product_subtotal_mismatch_requires_manual_review():
     assert issue is not None
     assert issue.reason.startswith("Product Amount Reconciliation Failed:")
     assert "seller Merchandise Subtotal" in issue.reason
+    assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
 
 
 def test_shopee_financial_reconciliation_tolerance_and_failure_boundary():
@@ -189,6 +193,7 @@ def test_shopee_missing_income_anchor_has_clear_manual_review_reason():
     assert extracted.income["order_income"] == "N/A"
     assert issue is not None
     assert issue.reason.startswith("Income Completion Anchor Missing:")
+    assert issue.reason_code == "INCOME_COMPLETION_ANCHOR_MISSING"
 
 
 def test_shopee_missing_ads_escrow_fee_stays_missing_but_is_not_incomplete():

@@ -34,6 +34,7 @@ from src.invoice_app.services.all_products import (
     build_cross_platform_product_rows,
     build_shopee_product_level_rows,
     filter_cross_platform_product_rows,
+    partition_cross_platform_product_summary_rows,
     summarize_cross_platform_products,
 )
 from src.invoice_app.services.batch_service import (
@@ -49,6 +50,7 @@ from src.invoice_app.services.batch_service import (
     is_manual_review_record,
     prepare_uploaded_invoice_files,
     process_pdf_file_with_outcome,
+    resolve_archived_pdf_path,
     split_by_platform,
 )
 from src.invoice_app.services.workflow_navigation import (
@@ -1233,6 +1235,37 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
     )
 
 
+def show_cross_platform_summary_exclusions(
+    exclusion_rows: list[dict],
+    *,
+    batch_id: str | None,
+) -> None:
+    if not exclusion_rows:
+        return
+
+    show_table_section_heading(
+        "Excluded from Product Summary",
+        "Manual Review orders with product-summary exclusion reason codes remain available in All Products and Manual Review.",
+    )
+    for index, row in enumerate(exclusion_rows):
+        with st.container(border=True):
+            details, source = st.columns([3, 2], gap="medium")
+            details.markdown(f"**Order ID:** {row['order_id']}")
+            details.caption(f"{row['platform']} | {row['reason']}")
+            source_pdf = str(row.get("source_pdf") or "").strip()
+            source.caption(f"Source PDF: {source_pdf or MISSING_VALUE_PLACEHOLDER}")
+            archive_path = resolve_archived_pdf_path(batch_id, source_pdf)
+            if archive_path is None:
+                source.caption("View PDF unavailable: archived source was not found.")
+            else:
+                source.download_button(
+                    "View PDF",
+                    data=archive_path.read_bytes(),
+                    file_name=archive_path.name,
+                    mime="application/pdf",
+                    key=f"cross_platform_summary_excluded_pdf_{index}",
+                    icon=":material/picture_as_pdf:",
+                )
 def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
     if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
         return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
@@ -1260,18 +1293,34 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         start_date=start_date,
         end_date=end_date,
     )
+    summary_product_rows, summary_exclusion_rows = partition_cross_platform_product_summary_rows(
+        reporting_product_rows,
+        reviews,
+    )
+    filtered_summary_product_rows = filter_cross_platform_product_rows(
+        summary_product_rows,
+        platform=platform_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    filtered_summary_exclusion_rows = filter_cross_platform_product_rows(
+        summary_exclusion_rows,
+        platform=platform_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     with product_summary_slot.container():
         show_table_section_heading(
             "Product Summary",
             "Grouped by Seller SKU, Product Name, and available Variation. Product pricing uses the Shopee Product Master.",
         )
-        show_cross_platform_summary_table(summarize_cross_platform_products(filtered_product_rows))
+        show_cross_platform_summary_table(summarize_cross_platform_products(filtered_summary_product_rows))
         if price_master_message:
             st.caption(price_master_message)
         incomplete_promotion_count = sum(
             row.get("reporting_pricing_status") == "promotion_evidence_incomplete"
-            for row in filtered_product_rows
+            for row in filtered_summary_product_rows
         )
         if incomplete_promotion_count:
             st.caption(
@@ -1279,12 +1328,16 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
             )
         missing_sku_count = sum(
             str(row.get("seller_sku", "")).strip().upper() in {"", MISSING_VALUE_PLACEHOLDER}
-            for row in filtered_product_rows
+            for row in filtered_summary_product_rows
         )
         if missing_sku_count:
             st.caption(
-                f"{missing_sku_count} eligible All Products row(s) without a Seller SKU remain in All Products but cannot be aggregated."
+                f"{missing_sku_count} Product Summary-eligible row(s) without a Seller SKU remain in All Products but cannot be aggregated."
             )
+        show_cross_platform_summary_exclusions(
+            filtered_summary_exclusion_rows,
+            batch_id=st.session_state.get("batch_id"),
+        )
 
     if start_date is not None or end_date is not None:
         platform_rows = filter_cross_platform_product_rows(reporting_product_rows, platform=platform_filter)

@@ -458,6 +458,14 @@ def archive_pdf_bytes(source_name: str, file_bytes: bytes, batch_id: str) -> Pat
     return target_path
 
 
+def resolve_archived_pdf_path(batch_id: str | None, source_pdf: str | None) -> Path | None:
+    """Return the existing archived source path for a current-batch PDF, if present."""
+    if not batch_id or not source_pdf:
+        return None
+    candidate = ARCHIVE_DIR / str(batch_id).strip() / _safe_archive_name(str(source_pdf))
+    return candidate if candidate.is_file() else None
+
+
 def create_manual_review_record(
     batch_id: str,
     source_pdf: str,
