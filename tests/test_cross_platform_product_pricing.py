@@ -7,6 +7,7 @@ from src.invoice_app.services.all_products import (
     summarize_cross_platform_products,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
+from src.invoice_app.services.batch_service import apply_batch_rules
 
 
 def _master(rows):
@@ -57,6 +58,46 @@ def test_price_failure_preserves_quantity_and_reliable_actual_selling_value():
     assert rows[0]["reporting_unit_selling_price"] == Decimal("9.00")
     assert rows[0]["reporting_actual_selling_value"] == Decimal("8.00")
     assert rows[0]["reporting_price_lookup_status"] == "not_applicable"
+
+def test_shopee_promotion_and_normal_source_rows_stay_independent_until_pricing():
+    master = _master([
+        {"seller_sku": "9555208013938", "product_name": "Sea Buckthorn Elixir", "variation_name": "500ml", "unit_selling_price": "58.80"}
+    ])
+    orders, products, reviews = apply_batch_rules(
+        [{"platform": "Shopee", "order_id": "260828J247W9SW", "source_pdf": "260828J247W9SW.pdf"}],
+        [
+            {
+                "platform": "Shopee", "order_id": "260828J247W9SW", "source_pdf": "260828J247W9SW.pdf",
+                "product_name": "Sea Buckthorn Elixir", "variation_name": "500ml", "seller_sku": "9555208013938",
+                "unit_price": "58.80", "quantity": 4, "line_total": "235.20",
+                "promotion_group_id": "promo-260828J247W9SW", "promotion_label": "Any 4 at RM176.40",
+                "source_group_total": "176.40",
+                "promotion_target_qty": 4, "promotion_member_qty": 4,
+            },
+            {
+                "platform": "Shopee", "order_id": "260828J247W9SW", "source_pdf": "260828J247W9SW.pdf",
+                "product_name": "Sea Buckthorn Elixir", "variation_name": "500ml", "seller_sku": "9555208013938",
+                "unit_price": "58.80", "quantity": 1, "line_total": "58.80", "source_line_subtotal": "58.80",
+            },
+        ],
+        [],
+    )
+
+    assert reviews == []
+    assert [(row["quantity"], row["line_total"]) for row in products] == [(4, "235.20"), (1, "58.80")]
+
+    pricing_rows = build_cross_platform_product_rows(orders, products, price_master=master)
+    assert [row["reporting_actual_selling_value"] for row in pricing_rows] == [Decimal("176.40"), Decimal("58.80")]
+    assert summarize_cross_platform_products(pricing_rows) == [
+        {
+            "seller_sku": "9555208013938",
+            "product_name": "Sea Buckthorn Elixir — 500ml",
+            "unit_selling_price": Decimal("58.80"),
+            "total_quantity": 5,
+            "total_selling_price": Decimal("235.20"),
+            "total_discount_given": Decimal("58.80"),
+        }
+    ]
 
 
 def test_same_sku_different_product_name_and_variation_remain_separate_price_rows():

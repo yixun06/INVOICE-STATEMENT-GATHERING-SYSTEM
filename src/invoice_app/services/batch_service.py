@@ -678,6 +678,7 @@ def apply_batch_rules(
         accepted_orders.append(_normalize_order_record({**order, "platform": platform, "order_id": order_id}))
 
     merged_products: dict[tuple[str, str, str], dict[str, Any]] = {}
+    accepted_shopee_products: list[dict[str, Any]] = []
     for product in products:
         key = canonical_order_identity(product.get("platform"), product.get("order_id"))
         if key is None:
@@ -707,9 +708,18 @@ def apply_batch_rules(
             )
             continue
 
+        normalized_product = {**product, "platform": platform, "order_id": order_id}
+
+        # Shopee promotion evidence belongs to the individual PDF source row.
+        # Combining same-SKU rows here can attach a promotion to an otherwise
+        # normal row and make its actual selling value unavailable downstream.
+        # Product Summary still aggregates after row-level pricing.
+        if platform == "Shopee":
+            accepted_shopee_products.append(_normalize_product_record(normalized_product))
+            continue
+
         merge_identity = sku or f"SOURCE-NO-SKU:{product_name}"
         merge_key = (platform, order_id, merge_identity)
-        normalized_product = {**product, "platform": platform, "order_id": order_id}
 
         if merge_key not in merged_products:
             merged_products[merge_key] = _normalize_product_record(normalized_product)
@@ -728,7 +738,7 @@ def apply_batch_rules(
         _apply_platform_placeholders(current, PLATFORM_PRODUCT_PLACEHOLDER_FIELDS)
 
     accepted_products = sorted(
-        merged_products.values(),
+        [*merged_products.values(), *accepted_shopee_products],
         key=lambda row: (str(row.get("platform", "")), str(row.get("order_id", "")), str(row.get("product_name", ""))),
     )
     accepted_orders = sorted(
