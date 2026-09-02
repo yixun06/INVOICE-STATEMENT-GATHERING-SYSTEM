@@ -61,3 +61,45 @@ def test_coordinate_owned_identity_wins_over_contaminated_text_flow_for_same_sku
 
     assert item["product_name"] == "BG Veggie Chips Series Small Packet"
     assert item["variation"] == "Variation: Beetroot Chips 15g"
+
+
+def test_coordinate_product_name_rejoins_a_single_letter_word_split_at_line_wrap():
+    columns = _Columns(
+        product_left=100,
+        unit_left=335,
+        unit_quantity_boundary=390,
+        quantity_subtotal_boundary=430,
+    )
+    block = [
+        _row(100, _word("[HALAL] Sea Buckthorn Elixir | influenz", 110, 326, 100)),
+        _row(110, _word("a, High Vitamin C", 110, 190, 110)),
+        _row(120, _word("58.80", 350, 370, 120), _word("1", 405, 410, 120), _word("58.80", 440, 460, 120)),
+        _row(130, _word("Variation: 500ml", 110, 190, 130)),
+        _row(140, _word("SKU:", 110, 130, 140), _word("9555208013938", 135, 205, 140)),
+    ]
+
+    item = _parse_positioned_item_block(block, columns, ())
+
+    assert item is not None
+    assert item["product_name"] == "[HALAL] Sea Buckthorn Elixir | influenza, High Vitamin C"
+    assert item["variation"] == "500ml"
+
+
+def test_coordinate_product_name_keeps_space_for_an_ordinary_wrapped_word():
+    columns = _Columns(
+        product_left=100,
+        unit_left=335,
+        unit_quantity_boundary=390,
+        quantity_subtotal_boundary=430,
+    )
+    block = [
+        _row(100, _word("[HALAL] Organic", 110, 326, 100)),
+        _row(110, _word("Sea Buckthorn Elixir", 110, 210, 110)),
+        _row(120, _word("58.80", 350, 370, 120), _word("1", 405, 410, 120), _word("58.80", 440, 460, 120)),
+        _row(130, _word("SKU:", 110, 130, 130), _word("SKU-1", 135, 165, 130)),
+    ]
+
+    item = _parse_positioned_item_block(block, columns, ())
+
+    assert item is not None
+    assert item["product_name"] == "[HALAL] Organic Sea Buckthorn Elixir"
