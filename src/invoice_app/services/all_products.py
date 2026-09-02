@@ -386,7 +386,7 @@ def _shopee_pricing_input(row: dict[str, Any]) -> dict[str, Any]:
         "product_name": _lookup_input_text(row.get("product_name")),
         "variation_name": _lookup_input_text(row.get("reporting_variation_name")),
         "quantity": row.get("quantity"),
-        "source_line_subtotal": row.get("reporting_source_line_subtotal"),
+        "source_line_subtotal": _shopee_source_line_subtotal_for_pricing(row),
         "promotion_group_id": row.get("reporting_promotion_group_id"),
         "promotion_label": row.get("reporting_promotion_label"),
         "promotion_group_total": row.get("reporting_promotion_group_total"),
@@ -396,6 +396,29 @@ def _shopee_pricing_input(row: dict[str, Any]) -> dict[str, Any]:
         "promotion_metadata_status": row.get("reporting_promotion_metadata_status"),
     }
 
+
+def _shopee_source_line_subtotal_for_pricing(row: dict[str, Any]) -> Any:
+    """Return a source subtotal only when it is safe to price the individual row.
+
+    Current parser output stores the normal Shopee Subtotal in both the
+    source-specific field and the normalized ``line_subtotal`` field. Older
+    retained rows can have only the latter, so use it as the same source fact.
+    A promotion marker deliberately disables this fallback: its subtotal may
+    belong to the group rather than to this SKU.
+    """
+    source_subtotal = row.get("reporting_source_line_subtotal")
+    if _decimal_or_none(source_subtotal) is not None:
+        return source_subtotal
+    if any(
+        _lookup_input_text(row.get(field))
+        for field in (
+            "reporting_promotion_group_id",
+            "reporting_promotion_label",
+            "reporting_promotion_metadata_status",
+        )
+    ):
+        return None
+    return row.get("reporting_sales_amount")
 
 def _standard_platform_pricing(row: dict[str, Any]) -> dict[str, Any]:
     """Keep non-Shopee reporting strictly on its own invoice/source fields."""

@@ -30,6 +30,22 @@ def test_cross_platform_summary_uses_master_price_and_platform_actual_values():
     assert [row["reporting_pricing_status"] for row in rows] == ["normal_priced", "platform_source_only", "platform_source_only"]
     assert summarize_cross_platform_products(rows)[0]["total_discount_given"] == "N/A"
 
+def test_shopee_normal_line_subtotal_is_used_when_legacy_source_field_is_absent():
+    master = _master([
+        {"seller_sku": "SKU-NORMAL", "product_name": "Normal", "variation_name": "", "unit_selling_price": "10.00"},
+    ])
+    rows = build_cross_platform_product_rows(
+        [{"platform": "Shopee", "order_id": "SHP-NORMAL", "order_created_date": "07/08/2026"}],
+        [{"platform": "Shopee", "order_id": "SHP-NORMAL", "product_name": "Normal", "seller_sku": "SKU-NORMAL", "unit_price": "10.00", "quantity": 2, "line_subtotal": "18.00"}],
+        price_master=master,
+    )
+
+    assert rows[0]["reporting_actual_selling_value"] == Decimal("18.00")
+    assert rows[0]["reporting_discount_given"] == Decimal("2.00")
+    assert summarize_cross_platform_products(rows) == [
+        {"seller_sku": "SKU-NORMAL", "product_name": "Normal", "unit_selling_price": Decimal("10.00"), "total_quantity": 2, "total_selling_price": Decimal("18.00"), "total_discount_given": Decimal("2.00")},
+    ]
+
 
 def test_price_failure_preserves_quantity_and_reliable_actual_selling_value():
     master = _master([])
@@ -69,7 +85,7 @@ def test_incomplete_promotion_does_not_contribute_unreliable_selling_or_discount
     ])
     orders = [{"platform": "Shopee", "order_id": "SHP-INCOMPLETE", "order_created_date": "07/08/2026"}]
     products = [
-        {"platform": "Shopee", "order_id": "SHP-INCOMPLETE", "product_name": "Incomplete", "seller_sku": "SKU-INCOMPLETE", "unit_price": "10.00", "quantity": 1, "source_line_subtotal": "10.00", "line_subtotal": "10.00", "promotion_label": "Any 3 at RM20.00", "promotion_metadata_status": "incomplete"},
+        {"platform": "Shopee", "order_id": "SHP-INCOMPLETE", "product_name": "Incomplete", "seller_sku": "SKU-INCOMPLETE", "unit_price": "10.00", "quantity": 1, "line_subtotal": "10.00", "promotion_label": "Any 3 at RM20.00", "promotion_metadata_status": "incomplete"},
     ]
 
     rows = build_cross_platform_product_rows(orders, products, price_master=master)
