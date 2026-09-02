@@ -280,10 +280,9 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
                 "total_quantity": 0,
                 "_unit_prices": set(),
                 "_has_unavailable_unit_price": False,
+                "_has_non_authoritative_unit_price": False,
                 "_selling_total": Decimal("0"),
                 "_has_missing_selling_value": False,
-                "_discount_total": Decimal("0"),
-                "_has_missing_discount": False,
             },
         )
         summary["total_quantity"] += parse_quantity(row.get("quantity"))
@@ -292,38 +291,49 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
             summary["_has_unavailable_unit_price"] = True
         else:
             summary["_unit_prices"].add(unit_price)
+        if row.get("reporting_pricing_status") == "platform_source_only":
+            summary["_has_non_authoritative_unit_price"] = True
         selling_value = _decimal_or_none(row.get("reporting_actual_selling_value"))
         if selling_value is None:
             summary["_has_missing_selling_value"] = True
         else:
             summary["_selling_total"] += selling_value
-        discount = _decimal_or_none(row.get("reporting_discount_given"))
-        if discount is None:
-            summary["_has_missing_discount"] = True
-        else:
-            summary["_discount_total"] += discount
 
     result: list[dict[str, Any]] = []
     for summary in summaries.values():
+        unit_selling_price = (
+            None
+            if summary["_has_unavailable_unit_price"] or len(summary["_unit_prices"]) != 1
+            else next(iter(summary["_unit_prices"]))
+        )
+        total_selling_price = (
+            None if summary["_has_missing_selling_value"] else summary["_selling_total"]
+        )
         result.append(
             {
                 "seller_sku": summary["seller_sku"],
                 "product_name": summary["product_name"],
                 "unit_selling_price": (
                     MISSING_VALUE_PLACEHOLDER
-                    if summary["_has_unavailable_unit_price"] or len(summary["_unit_prices"]) != 1
-                    else next(iter(summary["_unit_prices"]))
+                    if unit_selling_price is None
+                    else unit_selling_price
                 ),
                 "total_quantity": summary["total_quantity"],
                 "total_selling_price": (
                     MISSING_VALUE_PLACEHOLDER
-                    if summary["_has_missing_selling_value"]
-                    else summary["_selling_total"]
+                    if total_selling_price is None
+                    else total_selling_price
                 ),
                 "total_discount_given": (
                     MISSING_VALUE_PLACEHOLDER
-                    if summary["_has_missing_discount"]
-                    else summary["_discount_total"]
+                    if (
+                        unit_selling_price is None
+                        or total_selling_price is None
+                        or summary["_has_non_authoritative_unit_price"]
+                    )
+                    else (unit_selling_price * summary["total_quantity"] - total_selling_price).quantize(
+                        MONEY_QUANTUM
+                    )
                 ),
             }
         )
