@@ -308,7 +308,7 @@ def _join_coordinate_product_name_parts(
     previous_first_word: PdfWord | None = None
     previous_last_word: PdfWord | None = None
     for text, first_word, last_word in parts:
-        if joined and _is_split_single_letter_word(
+        if joined and _is_split_product_name_word(
             previous_text,
             text,
             previous_first_word,
@@ -325,7 +325,7 @@ def _join_coordinate_product_name_parts(
     return normalize_whitespace(joined)
 
 
-def _is_split_single_letter_word(
+def _is_split_product_name_word(
     previous_text: str,
     current_text: str,
     previous_first_word: PdfWord | None,
@@ -335,9 +335,15 @@ def _is_split_single_letter_word(
 ) -> bool:
     if previous_first_word is None or previous_last_word is None:
         return False
-    return bool(
+    split_suffix = (
         re.search(r"[a-z]{5,}$", previous_text)
         and re.match(r"^[a-z][,.;:](?:\s|$)", current_text)
+    ) or (
+        re.search(r"\b[A-Z][a-z]$", previous_text)
+        and re.match(r"^[a-z]{2}\s+\|(?:\s|$)", current_text)
+    )
+    return bool(
+        split_suffix
         and previous_last_word.x1 >= columns.unit_left - 12
         and abs(previous_first_word.x0 - current_first_word.x0) <= 6
     )

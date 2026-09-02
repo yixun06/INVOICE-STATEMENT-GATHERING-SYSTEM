@@ -85,6 +85,26 @@ def test_coordinate_product_name_rejoins_a_single_letter_word_split_at_line_wrap
     assert item["variation"] == "500ml"
 
 
+def test_coordinate_product_name_rejoins_a_two_letter_prefix_before_pipe_separator():
+    columns = _Columns(
+        product_left=100,
+        unit_left=335,
+        unit_quantity_boundary=390,
+        quantity_subtotal_boundary=430,
+    )
+    block = [
+        _row(100, _word("[HALAL] Siberian Haskap Berry Elixir | 100% Pu", 110, 326, 100)),
+        _row(110, _word("re | Natural Antioxidant Superfood", 110, 250, 110)),
+        _row(120, _word("51.74", 350, 370, 120), _word("3", 405, 410, 120), _word("155.22", 440, 460, 120)),
+        _row(130, _word("SKU:", 110, 130, 130), _word("9555208013969-New", 135, 225, 130)),
+    ]
+
+    item = _parse_positioned_item_block(block, columns, ())
+
+    assert item is not None
+    assert item["product_name"] == "[HALAL] Siberian Haskap Berry Elixir | 100% Pure | Natural Antioxidant Superfood"
+
+
 def test_coordinate_product_name_keeps_space_for_an_ordinary_wrapped_word():
     columns = _Columns(
         product_left=100,
