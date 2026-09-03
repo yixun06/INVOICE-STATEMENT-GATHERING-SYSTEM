@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import re
 from pathlib import Path
 from typing import Any
 
 from ..utils.normalize import normalize_whitespace
+from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
     parse_buyer_payment,
     parse_income_details,
@@ -138,13 +138,8 @@ def extract_order_date(text: str, order_id: str) -> str:
 
 def _order_date_from_order_id_prefix(order_id: str) -> str:
     """Derive a Shopee order date only from a valid YYMMDD order-ID prefix."""
-    prefix = str(order_id or "").strip()[:6]
-    if not re.fullmatch(r"\d{6}", prefix):
-        return ""
-    try:
-        return datetime.strptime(f"20{prefix}", "%Y%m%d").strftime("%d/%m/%Y")
-    except ValueError:
-        return ""
+    derived_date = shopee_order_date_from_id(order_id)
+    return derived_date.strftime("%d/%m/%Y") if derived_date else ""
 
 
 def extract_order_status(text: str) -> str:

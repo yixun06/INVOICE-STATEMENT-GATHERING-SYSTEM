@@ -108,7 +108,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert orders["B4"].value == "00123456789"
     assert orders["B4"].number_format == "@"
     assert isinstance(orders["C4"].value, datetime)
-    assert orders["C4"].number_format == "dd/mm/yyyy"
+    assert orders["C4"].number_format == "yyyy-mm-dd"
     assert orders["D4"].value == 1250.5
     assert orders["D4"].number_format == '#,##0.00;[Red]-#,##0.00'
     assert orders["D4"].alignment.horizontal == "left"

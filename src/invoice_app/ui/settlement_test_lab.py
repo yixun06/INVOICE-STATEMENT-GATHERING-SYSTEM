@@ -219,7 +219,7 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
     st.dataframe(
         dataframe,
         column_config={
-            "Order Created Date": st.column_config.DateColumn("Order Created Date", format="DD/MM/YYYY"),
+            "Order Created Date": st.column_config.DateColumn("Order Created Date", format="YYYY-MM-DD"),
             "Payout Completed Date": st.column_config.DateColumn("Payout Completed Date", format="DD/MM/YYYY"),
             "Final / Estimated Order Income": st.column_config.NumberColumn(format="RM %.2f"),
             "Released Amount": st.column_config.NumberColumn(format="RM %.2f"),

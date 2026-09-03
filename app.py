@@ -19,6 +19,7 @@ from src.invoice_app.services.product_master_source import (
     configured_product_master_source_settings,
     load_configured_product_price_master,
 )
+from src.invoice_app.utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from src.invoice_app.services.analytics import (
     compute_overall_dashboard,
     compute_platform_dashboard,
@@ -397,7 +398,11 @@ def dataframe_column_config(
             if "timestamp" in col_lower or column in {"delivered_date", "completed_date"}:
                 config[label] = st.column_config.DatetimeColumn(label, format="DD/MM/YYYY HH:mm", width="small")
             else:
-                config[label] = st.column_config.DateColumn(label, format="DD/MM/YYYY", width="small")
+                config[label] = st.column_config.DateColumn(
+                    label,
+                    format="YYYY-MM-DD" if column == "order_created_date" else "DD/MM/YYYY",
+                    width="small",
+                )
         elif column in PINNED_COLUMNS:
             config[label] = st.column_config.TextColumn(label, pinned=True, width="medium")
         elif column in {"reason", "source_pdf", "all_review_reason"}:
@@ -1038,6 +1043,30 @@ def apply_platform_filters(
     return order_df, product_df
 
 
+def _platform_order_display_rows(
+    platform_name: str,
+    orders: list[dict],
+) -> list[dict]:
+    if platform_name != "Shopee":
+        return orders
+
+    display_rows: list[dict] = []
+    for order in orders:
+        if not has_missing_source_date(order.get("order_created_date")):
+            display_rows.append(order)
+            continue
+        derived_date = shopee_order_date_from_id(order.get("order_id"))
+        display_rows.append(
+            {
+                **order,
+                "order_created_date": (
+                    derived_date.strftime("%d/%m/%Y") if derived_date else order.get("order_created_date")
+                ),
+            }
+        )
+    return display_rows
+
+
 def show_platform_tab(
     platform_name: str,
     platform_orders: list[dict],
@@ -1096,7 +1125,11 @@ def show_platform_tab(
         product_optional_columns,
     )
     missing_value = MISSING_VALUE_PLACEHOLDER if platform_name == "Shopee" else None
-    order_df = frame_with_columns(platform_orders, platform_order_columns, missing_value)
+    order_df = frame_with_columns(
+        _platform_order_display_rows(platform_name, platform_orders),
+        platform_order_columns,
+        missing_value,
+    )
     product_display_rows = platform_products
     if platform_name == "Shopee":
         price_master, _, _ = _load_cross_platform_price_master()
@@ -1580,7 +1613,7 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
             CROSS_PLATFORM_PRODUCT_DISPLAY_COLUMNS, CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS
         )
         product_column_config[CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS["reporting_order_created_date"]] = (
-            st.column_config.DateColumn("Order Created Date", format="DD/MM/YYYY", width="small")
+            st.column_config.DateColumn("Order Created Date", format="YYYY-MM-DD", width="small")
         )
         st.dataframe(
             product_df[CROSS_PLATFORM_PRODUCT_DISPLAY_COLUMNS].rename(

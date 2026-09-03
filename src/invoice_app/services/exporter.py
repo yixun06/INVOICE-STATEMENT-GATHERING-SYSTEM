@@ -28,6 +28,7 @@ MONEY_FORMAT = '#,##0.00;[Red]-#,##0.00'
 INTEGER_FORMAT = "#,##0"
 DATE_FORMAT = "dd/mm/yyyy"
 DATETIME_FORMAT = "dd/mm/yyyy hh:mm"
+ORDER_CREATED_DATE_FORMAT = "yyyy-mm-dd"
 
 _TEXT_HEADERS = {
     "batch id",
@@ -404,8 +405,10 @@ def _standardize_cell(cell: Any, kind: str, *, date_only: bool = False) -> None:
         if parsed_date is not None:
             cell.value = parsed_date
             cell.number_format = (
-                DATE_FORMAT
-                if date_only or parsed_date.time() == datetime.min.time()
+                ORDER_CREATED_DATE_FORMAT
+                if date_only
+                else DATE_FORMAT
+                if parsed_date.time() == datetime.min.time()
                 else DATETIME_FORMAT
             )
         return

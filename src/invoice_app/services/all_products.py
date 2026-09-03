@@ -6,6 +6,7 @@ from typing import Any
 
 from ..review_reason_codes import PRODUCT_SUMMARY_EXCLUSION_REASON_CODES
 from ..utils.normalize import normalize_sku_text, normalize_whitespace, parse_quantity
+from ..utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from .batch_service import (
     MISSING_VALUE_PLACEHOLDER,
     PLATFORMS,
@@ -691,6 +692,8 @@ def _canonical_reporting_order_date(platform: str, order: dict[str, Any]) -> dat
         return None
     value = order.get(source_field)
     if _is_missing(value):
+        if platform == "Shopee" and has_missing_source_date(value):
+            return shopee_order_date_from_id(order.get("order_id"))
         return None
 
     text = " ".join(str(value).split())

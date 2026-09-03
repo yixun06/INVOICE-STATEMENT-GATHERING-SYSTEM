@@ -338,6 +338,27 @@ def test_cross_platform_summary_uses_dates_and_price_identity_rows():
 
     assert filter_cross_platform_product_rows(reporting_rows, start_date=date(2026, 8, 8), end_date=date(2026, 8, 8)) == [reporting_rows[1]]
     assert filter_cross_platform_product_rows(reporting_rows, platform="Shopee") == [reporting_rows[0]]
+
+
+def test_cross_platform_uses_shopee_order_id_date_when_source_date_is_missing():
+    rows = build_cross_platform_product_rows(
+        [{"platform": "Shopee", "order_id": "260828J247W9SW", "order_created_date": "N/A"}],
+        [
+            {
+                "platform": "Shopee",
+                "order_id": "260828J247W9SW",
+                "product_name": "Fallback date product",
+                "seller_sku": "SKU-FALLBACK-DATE",
+                "unit_price": "8.00",
+                "line_subtotal": "8.00",
+                "quantity": 1,
+            }
+        ],
+    )
+
+    assert rows[0]["reporting_order_created_date"] == date(2026, 8, 28)
+
+
 def test_cross_platform_dates_prefer_order_payload_then_product_source_without_hiding_missing_rows():
     orders = [
         {"platform": "Shopee", "order_id": "SHP-FALLBACK", "order_created_date": "N/A"},
