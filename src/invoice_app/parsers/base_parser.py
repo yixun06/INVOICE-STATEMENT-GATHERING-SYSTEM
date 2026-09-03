@@ -26,6 +26,7 @@ class BaseParser(ABC):
         status: str,
         reason: str,
         *,
+        reason_code: str | None = None,
         order_payload: dict[str, Any] | None = None,
         product_payloads: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -38,6 +39,8 @@ class BaseParser(ABC):
             "reason": reason,
             "timestamp": "",
         }
+        if reason_code is not None:
+            review["reason_code"] = reason_code
         if order_payload is not None:
             review["order_payload"] = order_payload
         if product_payloads:

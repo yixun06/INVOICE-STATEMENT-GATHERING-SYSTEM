@@ -16,6 +16,7 @@ from src.invoice_app.services.all_products import (
     summarize_cross_platform_products,
 )
 from src.invoice_app.services.exporter import export_all_products_report
+from src.invoice_app.services.product_price_master import ProductPriceMaster
 
 
 def test_all_product_view_reuses_accepted_product_and_order_fields_without_status():
@@ -308,73 +309,35 @@ def test_all_views_ignore_duplicate_and_unsupported_payloads():
     assert review_rows == []
 
 
-def test_cross_platform_summary_uses_seller_sku_dates_and_platform_sales_amounts():
+def test_cross_platform_summary_uses_dates_and_price_identity_rows():
+    master = ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-SHARED", "product_name": "Shared SKU first name", "unit_selling_price": "10.00"},
+        {"seller_sku": "SKU-SHARED", "product_name": "Different source label", "unit_selling_price": "10.00"},
+        {"seller_sku": "SKU-ZENXIN", "product_name": "ZENXIN product", "unit_selling_price": "11.90"},
+    ])
     orders = [
         {"platform": "Shopee", "order_id": "SHP-1", "order_created_date": "07/08/2026 12:04"},
         {"platform": "Lazada", "order_id": "LZD-1", "order_date": "08 08 2026"},
         {"platform": "ZENXIN", "order_id": "ZNX-1", "invoice_date": "09/08/2026"},
     ]
     products = [
-        {
-            "platform": "Shopee",
-            "order_id": "SHP-1",
-            "product_name": "Shared SKU first name",
-            "seller_sku": "SKU-SHARED",
-            "unit_price": "10.00",
-            "line_subtotal": "20.00",
-            "quantity": 2,
-        },
-        {
-            "platform": "Lazada",
-            "order_id": "LZD-1",
-            "product_name": "Different source label",
-            "seller_sku": "SKU-SHARED",
-            "unit_price": "12.00",
-            "paid_price": "9.00",
-            "quantity": 1,
-        },
-        {
-            "platform": "ZENXIN",
-            "order_id": "ZNX-1",
-            "product_name": "ZENXIN product",
-            "seller_sku": "SKU-ZENXIN",
-            "unit_price": "11.90",
-            "line_total_inc_tax": "35.70",
-            "quantity": 3,
-        },
+        {"platform": "Shopee", "order_id": "SHP-1", "product_name": "Shared SKU first name", "seller_sku": "SKU-SHARED", "unit_price": "10.00", "line_subtotal": "20.00", "source_line_subtotal": "20.00", "quantity": 2},
+        {"platform": "Lazada", "order_id": "LZD-1", "product_name": "Different source label", "seller_sku": "SKU-SHARED", "unit_price": "12.00", "paid_price": "9.00", "quantity": 1},
+        {"platform": "ZENXIN", "order_id": "ZNX-1", "product_name": "ZENXIN product", "seller_sku": "SKU-ZENXIN", "unit_price": "11.90", "line_total_inc_tax": "35.70", "quantity": 3},
     ]
 
-    reporting_rows = build_cross_platform_product_rows(orders, products)
+    reporting_rows = build_cross_platform_product_rows(orders, products, price_master=master)
 
-    assert [row["reporting_order_created_date"] for row in reporting_rows] == [
-        date(2026, 8, 7),
-        date(2026, 8, 8),
-        date(2026, 8, 9),
-    ]
+    assert [row["reporting_order_created_date"] for row in reporting_rows] == [date(2026, 8, 7), date(2026, 8, 8), date(2026, 8, 9)]
     assert [row["reporting_sales_amount"] for row in reporting_rows] == ["20.00", "9.00", "35.70"]
     assert summarize_cross_platform_products(reporting_rows) == [
-        {
-            "seller_sku": "SKU-SHARED",
-            "product_name": "Shared SKU first name",
-            "total_quantity": 3,
-            "total_sales_amount": Decimal("29.00"),
-        },
-        {
-            "seller_sku": "SKU-ZENXIN",
-            "product_name": "ZENXIN product",
-            "total_quantity": 3,
-            "total_sales_amount": Decimal("35.70"),
-        },
+        {"seller_sku": "SKU-SHARED", "product_name": "Different source label", "unit_selling_price": Decimal("12.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": "N/A"},
+        {"seller_sku": "SKU-SHARED", "product_name": "Shared SKU first name", "unit_selling_price": Decimal("10.00"), "total_quantity": 2, "total_selling_price": Decimal("20.00"), "total_discount_given": Decimal("0.00")},
+        {"seller_sku": "SKU-ZENXIN", "product_name": "ZENXIN product", "unit_selling_price": Decimal("11.90"), "total_quantity": 3, "total_selling_price": Decimal("35.70"), "total_discount_given": "N/A"},
     ]
 
-    assert filter_cross_platform_product_rows(
-        reporting_rows,
-        start_date=date(2026, 8, 8),
-        end_date=date(2026, 8, 8),
-    ) == [reporting_rows[1]]
+    assert filter_cross_platform_product_rows(reporting_rows, start_date=date(2026, 8, 8), end_date=date(2026, 8, 8)) == [reporting_rows[1]]
     assert filter_cross_platform_product_rows(reporting_rows, platform="Shopee") == [reporting_rows[0]]
-
-
 def test_cross_platform_dates_prefer_order_payload_then_product_source_without_hiding_missing_rows():
     orders = [
         {"platform": "Shopee", "order_id": "SHP-FALLBACK", "order_created_date": "N/A"},
@@ -510,56 +473,30 @@ def test_cross_platform_dates_prefer_order_payload_then_product_source_without_h
     )["reporting_order_created_date"] == date(2026, 8, 12)
 
 
-def test_cross_platform_summary_groups_same_sku_across_multiple_orders_and_platforms():
+def test_cross_platform_summary_groups_same_price_identity_across_multiple_orders():
+    master = ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-SHARED", "product_name": "First source name", "unit_selling_price": "10.00"},
+        {"seller_sku": "SKU-SHARED", "product_name": "Later source name", "unit_selling_price": "10.00"},
+        {"seller_sku": "SKU-SHARED", "product_name": "Platform label does not split the SKU", "unit_selling_price": "10.00"},
+    ])
     orders = [
         {"platform": "Shopee", "order_id": "SHP-1", "order_created_date": "07/08/2026"},
         {"platform": "Shopee", "order_id": "SHP-2", "order_created_date": "08/08/2026"},
         {"platform": "Lazada", "order_id": "LZD-1", "order_date": "09 08 2026"},
     ]
     products = [
-        {
-            "platform": "Shopee",
-            "order_id": "SHP-1",
-            "product_name": "First source name",
-            "seller_sku": "SKU-SHARED",
-            "unit_price": "10.00",
-            "quantity": 2,
-            "line_subtotal": "20.00",
-        },
-        {
-            "platform": "Shopee",
-            "order_id": "SHP-2",
-            "product_name": "Later source name",
-            "seller_sku": "SKU-SHARED",
-            "unit_price": "10.00",
-            "quantity": 4,
-            "line_subtotal": "40.00",
-        },
-        {
-            "platform": "Lazada",
-            "order_id": "LZD-1",
-            "product_name": "Platform label does not split the SKU",
-            "seller_sku": "SKU-SHARED",
-            "unit_price": "9.00",
-            "quantity": 1,
-            "paid_price": "9.00",
-        },
+        {"platform": "Shopee", "order_id": "SHP-1", "product_name": "First source name", "seller_sku": "SKU-SHARED", "unit_price": "10.00", "quantity": 2, "line_subtotal": "20.00", "source_line_subtotal": "20.00"},
+        {"platform": "Shopee", "order_id": "SHP-2", "product_name": "Later source name", "seller_sku": "SKU-SHARED", "unit_price": "10.00", "quantity": 4, "line_subtotal": "40.00", "source_line_subtotal": "40.00"},
+        {"platform": "Lazada", "order_id": "LZD-1", "product_name": "Platform label does not split the SKU", "seller_sku": "SKU-SHARED", "unit_price": "9.00", "quantity": 1, "paid_price": "9.00"},
     ]
 
-    summary_rows = summarize_cross_platform_products(
-        build_cross_platform_product_rows(orders, products)
-    )
+    summary_rows = summarize_cross_platform_products(build_cross_platform_product_rows(orders, products, price_master=master))
 
     assert summary_rows == [
-        {
-            "seller_sku": "SKU-SHARED",
-            "product_name": "First source name",
-            "total_quantity": 7,
-            "total_sales_amount": Decimal("69.00"),
-        }
+        {"seller_sku": "SKU-SHARED", "product_name": "First source name", "unit_selling_price": Decimal("10.00"), "total_quantity": 2, "total_selling_price": Decimal("20.00"), "total_discount_given": Decimal("0.00")},
+        {"seller_sku": "SKU-SHARED", "product_name": "Later source name", "unit_selling_price": Decimal("10.00"), "total_quantity": 4, "total_selling_price": Decimal("40.00"), "total_discount_given": Decimal("0.00")},
+        {"seller_sku": "SKU-SHARED", "product_name": "Platform label does not split the SKU", "unit_selling_price": Decimal("9.00"), "total_quantity": 1, "total_selling_price": Decimal("9.00"), "total_discount_given": "N/A"},
     ]
-
-
 def test_cross_platform_filters_support_independent_inclusive_from_and_to_dates():
     rows = [
         {"platform": "Shopee", "reporting_order_created_date": date(2026, 8, 7)},

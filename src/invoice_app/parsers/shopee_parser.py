@@ -49,6 +49,7 @@ class ShopeeParser(BaseParser):
                 review_issue.order_id,
                 "Manual Review",
                 review_issue.reason,
+                reason_code=review_issue.reason_code,
                 order_payload=order_payload,
                 product_payloads=product_payloads,
             )

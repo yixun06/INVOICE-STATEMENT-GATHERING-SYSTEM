@@ -4,13 +4,21 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ..utils.normalize import parse_quantity
+from ..review_reason_codes import PRODUCT_SUMMARY_EXCLUSION_REASON_CODES
+from ..utils.normalize import normalize_sku_text, normalize_whitespace, parse_quantity
 from .batch_service import (
     MISSING_VALUE_PLACEHOLDER,
     PLATFORMS,
     canonical_order_identity,
     canonical_platform_label,
     is_manual_review_record,
+)
+from .product_price_master import PriceLookupStatus, ProductPriceMaster
+from .product_pricing import (
+    MONEY_QUANTUM,
+    PRICING_ANOMALY_TOLERANCE,
+    ProductPricingStatus,
+    calculate_shopee_product_pricing,
 )
 
 
@@ -74,15 +82,19 @@ CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS = {
 CROSS_PLATFORM_SUMMARY_COLUMNS = [
     "seller_sku",
     "product_name",
+    "unit_selling_price",
     "total_quantity",
-    "total_sales_amount",
+    "total_selling_price",
+    "total_discount_given",
 ]
 
 CROSS_PLATFORM_SUMMARY_FIELD_LABELS = {
     "seller_sku": "Seller SKU",
     "product_name": "Product Name",
+    "unit_selling_price": "Unit Selling Price",
     "total_quantity": "Total Quantity",
-    "total_sales_amount": "Total Sales Amount",
+    "total_selling_price": "Total Selling Price",
+    "total_discount_given": "Total Discount Given",
 }
 
 _REPORTING_DATE_FIELD_BY_PLATFORM = {
@@ -111,10 +123,117 @@ def build_cross_platform_product_rows(
     orders: list[dict[str, Any]],
     products: list[dict[str, Any]],
     reviews: list[dict[str, Any]] | None = None,
+    *,
+    price_master: ProductPriceMaster | None = None,
 ) -> list[dict[str, Any]]:
-    """Return eligible All rows enriched only with reporting-layer date and sales facts."""
+    """Return eligible All rows enriched with pricing inputs and derived reporting facts."""
     normal_rows, _ = _build_all_product_views(orders, products, reviews, include_reporting=True)
-    return normal_rows
+    return _apply_cross_platform_product_pricing(normal_rows, price_master)
+
+
+def partition_cross_platform_product_summary_rows(
+    rows: list[dict[str, Any]],
+    reviews: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep exclusion-coded review orders out of Product Summary only."""
+    exclusions: dict[tuple[str, str], dict[str, Any]] = {}
+    for review in reviews or []:
+        if not is_manual_review_record(review):
+            continue
+        reason_code = str(review.get("reason_code") or "").strip()
+        if reason_code not in PRODUCT_SUMMARY_EXCLUSION_REASON_CODES:
+            continue
+        order_payload = review.get("order_payload")
+        if not isinstance(order_payload, dict):
+            order_payload = {}
+        identity = _review_identity(review, order_payload)
+        if identity is None:
+            continue
+
+        platform, order_id = identity
+        reason = str(review.get("reason") or reason_code).strip() or reason_code
+        source_pdf = str(review.get("source_pdf") or "").strip()
+        exclusion = exclusions.setdefault(
+            identity,
+            {
+                "platform": platform,
+                "order_id": order_id,
+                "reason": reason,
+                "reason_code": reason_code,
+                "source_pdf": source_pdf,
+                "reporting_order_created_date": _preferred_reporting_order_date(
+                    platform, order_payload, {}
+                ),
+                "_reason_codes": [reason_code],
+                "_reasons": [reason],
+            },
+        )
+        if reason_code not in exclusion["_reason_codes"]:
+            exclusion["_reason_codes"].append(reason_code)
+        if reason not in exclusion["_reasons"]:
+            exclusion["_reasons"].append(reason)
+        if not exclusion["source_pdf"] and source_pdf:
+            exclusion["source_pdf"] = source_pdf
+
+    excluded_identities = set(exclusions)
+    summary_rows = [
+        row
+        for row in rows
+        if canonical_order_identity(row.get("platform"), row.get("order_id")) not in excluded_identities
+    ]
+    exclusion_rows: list[dict[str, Any]] = []
+    for exclusion in exclusions.values():
+        exclusion_rows.append(
+            {
+                **exclusion,
+                "reason_code": ", ".join(exclusion["_reason_codes"]),
+                "reason": "\n".join(exclusion["_reasons"]),
+            }
+        )
+    return summary_rows, sorted(
+        exclusion_rows,
+        key=lambda row: (str(row["platform"]).casefold(), str(row["order_id"]).casefold()),
+    )
+
+
+def build_shopee_product_level_rows(
+    products: list[dict[str, Any]],
+    *,
+    price_master: ProductPriceMaster | None,
+) -> list[dict[str, Any]]:
+    """Create Shopee Product Level display rows without changing parsed source rows."""
+    display_rows = [
+        {
+            **product,
+            "product_name": _product_summary_label(
+                {
+                    "product_name": product.get("product_name"),
+                    "reporting_variation_name": product.get("variation_name") or product.get("variation"),
+                }
+            ),
+        }
+        for product in products
+    ]
+    if price_master is None:
+        return [{**row, "unit_price": MISSING_VALUE_PLACEHOLDER} for row in display_rows]
+
+    products_by_order: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, product in enumerate(products):
+        order_key = str(product.get("order_id") or "").strip() or f"__row_{index}"
+        products_by_order.setdefault(order_key, []).append((index, product))
+
+    for members in products_by_order.values():
+        pricing_results = calculate_shopee_product_pricing(
+            [product for _, product in members],
+            price_master,
+        )
+        for (index, _), pricing_result in zip(members, pricing_results):
+            display_rows[index]["unit_price"] = (
+                pricing_result.unit_selling_price
+                if pricing_result.unit_selling_price is not None
+                else MISSING_VALUE_PLACEHOLDER
+            )
+    return display_rows
 
 
 def filter_cross_platform_product_rows(
@@ -142,45 +261,228 @@ def filter_cross_platform_product_rows(
 
 
 def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Aggregate eligible reporting rows by Seller SKU, never by Product Name."""
-    summaries: dict[str, dict[str, Any]] = {}
+    """Aggregate pricing rows by SKU plus Product Name/Variation price identity."""
+    summaries: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
-        seller_sku = str(row.get("seller_sku", "")).strip()
+        seller_sku = normalize_sku_text(row.get("seller_sku"))
         if _is_missing(seller_sku):
             continue
-        summary = summaries.setdefault(
+        identity = (
             seller_sku,
+            _normalized_identity_text(row.get("product_name")),
+            _normalized_identity_text(row.get("reporting_variation_name")),
+        )
+        summary = summaries.setdefault(
+            identity,
             {
                 "seller_sku": seller_sku,
-                "product_name": row.get("product_name", MISSING_VALUE_PLACEHOLDER),
+                "product_name": _product_summary_label(row),
                 "total_quantity": 0,
-                "_sales_total": Decimal("0"),
-                "_has_missing_sales_amount": False,
+                "_unit_prices": set(),
+                "_has_unavailable_unit_price": False,
+                "_has_non_authoritative_unit_price": False,
+                "_selling_total": Decimal("0"),
+                "_has_missing_selling_value": False,
             },
         )
         summary["total_quantity"] += parse_quantity(row.get("quantity"))
-        sales_amount = _decimal_or_none(row.get("reporting_sales_amount"))
-        if sales_amount is None:
-            summary["_has_missing_sales_amount"] = True
+        unit_price = _decimal_or_none(row.get("reporting_unit_selling_price"))
+        if unit_price is None:
+            summary["_has_unavailable_unit_price"] = True
         else:
-            summary["_sales_total"] += sales_amount
+            summary["_unit_prices"].add(unit_price)
+        if row.get("reporting_pricing_status") == "platform_source_only":
+            summary["_has_non_authoritative_unit_price"] = True
+        selling_value = _decimal_or_none(row.get("reporting_actual_selling_value"))
+        if selling_value is None:
+            summary["_has_missing_selling_value"] = True
+        else:
+            summary["_selling_total"] += selling_value
 
     result: list[dict[str, Any]] = []
     for summary in summaries.values():
+        unit_selling_price = (
+            None
+            if summary["_has_unavailable_unit_price"] or len(summary["_unit_prices"]) != 1
+            else next(iter(summary["_unit_prices"]))
+        )
+        total_selling_price = (
+            None if summary["_has_missing_selling_value"] else summary["_selling_total"]
+        )
         result.append(
             {
                 "seller_sku": summary["seller_sku"],
                 "product_name": summary["product_name"],
-                "total_quantity": summary["total_quantity"],
-                "total_sales_amount": (
+                "unit_selling_price": (
                     MISSING_VALUE_PLACEHOLDER
-                    if summary["_has_missing_sales_amount"]
-                    else summary["_sales_total"]
+                    if unit_selling_price is None
+                    else unit_selling_price
+                ),
+                "total_quantity": summary["total_quantity"],
+                "total_selling_price": (
+                    MISSING_VALUE_PLACEHOLDER
+                    if total_selling_price is None
+                    else total_selling_price
+                ),
+                "total_discount_given": (
+                    MISSING_VALUE_PLACEHOLDER
+                    if (
+                        unit_selling_price is None
+                        or total_selling_price is None
+                        or summary["_has_non_authoritative_unit_price"]
+                    )
+                    else (unit_selling_price * summary["total_quantity"] - total_selling_price).quantize(
+                        MONEY_QUANTUM
+                    )
                 ),
             }
         )
-    return sorted(result, key=lambda row: str(row["seller_sku"]).casefold())
+    return sorted(
+        result,
+        key=lambda row: (str(row["seller_sku"]).casefold(), str(row["product_name"]).casefold()),
+    )
+def _apply_cross_platform_product_pricing(
+    rows: list[dict[str, Any]],
+    price_master: ProductPriceMaster | None,
+) -> list[dict[str, Any]]:
+    decorated = [dict(row) for row in rows]
+    if price_master is None:
+        return [_price_master_unavailable(row) for row in decorated]
 
+    shopee_by_order: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, row in enumerate(decorated):
+        if row.get("platform") == "Shopee":
+            order_key = str(row.get("order_id") or "").strip() or f"__row_{index}"
+            shopee_by_order.setdefault(order_key, []).append((index, row))
+        else:
+            decorated[index] = _standard_platform_pricing(row)
+
+    for members in shopee_by_order.values():
+        member_rows = [row for _, row in members]
+        results = calculate_shopee_product_pricing(
+            [_shopee_pricing_input(row) for row in member_rows],
+            price_master,
+        )
+        for (index, row), result in zip(members, results):
+            decorated[index] = {
+                **row,
+                "reporting_unit_selling_price": result.unit_selling_price,
+                "reporting_normal_selling_value": result.normal_selling_value,
+                "reporting_actual_selling_value": result.actual_selling_value,
+                "reporting_discount_given": result.discount_given,
+                "reporting_pricing_status": result.pricing_status.value,
+                "reporting_price_lookup_status": result.price_lookup_status.value,
+                "reporting_pricing_reason": result.reason,
+                "reporting_allocation_method": result.allocation_method,
+                "reporting_allocation_evidence": result.allocation_evidence,
+            }
+    return decorated
+
+
+def _shopee_pricing_input(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "seller_sku": _lookup_input_text(row.get("seller_sku")),
+        "parent_sku": _lookup_input_text(row.get("reporting_parent_sku")),
+        "product_name": _lookup_input_text(row.get("product_name")),
+        "variation_name": _lookup_input_text(row.get("reporting_variation_name")),
+        "quantity": row.get("quantity"),
+        "source_line_subtotal": _shopee_source_line_subtotal_for_pricing(row),
+        "promotion_group_id": row.get("reporting_promotion_group_id"),
+        "promotion_label": row.get("reporting_promotion_label"),
+        "promotion_group_total": row.get("reporting_promotion_group_total"),
+        "source_group_total": row.get("reporting_source_group_total"),
+        "promotion_target_qty": row.get("reporting_promotion_target_qty"),
+        "promotion_member_qty": row.get("reporting_promotion_member_qty"),
+        "promotion_metadata_status": row.get("reporting_promotion_metadata_status"),
+    }
+
+
+def _shopee_source_line_subtotal_for_pricing(row: dict[str, Any]) -> Any:
+    """Return a source subtotal only when it is safe to price the individual row.
+
+    Current parser output stores the normal Shopee Subtotal in both the
+    source-specific field and the normalized ``line_subtotal`` field. Older
+    retained rows can have only the latter, so use it as the same source fact.
+    A promotion marker deliberately disables this fallback: its subtotal may
+    belong to the group rather than to this SKU.
+    """
+    source_subtotal = row.get("reporting_source_line_subtotal")
+    if _decimal_or_none(source_subtotal) is not None:
+        return source_subtotal
+    if any(
+        _lookup_input_text(row.get(field))
+        for field in (
+            "reporting_promotion_group_id",
+            "reporting_promotion_label",
+            "reporting_promotion_metadata_status",
+        )
+    ):
+        return None
+    return row.get("reporting_sales_amount")
+
+def _standard_platform_pricing(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep non-Shopee reporting strictly on its own invoice/source fields."""
+    actual_value = _decimal_or_none(row.get("reporting_sales_amount"))
+    unit_price = _decimal_or_none(row.get("unit_price"))
+    return {
+        **row,
+        "reporting_unit_selling_price": unit_price,
+        "reporting_normal_selling_value": None,
+        "reporting_actual_selling_value": actual_value,
+        "reporting_discount_given": None,
+        "reporting_pricing_status": "platform_source_only",
+        "reporting_price_lookup_status": "not_applicable",
+        "reporting_pricing_reason": None,
+        "reporting_allocation_method": "platform_source_actual_selling_value",
+        "reporting_allocation_evidence": ("platform_source_actual_selling_value",),
+    }
+
+
+def _price_master_unavailable(row: dict[str, Any]) -> dict[str, Any]:
+    actual_value = _decimal_or_none(row.get("reporting_sales_amount"))
+    return {
+        **row,
+        "reporting_unit_selling_price": None,
+        "reporting_normal_selling_value": None,
+        "reporting_actual_selling_value": actual_value if row.get("platform") != "Shopee" else None,
+        "reporting_discount_given": None,
+        "reporting_pricing_status": "price_master_unavailable",
+        "reporting_price_lookup_status": "price_master_unavailable",
+        "reporting_pricing_reason": "Shopee Product Master is unavailable.",
+        "reporting_allocation_method": None,
+        "reporting_allocation_evidence": (),
+    }
+
+
+def _matched_lookup_statuses() -> frozenset[PriceLookupStatus]:
+    return frozenset(
+        {
+            PriceLookupStatus.MATCHED,
+            PriceLookupStatus.MATCHED_BY_ALIAS,
+            PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
+            PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
+            PriceLookupStatus.MATCHED_BY_SKU,
+            PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
+            PriceLookupStatus.MATCHED_BY_PARENT_SKU,
+            PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION,
+        }
+    )
+
+
+def _lookup_input_text(value: Any) -> str:
+    return "" if _is_missing(value) else str(value).strip()
+
+
+def _normalized_identity_text(value: Any) -> str:
+    return normalize_whitespace(_lookup_input_text(value)).casefold()
+
+
+def _product_summary_label(row: dict[str, Any]) -> Any:
+    product_name = row.get("product_name", MISSING_VALUE_PLACEHOLDER)
+    variation_name = row.get("reporting_variation_name")
+    if _is_missing(variation_name):
+        return product_name
+    return f"{product_name} — {variation_name}"
 
 def _build_all_product_views(
     orders: list[dict[str, Any]],
@@ -346,19 +648,32 @@ def _all_product_row(
     row = {
         "product_name": _display_value(product.get("product_name")),
         "unit_price": _display_value(product.get("unit_price")),
-        "seller_sku": _display_value(product.get("seller_sku")),
+        "seller_sku": normalize_sku_text(product.get("seller_sku")),
         "quantity": _display_value(product.get("quantity")),
         "delivery_fee": _display_value(delivery_fee),
         "platform": _display_value(platform),
         "order_id": order_id,
     }
     if include_reporting:
-        row["reporting_order_created_date"] = reporting_order_created_date
-        row["reporting_sales_amount"] = _display_value(
-            product.get(_SALES_FIELD_BY_PLATFORM.get(platform, ""))
+        row.update(
+            {
+                "reporting_order_created_date": reporting_order_created_date,
+                "reporting_sales_amount": _display_value(
+                    product.get(_SALES_FIELD_BY_PLATFORM.get(platform, ""))
+                ),
+                "reporting_parent_sku": normalize_sku_text(product.get("parent_sku")),
+                "reporting_variation_name": product.get("variation_name") or product.get("variation"),
+                "reporting_source_line_subtotal": product.get("source_line_subtotal"),
+                "reporting_promotion_group_id": product.get("promotion_group_id"),
+                "reporting_promotion_label": product.get("promotion_label"),
+                "reporting_promotion_group_total": product.get("promotion_group_total"),
+                "reporting_source_group_total": product.get("source_group_total"),
+                "reporting_promotion_target_qty": product.get("promotion_target_qty"),
+                "reporting_promotion_member_qty": product.get("promotion_member_qty"),
+                "reporting_promotion_metadata_status": product.get("promotion_metadata_status"),
+            }
         )
     return row
-
 
 def _canonical_reporting_order_date(platform: str, order: dict[str, Any]) -> date | None:
     source_field = _REPORTING_DATE_FIELD_BY_PLATFORM.get(platform)

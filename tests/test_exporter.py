@@ -2,8 +2,13 @@ from datetime import datetime
 
 from openpyxl import load_workbook
 
+from src.invoice_app.services.all_products import ALL_PRODUCT_COLUMNS, ALL_PRODUCT_FIELD_LABELS
 from src.invoice_app.services.batch_service import FIELD_LABELS, PLATFORM_ORDER_FIELDS
-from src.invoice_app.services.exporter import export_platform_report, export_review_report
+from src.invoice_app.services.exporter import (
+    export_all_products_report,
+    export_platform_report,
+    export_review_report,
+)
 
 
 def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
@@ -40,7 +45,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
                 "platform": "Shopee",
                 "order_id": "00123456789",
                 "product_name": "Organic vegetable bundle",
-                "seller_sku": "0000456",
+                "seller_sku": 9555208106364.0,
                 "quantity": "3",
                 "unit_price": "12.50",
             }
@@ -108,7 +113,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert orders["A4"].border.left.color.rgb == "00000000"
 
     products = workbook["Products"]
-    assert products["D4"].value == "0000456"
+    assert products["D4"].value == "9555208106364"
     assert products["D4"].number_format == "@"
     assert products["E4"].value == 3
     assert products["E4"].number_format == "#,##0"
@@ -276,3 +281,46 @@ def test_review_export_excludes_duplicate_and_unsupported_rows(tmp_path):
     order_id_column = headers.index("Order ID") + 1
     assert worksheet.max_row == 4
     assert worksheet.cell(row=4, column=order_id_column).value == "MR-1"
+
+
+def test_sku_columns_are_exported_as_text_without_scientific_notation(tmp_path):
+    destination = tmp_path / "all-products-sku-text.xlsx"
+    products = [
+        {
+            "product_name": "Simply Natural Raw Almonds",
+            "unit_price": "8.90",
+            "seller_sku": 9555208109860,
+            "quantity": 27,
+            "platform": "Shopee",
+        },
+        {
+            "product_name": "Simply Natural Italy Pasta",
+            "unit_price": "38.90",
+            "seller_sku": "9555208109723-italy",
+            "quantity": 2,
+            "platform": "Shopee",
+        },
+    ]
+
+    export_all_products_report(
+        destination=destination,
+        products=products,
+        product_columns=ALL_PRODUCT_COLUMNS,
+        column_labels=ALL_PRODUCT_FIELD_LABELS,
+    )
+
+    workbook = load_workbook(destination)
+    worksheet = workbook["Products"]
+
+    headers = [cell.value for cell in worksheet[3]]
+    sku_col_idx = headers.index("Seller SKU #") + 1
+
+    cell_numeric_sku = worksheet.cell(row=4, column=sku_col_idx)
+    assert cell_numeric_sku.value == "9555208109860"
+    assert cell_numeric_sku.data_type == "s"
+    assert cell_numeric_sku.number_format == "@"
+
+    cell_str_sku = worksheet.cell(row=5, column=sku_col_idx)
+    assert cell_str_sku.value == "9555208109723-italy"
+    assert cell_str_sku.data_type == "s"
+    assert cell_str_sku.number_format == "@"

@@ -1,3 +1,9 @@
+# 2026-08-31 - Product Master Quality Report
+
+- Added a read-only Product Master Quality Report service for exact Shopee Invoice Seller SKU candidate diagnostics against both Product Listing SKU and Parent SKU.
+- The report makes candidate rows, unique candidate prices, matched-via evidence, lookup status, and Product Name/Variation mismatches auditable without changing parser, pricing, validation, review, reconciliation, or Product Summary runtime results.
+- Added synthetic coverage for parent-only/both candidate pools, duplicate same-price candidates, exact Name/Variation disambiguation, unresolved conflicts, not-found SKUs, mismatch evidence, and opt-in developer CSV output.
+
 # InvoiceGather changes — 2026-08-22
 
 This note records the InvoiceGather changes completed in this Codex session.
@@ -213,7 +219,7 @@ No changes were made to:
 ## 25. Weekly Statement V1 verification
 
 - Original native export declared `Income` as `A1`, while the fallback recovered 49 populated columns and 1,328 rows without modifying the file.
-- Sample result: 505 Order rows, 820 SKU rows, RM20,599.26 Total Released, 501 Service Fee detail rows, 14 Shipping Fee operational exceptions, and 3 Adjustment events totalling RM-126.63.
+- Synthetic statement fixture results cover Order and SKU rows, released totals, service-fee details, shipping-fee operational exceptions, and adjustment events without recording source-business values.
 - All blocking validations passed. With no persisted/current Shopee Orders supplied to the isolated service, reconciliation produced 0 Matched, 0 Different, 0 Estimated Only, 505 Unmatched Order, and 3 Unmatched Adjustment; the statement remained `Ready to Commit` because these are non-blocking.
 - Python compilation passed for the new parser, service, and tests.
 - Focused Weekly Statement tests: `9 passed in 13.54s`.
@@ -342,3 +348,149 @@ No changes were made to:
 - Restored the Self-Test interface: Data Import default entry; ADMIN / REPORTS / DEVELOPMENT / TESTING navigation; visible Settlement Test Lab; Current Batch / Discard Current Batch; and the Select Source → Upload → Validate → Reconcile → Review & Commit workflow.
 - Restored the existing temporary Accepted-order sync into Settlement Test Lab and the disabled Future Database Commit presentation. Weekly Statement parsing/service, reconciliation, validation recovery, session contracts, reporting, and parser semantics were preserved.
 - Rebuilt affected AppTest coverage around Self-Test navigation, accepted-only temporary sync, Settlement Test Lab availability, and restored legacy UI copy. Focused checks: 25 passed plus 6 Import Result contract tests; smoke checks: 76 passed; full regression: 164 passed in 72.31s.
+
+## 45. Shopee promotion source metadata
+
+- Preserved `source_line_subtotal` independently from the legacy derived `line_total` / `line_subtotal` behavior for Shopee product parser output.
+- For the existing deterministic `Any N at RM...` positioned-parser path, added promotion group ID, source label, source group total, target quantity, and per-product member quantity metadata. Legacy allocation remains unchanged.
+- When the existing section quantity check cannot verify membership, no group ID or member quantity is assigned; nearby source evidence is retained with `promotion_metadata_status = incomplete` and no allocation is applied.
+- Shopee product mapping now passes this source metadata through without changing Cross Platform Summary, Product Master lookup, Weekly Statement, reconciliation, or existing product amount fields.
+
+## 46. Shopee promotion source metadata verification
+
+- Synthetic promotion metadata and existing Shopee parser regression tests: `35 passed in 0.36s`.
+- Full regression suite: `180 passed in 77.71s`, using a workspace-local pytest basetemp.
+
+## 47. Shopee Product Pricing Calculation Engine
+
+- Added standalone `product_pricing` service that resolves Unit Selling Price exclusively through the existing Product Price Master and returns derived pricing results without changing parser rows or existing report fields.
+- Normal rows calculate Normal Selling Value from Product Master price × quantity, Actual Selling Value from `source_line_subtotal`, and Discount Given as the difference.
+- Complete same-price promotion groups allocate the source group total by member quantity with Decimal rounding and a deterministic final-member remainder, preserving exact group-total reconciliation.
+- Missing price, pricing conflict, incomplete promotion evidence, unresolved group-member price, and mixed-price promotion members return explicit unavailable/unsupported statuses without using zero or guessing. Negative discount below -RM0.02 is retained as a Pricing Anomaly.
+- Cross Platform Summary, Product Summary, Shopee parser behavior, Weekly Statement, and reconciliation remain unchanged.
+
+## 48. Product Pricing Calculation Engine verification
+
+- Focused Product Pricing, Product Master, and promotion metadata tests: `26 passed in 0.91s`.
+- Full regression suite: `190 passed in 76.74s`, using a workspace-local pytest basetemp.
+
+## 49. Promotion Pricing Phase 3 — Cross Platform Summary integration
+
+- Cross Platform Product Summary now consumes the existing Shopee Product Price Master and Product Pricing Engine without changing parser, Weekly Statement, reconciliation, payment, or All Products detail contracts.
+- Summary pricing identity is Seller SKU + normalized Product Name + available Variation. Variation is shown in the existing Product Name display label, so same SKU entries with different name/variation and resolved prices remain separate summary rows.
+- The six summary fields are Seller SKU, Product Name, Unit Selling Price, Total Quantity, Total Selling Price, and Total Discount Given. Product Master lookup remains generic: exact SKU first, then normalized Product Name and available Variation only when multi-price candidates need disambiguation.
+- Shopee pricing runs per Order ID before aggregation, preserving promotion-group boundaries. Lazada uses `paid_price` and ZENXIN uses `line_total_inc_tax` as their actual selling values; no voucher, fee, rebate, parser, or payment adjustment is deducted again.
+- Price Not Found / Pricing Conflict retain reliable actual selling amounts and quantity while Unit Selling Price and Discount Given remain `N/A`. Complete promotion groups with an unavailable member price retain only their source-supported allocated actual selling values; incomplete promotion metadata remains unavailable and is surfaced as `N/A`.
+
+## 50. Promotion Pricing Phase 3 verification
+
+- Local Product Master validation (read-only, not tracked): all 7 confirmed multi-price Seller SKUs and all 14 candidate records resolved uniquely through generic Seller SKU + Product Name + available Variation matching; no SKU or price was hardcoded.
+- Focused Summary, Product Master, Product Pricing, All Products, and Streamlit AppTest coverage: `54 passed in 16.39s`; additional promotion source-actual safety coverage: `17 passed in 0.96s`.
+- Full regression suite: `197 passed in 80.81s`, using a workspace-local pytest basetemp.
+
+## 51. Shopee promotion container source facts and pricing safety
+
+- Replaced target-quantity-based Shopee promotion grouping with a coordinate-aware container rule: the promotion label starts a candidate region, SKU-anchored member blocks continue until the next independent normal subtotal, promotion label, section, or page boundary.
+- Added distinct source fields for label evidence (`promotion_advertised_amount` or `promotion_discount_percent`) and the coordinate-confirmed Subtotal-column `source_group_total`; matching numeric values are never treated as the same fact.
+- Promotion members no longer fabricate individual line subtotals. Complete groups validate against their source group total at group level; incomplete layout evidence remains unallocated.
+- Added `Any N enjoy P% off` label support. The percentage is retained as metadata only and is never used to derive the source group total.
+- Shopee Product Master resolution now combines exact Seller SKU and Parent SKU candidates before unique-price/name/variation resolution. Lazada and ZENXIN stay source-only and do not query the Shopee Master.
+
+## 52. Promotion container verification
+
+- Synthetic promotion-container verification confirmed that coordinate-owned group-total evidence remains separate from advertised promotion evidence and individual source subtotals.
+- Focused synthetic and real parser/pricing/lookup regression: `53 passed in 18.00s`.
+- Full regression suite: `196 passed in 56.68s`, using a workspace-local pytest basetemp.
+
+
+## 53. Shopee promotion subtotal on later member row
+
+- Extended the coordinate-based container extractor to accept exactly one Subtotal-column amount positioned on any SKU-anchored member row inside the candidate region, not only the label's first product block.
+- The amount remains a source_group_total; it is never assigned as an individual member subtotal. Multiple or absent candidate Subtotal amounts remain incomplete rather than guessed.
+- Synthetic four-member promotion verification confirmed that a single group total remains group-level evidence and does not become an individual member subtotal.
+
+## 54. Later-member promotion subtotal verification
+
+- Focused Shopee promotion parser, real-sample, and validation regression: 56 passed in 16.28s.
+- Full regression suite: 197 passed in 81.78s, using a workspace-local pytest basetemp.
+
+
+## 55. Promotion parser and source validation contract
+
+- Product Count now uses reliable Seller SKU + Quantity anchors. Product Name and individual line subtotals do not suppress an extracted promotion member.
+- Positioned and text fallback paths preserve Any N at RM and Any N enjoy P% off labels through the same promotion-container validation path.
+- Normal source line subtotals plus each complete promotion source group total reconcile once against Merchandise Subtotal. Existing pricing allocation and Refund reconciliation are unchanged.
+- When a promotion container, member set, or source group total cannot be coordinate-confirmed, Manual Review now reports INCOMPLETE_PROMOTION_EVIDENCE rather than treating members as ordinary line arithmetic.
+
+## 56. Promotion parser and source validation verification
+
+- Focused parser, source-validation, pricing, and real-fixture regression: 47 passed in 1.36s.
+- Local supplied review samples: 13 of 19 accepted; two Product Count cases retain genuinely missing anchors, two remain Income Completion Anchor Missing, one is explicit incomplete promotion evidence, and the existing Refund-related amount discrepancy remains unchanged.
+- Full regression suite: 197 passed in 69.31s, using a workspace-local pytest basetemp.
+
+
+## 57. Shopee promotion group-total evidence resolver
+
+- Replaced nearest-row promotion subtotal selection with a three-step source contract: parser collects every Subtotal-column candidate owned by a promotion container, source validation rejects only true strikethrough candidates using horizontal-rule overlap through the amount middle band, then order-level reconciliation certifies exactly one candidate combination.
+- Promotion labels, original/struck prices, Merchandise Subtotal, vouchers, shipping, fees, and amounts outside the product-container boundary are not candidate totals. Numeric equality with an `Any N at RM...` label is not itself an exclusion.
+- Supports both `Any N at RM...` and `% off` labels through one container pipeline. Target quantity remains metadata and never gates participating quantity or Product Count.
+- Ambiguous, missing, or non-certifiable candidates now produce `INCOMPLETE_PROMOTION_EVIDENCE`; complete groups retain one `source_group_total` for validation. Pricing allocation, Product Master, Refund reconciliation, UI, and main remain unchanged.
+
+## 58. Promotion evidence resolver verification
+
+- Focused synthetic promotion, source-validation, and real-fixture regression: `60 passed in 15.23s`.
+- Supplied Manual Review ZIP re-audit: all 26 formerly promotion-related Product Amount failures now resolve to their source group totals and are accepted; promotion-related Product Amount failures are zero. Seven genuinely ambiguous/incomplete promotion cases remain `INCOMPLETE_PROMOTION_EVIDENCE`; the two Product Count mismatches remain; 37 income-incomplete documents remain outside this change.
+- The original Refund-related Product Amount discrepancy remains unchanged.
+- Full regression suite: `201 passed in 88.07s`, using a workspace-local pytest basetemp.
+
+
+## 59. Later-member promotion subtotal collection
+
+- Corrected the evidence collector to scan every SKU-anchored member block for Subtotal-column candidates, not only the block that contains the promotion label. A valid group total may be physically aligned on a later member SKU row.
+- Container ownership, strict strikethrough rejection, and order-level unique-combination certification remain unchanged. This is a source-evidence parser correction, not an inference from the promotion label.
+- Existing pricing behavior already allocates a certified group total by member quantity only when every member has the same resolved Product Master Unit Selling Price; mixed-price groups remain unsupported and do not receive guessed SKU actuals.
+
+## 60. Later-member collection verification
+
+- Added a parser-level regression for an unlabelled later member carrying a Subtotal-column amount, plus promotion-container and real-fixture regression: `32 passed in 15.28s`.
+- Supplied Manual Review ZIP re-audit: 30 Accepted, 3 `INCOMPLETE_PROMOTION_EVIDENCE`, 2 Product Count mismatches, 37 Income Completion Anchor Missing, and the unchanged Refund discrepancy. Promotion-related Product Amount failures remain zero.
+- Representative direct-evidence fixtures verify that a group total on a later member row is collected without inferring individual member subtotals.
+- Full regression suite: `202 passed in 86.65s`, using a workspace-local pytest basetemp.
+
+## 61. Product Master lookup normalization and identity safety
+
+- SKU identifiers are now normalized as text at Product Master load, pricing input, internal product rows, aggregation, and Excel export. Existing text and leading zeros are preserved; numeric values are rendered without decimal/scientific notation but missing leading zeros are not invented.
+- Shopee parser and mapper now keep `Variation:` content in an independent Variation field instead of appending it to Product Name. Lookup comparison uses only deterministic trim, casefold, and whitespace-insensitive exact matching.
+- Master lookup combines exact Seller SKU and Parent SKU candidates, but resolves only one Master identity. Multiple identities remain `PRICING_CONFLICT` even when their prices happen to be equal. Blank, `N/A`, and `exp` SKUs may resolve only through one exact Product Name plus available Variation identity.
+- Added the narrow auditable `-Less` alias: it runs only after the original SKU has no candidate, uses `REMOVE_SUFFIX_LESS`, and does not authorize any other suffix or fuzzy matching.
+- The read-only Product Master Quality Report now shares runtime lookup statuses, reports alias/name-variation outcomes separately, preserves the full candidate pool, and flags `SOURCE_TEXT_CONTAMINATION` without altering source Product Name text.
+
+## 62. Product Master lookup verification
+
+- Final focused lookup, quality-report, pricing, aggregation, parser, and export regression: `75 passed in 15.85s`.
+- Local Product Listing workbook was not present in the workspace, adjacent project materials, or supplied download materials, so the requested new 5,793-row real-master count was not generated. No substitute master or inferred pricing was used.
+- Full regression suite: `212 passed in 62.25s`, using a workspace-local pytest basetemp.
+
+## 63. Platform full-batch and filtered-view exports
+
+- Replaced the ambiguous single platform export with two separate downloads: `Export full <Platform> batch` ignores search filters, while `Export current filtered view` exports only the visible filtered Orders and Products.
+- Full-batch and filtered-view reports use separate filenames and each Summary worksheet now matches the rows in its own report.
+- The full-batch path preserves the selected platform columns, typed Excel values, existing workbook layout, accepted-data scope, and all parser, validation, duplicate, Manual Review, analytics, and reconciliation behavior.
+
+## 64. Verification
+
+- Python compilation: `app.py` and `tests/test_app_batch_state.py` passed.
+- Focused AppTest verifies a filtered Shopee view produces a one-order report while the simultaneous full-batch report retains two orders; summary counts match each export.
+- Platform UI/export regression subset: `22 passed in 17.48s`.
+
+## 65. Shopee Product Summary source-subtotal fallback
+
+- Cross Platform Summary now passes a normal Shopee product's existing normalized `line_subtotal` into pricing only when the parser-specific `source_line_subtotal` is absent. This reconnects the same parsed source fact for retained/legacy rows, so Total Selling Price and Discount Given can be calculated with the Product Master price.
+- The fallback is disabled whenever promotion group, label, or metadata evidence is present. Promotion rows still require their own complete group-level source evidence and remain `N/A` when allocation is not supportable.
+
+## 66. Product Summary fallback verification
+
+- Added synthetic regression coverage for a normal Shopee row with only `line_subtotal`, asserting derived selling price and discount from Product Master price and quantity.
+- Strengthened the incomplete-promotion regression so an available normalized line subtotal cannot bypass the promotion-evidence guard.
+- Focused product pricing/reporting suite: `29 passed in 1.74s`.
+- Full regression suite: `221 passed in 61.15s`, using a workspace-local pytest basetemp.

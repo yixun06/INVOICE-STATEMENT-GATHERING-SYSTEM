@@ -22,12 +22,27 @@ class PdfWord:
 
 
 @dataclass(frozen=True)
+class PdfHorizontalRule:
+    """A thin horizontal PDF drawing, retained for source-layout evidence."""
+
+    x0: float
+    x1: float
+    top: float
+    bottom: float
+
+    @property
+    def center_y(self) -> float:
+        return (self.top + self.bottom) / 2
+
+
+@dataclass(frozen=True)
 class PdfPage:
     number: int
     width: float
     height: float
     text: str
     words: tuple[PdfWord, ...]
+    horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +62,7 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                 text_chunks.append(page_text)
 
             words: tuple[PdfWord, ...] = ()
+            horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
             if include_words:
                 extracted_words = page.extract_words(
                     x_tolerance=2,
@@ -65,6 +81,7 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                     for word in extracted_words
                     if str(word.get("text", "")).strip()
                 )
+                horizontal_rules = _extract_horizontal_rules(page)
 
             pages.append(
                 PdfPage(
@@ -73,6 +90,7 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                     height=float(page.height),
                     text=page_text,
                     words=words,
+                    horizontal_rules=horizontal_rules,
                 )
             )
 
@@ -99,6 +117,7 @@ def read_pdf_document_selective_words(
 
         for page_number, width, height, page_text, page in page_data:
             words: tuple[PdfWord, ...] = ()
+            horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
             if include_words:
                 extracted_words = page.extract_words(
                     x_tolerance=2,
@@ -117,6 +136,7 @@ def read_pdf_document_selective_words(
                     for word in extracted_words
                     if str(word.get("text", "")).strip()
                 )
+                horizontal_rules = _extract_horizontal_rules(page)
 
             pages.append(
                 PdfPage(
@@ -125,7 +145,27 @@ def read_pdf_document_selective_words(
                     height=height,
                     text=page_text,
                     words=words,
+                    horizontal_rules=horizontal_rules,
                 )
             )
 
     return PdfDocument(text=document_text, pages=tuple(pages))
+
+
+def _extract_horizontal_rules(page: Any) -> tuple[PdfHorizontalRule, ...]:
+    """Return only thin horizontal vector rules; text proximity is not enough."""
+    seen: set[tuple[float, float, float, float]] = set()
+    rules: list[PdfHorizontalRule] = []
+    for drawing in (*page.lines, *page.rects):
+        x0 = float(drawing.get("x0", 0))
+        x1 = float(drawing.get("x1", 0))
+        top = float(drawing.get("top", 0))
+        bottom = float(drawing.get("bottom", 0))
+        if x1 <= x0 or bottom < top or bottom - top > 1.5:
+            continue
+        key = tuple(round(value, 2) for value in (x0, x1, top, bottom))
+        if key in seen:
+            continue
+        seen.add(key)
+        rules.append(PdfHorizontalRule(x0=x0, x1=x1, top=top, bottom=bottom))
+    return tuple(rules)

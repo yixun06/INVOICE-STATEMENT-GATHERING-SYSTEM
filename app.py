@@ -8,8 +8,12 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from src.invoice_app.config import APP_TITLE
+from src.invoice_app.config import APP_TITLE, SHOPEE_PRODUCT_MASTER_PATH
 from src.invoice_app.services.auth_service import authenticate
+from src.invoice_app.services.product_price_master import (
+    ProductPriceMaster,
+    load_shopee_product_price_master,
+)
 from src.invoice_app.services.analytics import (
     compute_overall_dashboard,
     compute_platform_dashboard,
@@ -28,7 +32,9 @@ from src.invoice_app.services.all_products import (
     CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
     build_all_product_views,
     build_cross_platform_product_rows,
+    build_shopee_product_level_rows,
     filter_cross_platform_product_rows,
+    partition_cross_platform_product_summary_rows,
     summarize_cross_platform_products,
 )
 from src.invoice_app.services.batch_service import (
@@ -44,6 +50,7 @@ from src.invoice_app.services.batch_service import (
     is_manual_review_record,
     prepare_uploaded_invoice_files,
     process_pdf_file_with_outcome,
+    resolve_archived_pdf_path,
     split_by_platform,
 )
 from src.invoice_app.services.workflow_navigation import (
@@ -143,6 +150,12 @@ MONEY_COLUMNS = {
 }
 NUMERIC_COLUMNS = MONEY_COLUMNS | {"quantity"}
 DATE_FORMATS_BY_PLATFORM = {
+    "Shopee": {
+        "order_created_date": "%d/%m/%Y %H:%M",
+        "fund_transfer_date": "%d/%m/%Y",
+        "delivered_date": "%d/%m/%Y %H:%M",
+        "completed_date": "%d/%m/%Y %H:%M",
+    },
     "Lazada": {
         "order_date": "%d %m %Y",
         "invoice_date": "%d %m %Y",
@@ -150,6 +163,17 @@ DATE_FORMATS_BY_PLATFORM = {
     "ZENXIN": {
         "invoice_date": "%d/%m/%Y",
     },
+}
+DATE_COLUMNS = {
+    "order_created_date",
+    "fund_transfer_date",
+    "delivered_date",
+    "completed_date",
+    "order_date",
+    "invoice_date",
+    "reporting_order_created_date",
+    "processing_timestamp",
+    "payout_completed_date",
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 REPORT_NAVIGATION_PAGES = ["Dashboard", "Cross Platform Summary", *PLATFORMS]
@@ -233,6 +257,14 @@ def frame_with_columns(
     return dataframe
 
 
+def _parse_display_date(series: pd.Series, expected_format: str | None = None) -> pd.Series:
+    if expected_format:
+        parsed = pd.to_datetime(series, format=expected_format, errors="coerce")
+        if not parsed.isna().all() or series.isna().all():
+            return parsed
+    return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=True)
+
+
 def display_frame(
     dataframe: pd.DataFrame,
     columns: list[str],
@@ -247,9 +279,13 @@ def display_frame(
         visible["quantity"] = pd.to_numeric(visible["quantity"], errors="coerce").astype("Int64")
     for column in MONEY_COLUMNS.intersection(visible.columns):
         visible[column] = pd.to_numeric(visible[column], errors="coerce")
-    for column, date_format in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}).items():
-        if column in visible.columns:
-            visible[column] = pd.to_datetime(visible[column], format=date_format, errors="coerce")
+    platform_formats = DATE_FORMATS_BY_PLATFORM.get(platform_name, {})
+    for column in visible.columns:
+        col_lower = str(column).lower()
+        if column in platform_formats:
+            visible[column] = _parse_display_date(visible[column], platform_formats[column])
+        elif column in DATE_COLUMNS or "date" in col_lower or "timestamp" in col_lower:
+            visible[column] = _parse_display_date(visible[column])
     return visible.rename(columns=column_labels or FIELD_LABELS)
 
 
@@ -340,19 +376,24 @@ def dataframe_column_config(
     config: dict[str, Any] = {}
     for column in columns:
         label = (column_labels or FIELD_LABELS).get(column, column)
+        col_lower = str(column).lower()
         if column == "product_name":
             config[label] = st.column_config.TextColumn(label, pinned=True, width="large")
         elif column == "platform":
             config[label] = st.column_config.TextColumn(label, pinned=True, width="small")
-        elif column == "quantity":
+        elif column in {"quantity", "qty"} or col_lower.endswith("quantity") or col_lower.endswith("qty"):
             config[label] = st.column_config.NumberColumn(label, format="%d", width="small")
-        elif column in MONEY_COLUMNS:
-            config[label] = st.column_config.NumberColumn(label, format="%.2f", width="small", alignment="right")
-        elif column in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}):
-            config[label] = st.column_config.DateColumn(label, format="DD/MM/YYYY", width="small")
+        elif column in MONEY_COLUMNS or col_lower.endswith("price") or col_lower.endswith("fee") or col_lower.endswith("subtotal") or col_lower.endswith("amount") or col_lower.endswith("total") or col_lower.endswith("income") or col_lower.endswith("discount"):
+            if column not in {"income_type", "payment_method", "voucher_code", "voucher_funded_by", "voucher_type"} and not col_lower.endswith("quantity") and not col_lower.endswith("count"):
+                config[label] = st.column_config.NumberColumn(label, format="RM %.2f", width="small", alignment="right")
+        elif column in DATE_COLUMNS or "date" in col_lower or "timestamp" in col_lower or column in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}):
+            if "timestamp" in col_lower or column in {"order_created_date", "delivered_date", "completed_date"}:
+                config[label] = st.column_config.DatetimeColumn(label, format="DD/MM/YYYY HH:mm", width="small")
+            else:
+                config[label] = st.column_config.DateColumn(label, format="DD/MM/YYYY", width="small")
         elif column in PINNED_COLUMNS:
             config[label] = st.column_config.TextColumn(label, pinned=True, width="medium")
-        elif column in {"reason", "source_pdf"}:
+        elif column in {"reason", "source_pdf", "all_review_reason"}:
             config[label] = st.column_config.TextColumn(label, width="large")
     return config
 
@@ -383,8 +424,8 @@ def show_locked_columns(required_columns: list[str]) -> None:
     st.caption(f"Always included: {labels}")
 
 
-def mark_export_success(platform_name: str) -> None:
-    st.session_state[f"{platform_name}_export_success"] = True
+def mark_export_success(platform_name: str, export_scope: str) -> None:
+    st.session_state[f"{platform_name}_export_success"] = export_scope
 
 
 def show_table_section_heading(title: str, description: str) -> None:
@@ -1000,7 +1041,7 @@ def show_platform_tab(
             st.caption(f"No {platform_name} data in this batch.")
         return
 
-    export_kpi = compute_platform_kpis(platform_orders, platform_products)
+    full_batch_kpi = compute_platform_kpis(platform_orders, platform_products)
     platform_order_columns = PLATFORM_ORDER_FIELDS[platform_name]
     platform_product_columns = PLATFORM_PRODUCT_FIELDS[platform_name]
     order_optional_columns = optional_columns(platform_order_columns, ORDER_REQUIRED_COLUMNS)
@@ -1022,8 +1063,15 @@ def show_platform_tab(
     )
     missing_value = MISSING_VALUE_PLACEHOLDER if platform_name == "Shopee" else None
     order_df = frame_with_columns(platform_orders, platform_order_columns, missing_value)
-    product_df = frame_with_columns(platform_products, platform_product_columns, missing_value)
-    order_df, product_df = apply_platform_filters(platform_name, order_df, product_df)
+    product_display_rows = platform_products
+    if platform_name == "Shopee":
+        price_master, _ = _load_cross_platform_price_master()
+        product_display_rows = build_shopee_product_level_rows(
+            platform_products,
+            price_master=price_master,
+        )
+    product_df = frame_with_columns(product_display_rows, platform_product_columns, missing_value)
+    filtered_order_df, filtered_product_df = apply_platform_filters(platform_name, order_df, product_df)
 
     if platform_orders:
         show_table_section_heading(
@@ -1044,11 +1092,11 @@ def show_platform_tab(
             ORDER_REQUIRED_COLUMNS,
             selected_optional_order_columns,
         )
-        if order_df.empty:
+        if filtered_order_df.empty:
             st.caption("No orders match the current filters.")
         else:
             show_data_table(
-                order_df,
+                filtered_order_df,
                 selected_order_columns,
                 key=f"{platform_name}_orders_table",
                 available_columns=platform_order_columns,
@@ -1075,11 +1123,11 @@ def show_platform_tab(
             PRODUCT_REQUIRED_COLUMNS,
             selected_optional_product_columns,
         )
-        if product_df.empty:
+        if filtered_product_df.empty:
             st.caption("No products match the current filters.")
         else:
             show_data_table(
-                product_df,
+                filtered_product_df,
                 selected_product_columns,
                 key=f"{platform_name}_products_table",
                 available_columns=platform_product_columns,
@@ -1096,9 +1144,11 @@ def show_platform_tab(
     )
     show_platform_export(
         platform_name=platform_name,
-        kpi=export_kpi,
-        order_df=order_df,
-        product_df=product_df,
+        full_batch_kpi=full_batch_kpi,
+        full_order_df=order_df,
+        full_product_df=product_df,
+        filtered_order_df=filtered_order_df,
+        filtered_product_df=filtered_product_df,
         selected_order_columns=selected_order_columns,
         selected_product_columns=selected_product_columns,
         action_container=export_actions,
@@ -1107,51 +1157,85 @@ def show_platform_tab(
 
 def show_platform_export(
     platform_name: str,
-    kpi: dict[str, str | int],
-    order_df: pd.DataFrame,
-    product_df: pd.DataFrame,
+    full_batch_kpi: dict[str, str | int],
+    full_order_df: pd.DataFrame,
+    full_product_df: pd.DataFrame,
+    filtered_order_df: pd.DataFrame,
+    filtered_product_df: pd.DataFrame,
     selected_order_columns: list[str],
     selected_product_columns: list[str],
     action_container: Any,
 ) -> None:
-    export_label = f"Export {platform_name}"
-    if order_df.empty and product_df.empty:
-        action_container.button(
-            export_label,
-            disabled=True,
-            icon=":material/download:",
-            key=f"{platform_name}_export_disabled",
-        )
-        return
-
     export_dir = Path("exports")
     export_dir.mkdir(exist_ok=True)
-    export_path = export_dir / f"{st.session_state.get('batch_id', 'batch')}-{platform_name.lower()}-report.xlsx"
+    batch_id = st.session_state.get("batch_id", "batch")
+
+    full_batch_path = export_dir / f"{batch_id}-{platform_name.lower()}-full-batch-report.xlsx"
     export_platform_report(
-        destination=export_path,
+        destination=full_batch_path,
         platform_name=platform_name,
-        summary=kpi,
-        orders=order_df.to_dict("records"),
-        products=product_df.to_dict("records"),
+        summary=full_batch_kpi,
+        orders=full_order_df.to_dict("records"),
+        products=full_product_df.to_dict("records"),
         order_columns=selected_order_columns,
         product_columns=selected_product_columns,
         column_labels=FIELD_LABELS,
     )
-    with open(export_path, "rb") as file_data:
+    with open(full_batch_path, "rb") as file_data:
         action_container.download_button(
-            export_label,
+            f"Export full {platform_name} batch",
             file_data.read(),
-            file_name=export_path.name,
+            file_name=full_batch_path.name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"{platform_name}_export",
+            key=f"{platform_name}_full_batch_export",
             on_click=mark_export_success,
-            args=(platform_name,),
+            args=(platform_name, "Full batch"),
             icon=":material/download:",
             type="primary",
+            help="Exports every accepted order and product in the current platform batch, ignoring search filters.",
         )
-    if st.session_state.pop(f"{platform_name}_export_success", False):
-        st.toast("Current view export is ready.", icon=":material/check_circle:")
 
+    if filtered_order_df.empty and filtered_product_df.empty:
+        action_container.button(
+            "Export current filtered view",
+            disabled=True,
+            icon=":material/filter_alt:",
+            key=f"{platform_name}_filtered_export_disabled",
+            help="No orders or products match the current search filters.",
+        )
+    else:
+        filtered_path = export_dir / f"{batch_id}-{platform_name.lower()}-filtered-view-report.xlsx"
+        filtered_kpi = compute_platform_kpis(
+            filtered_order_df.to_dict("records"),
+            filtered_product_df.to_dict("records"),
+        )
+        export_platform_report(
+            destination=filtered_path,
+            platform_name=platform_name,
+            summary=filtered_kpi,
+            orders=filtered_order_df.to_dict("records"),
+            products=filtered_product_df.to_dict("records"),
+            order_columns=selected_order_columns,
+            product_columns=selected_product_columns,
+            column_labels=FIELD_LABELS,
+        )
+        with open(filtered_path, "rb") as file_data:
+            action_container.download_button(
+                "Export current filtered view",
+                file_data.read(),
+                file_name=filtered_path.name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"{platform_name}_filtered_view_export",
+                on_click=mark_export_success,
+                args=(platform_name, "Filtered view"),
+                icon=":material/filter_alt:",
+                type="secondary",
+                help="Exports only the orders and products currently matching the search filters.",
+            )
+
+    export_scope = st.session_state.pop(f"{platform_name}_export_success", None)
+    if export_scope:
+        st.toast(f"{export_scope} export is ready.", icon=":material/check_circle:")
 
 def show_cross_platform_filters() -> tuple[str, date | None, date | None]:
     show_table_section_heading(
@@ -1188,9 +1272,11 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
 
     summary_df = frame_with_columns(summary_rows, CROSS_PLATFORM_SUMMARY_COLUMNS)
     summary_df["total_quantity"] = pd.to_numeric(summary_df["total_quantity"], errors="coerce").astype("Int64")
-    summary_df["total_sales_amount"] = summary_df["total_sales_amount"].map(
-        lambda value: float(value) if isinstance(value, Decimal) else value
-    )
+    for field in ("unit_selling_price", "total_selling_price", "total_discount_given"):
+        summary_df[field] = pd.to_numeric(
+            summary_df[field].map(lambda value: float(value) if isinstance(value, Decimal) else value),
+            errors="coerce",
+        )
     summary_labels = CROSS_PLATFORM_SUMMARY_FIELD_LABELS
     st.dataframe(
         summary_df[CROSS_PLATFORM_SUMMARY_COLUMNS].rename(columns=summary_labels),
@@ -1203,20 +1289,70 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
             summary_labels["product_name"]: st.column_config.TextColumn(
                 summary_labels["product_name"], pinned=True, width="large"
             ),
+            summary_labels["unit_selling_price"]: st.column_config.NumberColumn(
+                summary_labels["unit_selling_price"], format="RM %.2f", width="small", alignment="right"
+            ),
             summary_labels["total_quantity"]: st.column_config.NumberColumn(
                 summary_labels["total_quantity"], format="%d", width="small"
             ),
-            summary_labels["total_sales_amount"]: st.column_config.NumberColumn(
-                summary_labels["total_sales_amount"], format="%.2f", width="small", alignment="right"
+            summary_labels["total_selling_price"]: st.column_config.NumberColumn(
+                summary_labels["total_selling_price"], format="RM %.2f", width="small", alignment="right"
+            ),
+            summary_labels["total_discount_given"]: st.column_config.NumberColumn(
+                summary_labels["total_discount_given"], format="RM %.2f", width="small", alignment="right"
             ),
         },
         height=320,
     )
 
 
+def show_cross_platform_summary_exclusions(
+    exclusion_rows: list[dict],
+    *,
+    batch_id: str | None,
+) -> None:
+    if not exclusion_rows:
+        return
+
+    show_table_section_heading(
+        "Excluded from Product Summary",
+        "Manual Review orders with product-summary exclusion reason codes remain available in All Products and Manual Review.",
+    )
+    for index, row in enumerate(exclusion_rows):
+        with st.container(border=True):
+            details, source = st.columns([3, 2], gap="medium")
+            details.markdown(f"**Order ID:** {row['order_id']}")
+            details.caption(f"{row['platform']} | {row['reason']}")
+            source_pdf = str(row.get("source_pdf") or "").strip()
+            source.caption(f"Source PDF: {source_pdf or MISSING_VALUE_PLACEHOLDER}")
+            archive_path = resolve_archived_pdf_path(batch_id, source_pdf)
+            if archive_path is None:
+                source.caption("View PDF unavailable: archived source was not found.")
+            else:
+                source.download_button(
+                    "View PDF",
+                    data=archive_path.read_bytes(),
+                    file_name=archive_path.name,
+                    mime="application/pdf",
+                    key=f"cross_platform_summary_excluded_pdf_{index}",
+                    icon=":material/picture_as_pdf:",
+                )
+def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
+    if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
+        return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
+    try:
+        return load_shopee_product_price_master(SHOPEE_PRODUCT_MASTER_PATH), None
+    except (OSError, ValueError) as error:
+        return None, f"Shopee Product Master could not be loaded: {error}"
 def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) -> None:
     all_product_rows, all_review_rows = build_all_product_views(orders, products, reviews)
-    reporting_product_rows = build_cross_platform_product_rows(orders, products, reviews)
+    price_master, price_master_message = _load_cross_platform_price_master()
+    reporting_product_rows = build_cross_platform_product_rows(
+        orders,
+        products,
+        reviews,
+        price_master=price_master,
+    )
     all_review_df = frame_with_columns(all_review_rows, [*ALL_PRODUCT_REVIEW_COLUMNS, "order_id"])
     st.title("Cross Platform Summary")
 
@@ -1228,21 +1364,51 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         start_date=start_date,
         end_date=end_date,
     )
+    summary_product_rows, summary_exclusion_rows = partition_cross_platform_product_summary_rows(
+        reporting_product_rows,
+        reviews,
+    )
+    filtered_summary_product_rows = filter_cross_platform_product_rows(
+        summary_product_rows,
+        platform=platform_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    filtered_summary_exclusion_rows = filter_cross_platform_product_rows(
+        summary_exclusion_rows,
+        platform=platform_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     with product_summary_slot.container():
         show_table_section_heading(
             "Product Summary",
-            "Grouped by Seller SKU. Total Sales Amount uses the platform source line amount.",
+            "Grouped by Seller SKU, Product Name, and available Variation. Product pricing uses the Shopee Product Master.",
         )
-        show_cross_platform_summary_table(summarize_cross_platform_products(filtered_product_rows))
+        show_cross_platform_summary_table(summarize_cross_platform_products(filtered_summary_product_rows))
+        if price_master_message:
+            st.caption(price_master_message)
+        incomplete_promotion_count = sum(
+            row.get("reporting_pricing_status") == "promotion_evidence_incomplete"
+            for row in filtered_summary_product_rows
+        )
+        if incomplete_promotion_count:
+            st.caption(
+                f"{incomplete_promotion_count} product row(s) have incomplete promotion evidence; unavailable pricing values remain N/A."
+            )
         missing_sku_count = sum(
             str(row.get("seller_sku", "")).strip().upper() in {"", MISSING_VALUE_PLACEHOLDER}
-            for row in filtered_product_rows
+            for row in filtered_summary_product_rows
         )
         if missing_sku_count:
             st.caption(
-                f"{missing_sku_count} eligible All Products row(s) without a Seller SKU remain in All Products but cannot be aggregated."
+                f"{missing_sku_count} Product Summary-eligible row(s) without a Seller SKU remain in All Products but cannot be aggregated."
             )
+        show_cross_platform_summary_exclusions(
+            filtered_summary_exclusion_rows,
+            batch_id=st.session_state.get("batch_id"),
+        )
 
     if start_date is not None or end_date is not None:
         platform_rows = filter_cross_platform_product_rows(reporting_product_rows, platform=platform_filter)
@@ -1303,7 +1469,7 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="All_export",
                 on_click=mark_export_success,
-                args=("All",),
+                args=("All", "All Products"),
                 icon=":material/download:",
                 type="primary",
             )
@@ -1344,11 +1510,24 @@ def show_manual_review(
         title,
         f"{len(review_frame)} item(s) need manual checking before they can be used in the final dataset.",
     )
+    if "processing_timestamp" in review_frame.columns:
+        review_frame["processing_timestamp"] = pd.to_datetime(review_frame["processing_timestamp"], errors="coerce")
     review_display_frame = pascal_case_frame(review_frame)
+    review_column_config = {}
+    for col in review_display_frame.columns:
+        col_lower = str(col).lower()
+        if "timestamp" in col_lower or "date" in col_lower:
+            review_column_config[col] = st.column_config.DatetimeColumn(col, format="DD/MM/YYYY HH:mm", width="medium")
+        elif "price" in col_lower or "amount" in col_lower or "fee" in col_lower or "income" in col_lower:
+            review_column_config[col] = st.column_config.NumberColumn(col, format="RM %.2f", width="small", alignment="right")
+        elif "quantity" in col_lower or "qty" in col_lower:
+            review_column_config[col] = st.column_config.NumberColumn(col, format="%d", width="small")
+
     st.dataframe(
         review_display_frame,
         hide_index=True,
         key=table_key,
+        column_config=review_column_config,
         height=320,
     )
     if not include_download:

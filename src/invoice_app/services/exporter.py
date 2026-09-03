@@ -11,6 +11,8 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.workbook import Workbook
+from ..utils.normalize import normalize_sku_text
+
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -32,7 +34,10 @@ _TEXT_HEADERS = {
     "order id",
     "invoice number",
     "seller sku",
+    "seller sku #",
     "shop sku",
+    "parent sku",
+    "sku",
     "voucher code",
     "source pdf",
 }
@@ -113,6 +118,10 @@ def export_all_products_report(
 def export_review_report(reviews: Sequence[dict[str, Any]], destination: str | Path) -> Path:
     actionable_reviews = [review for review in reviews if _is_manual_review_export_row(review)]
     dataframe = pd.DataFrame(actionable_reviews)
+    for col in dataframe.columns:
+        col_lower = str(col).strip().lower()
+        if "sku" in col_lower or "id" in col_lower:
+            dataframe[col] = dataframe[col].map(lambda v: "" if v is None else normalize_sku_text(v) if "sku" in col_lower else str(v).strip())
     internal_columns = [
         column
         for column in dataframe.columns
@@ -175,6 +184,12 @@ def _frame_for_export(
     column_labels: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     dataframe = pd.DataFrame(list(rows))
+    for col in dataframe.columns:
+        col_lower = str(col).strip().lower()
+        if "sku" in col_lower or col_lower in ("seller_sku", "parent_sku", "shop_sku", "sku"):
+            dataframe[col] = dataframe[col].map(normalize_sku_text).astype(str)
+        elif "order_id" in col_lower or "invoice_number" in col_lower:
+            dataframe[col] = dataframe[col].map(lambda v: "" if v is None else str(v).strip())
     if not columns:
         return dataframe.rename(columns=column_labels or {})
     for column in columns:
@@ -332,8 +347,15 @@ def _report_title(sheet_name: str, platform_name: str | None) -> str:
 
 def _column_kind(header: str) -> str:
     normalized = header.strip().lower()
-    words = set(re.findall(r"[a-z]+", normalized))
-    if normalized in _TEXT_HEADERS or normalized.endswith(" id") or normalized.endswith(" sku"):
+    words = set(re.findall(r"[a-z0-9]+", normalized))
+    if (
+        normalized in _TEXT_HEADERS
+        or normalized.endswith(" id")
+        or normalized.endswith(" sku")
+        or normalized.endswith(" sku #")
+        or "sku" in words
+        or "id" in words
+    ):
         return "text"
     if "date" in words or "timestamp" in words:
         return "date"
@@ -350,6 +372,7 @@ def _standardize_cell(cell: Any, kind: str) -> None:
 
     if kind == "text":
         cell.value = str(cell.value)
+        cell.data_type = "s"
         cell.number_format = "@"
         return
 

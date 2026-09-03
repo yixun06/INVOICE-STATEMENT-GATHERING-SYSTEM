@@ -1100,20 +1100,20 @@ def test_canonical_identity_normalizes_platform_and_rejects_missing_order_ids():
     assert all(review["reason"] == "Missing Platform or Order ID in parsed order-level data." for review in reviews)
 
 
-def test_apply_batch_rules_merges_same_sku_only_inside_same_order():
+def test_apply_batch_rules_merges_non_shopee_same_sku_only_inside_same_order():
     orders = [
         {
             "batch_id": "batch-1",
-            "platform": "Shopee",
-            "order_id": "SHP-1",
+            "platform": "Lazada",
+            "order_id": "LZD-1",
             "source_pdf": "one.pdf",
             "gross_sales": "30.00",
             "net_amount": "30.00",
         },
         {
             "batch_id": "batch-1",
-            "platform": "Shopee",
-            "order_id": "SHP-2",
+            "platform": "Lazada",
+            "order_id": "LZD-2",
             "source_pdf": "two.pdf",
             "gross_sales": "15.00",
             "net_amount": "15.00",
@@ -1122,8 +1122,8 @@ def test_apply_batch_rules_merges_same_sku_only_inside_same_order():
     products = [
         {
             "batch_id": "batch-1",
-            "platform": "Shopee",
-            "order_id": "SHP-1",
+            "platform": "Lazada",
+            "order_id": "LZD-1",
             "product_name": "Product A",
             "seller_sku": "SKU-1",
             "quantity": 1,
@@ -1133,8 +1133,8 @@ def test_apply_batch_rules_merges_same_sku_only_inside_same_order():
         },
         {
             "batch_id": "batch-1",
-            "platform": "Shopee",
-            "order_id": "SHP-1",
+            "platform": "Lazada",
+            "order_id": "LZD-1",
             "product_name": "Product A renamed",
             "seller_sku": "SKU-1",
             "quantity": 2,
@@ -1144,8 +1144,8 @@ def test_apply_batch_rules_merges_same_sku_only_inside_same_order():
         },
         {
             "batch_id": "batch-1",
-            "platform": "Shopee",
-            "order_id": "SHP-2",
+            "platform": "Lazada",
+            "order_id": "LZD-2",
             "product_name": "Product A",
             "seller_sku": "SKU-1",
             "quantity": 1,
@@ -1160,9 +1160,9 @@ def test_apply_batch_rules_merges_same_sku_only_inside_same_order():
     assert len(accepted_orders) == 2
     assert len(accepted_products) == 2
     by_order = {product["order_id"]: product for product in accepted_products}
-    assert by_order["SHP-1"]["quantity"] == 3
-    assert by_order["SHP-1"]["line_total"] == "30.00"
-    assert by_order["SHP-2"]["quantity"] == 1
+    assert by_order["LZD-1"]["quantity"] == 3
+    assert by_order["LZD-1"]["line_total"] == "30.00"
+    assert by_order["LZD-2"]["quantity"] == 1
     assert reviews == []
 
 
