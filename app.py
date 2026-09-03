@@ -1387,72 +1387,55 @@ def show_cross_platform_missing_sku_rows(
     if not rows:
         return
 
-    columns = [
-        "order_id",
-        "reporting_order_created_date",
-        "product_name",
-        "reporting_variation_name",
-        "quantity",
-        "reporting_actual_selling_value",
-        "reason",
-    ]
-    labels = {
-        "order_id": "Order ID",
-        "reporting_order_created_date": "Order Created Date",
-        "product_name": "Product Name",
-        "reporting_variation_name": "Variation",
-        "quantity": "Quantity",
-        "reporting_actual_selling_value": "Actual Selling Value",
-        "reason": "Reason",
-    }
-    display_rows = [{**row, "reason": "Missing Seller SKU"} for row in rows]
-    dataframe = frame_with_columns(display_rows, columns, missing_value=MISSING_VALUE_PLACEHOLDER)
-    dataframe["reporting_order_created_date"] = pd.to_datetime(
-        dataframe["reporting_order_created_date"], errors="coerce"
-    )
-    dataframe["quantity"] = pd.to_numeric(dataframe["quantity"], errors="coerce").astype("Int64")
-    dataframe["reporting_actual_selling_value"] = pd.to_numeric(
-        dataframe["reporting_actual_selling_value"].map(
-            lambda value: float(value) if isinstance(value, Decimal) else value
-        ),
-        errors="coerce",
-    )
+    # Each source row below retains its own archive PDF action.
 
     show_table_section_heading(
         "Missing SKU / Not included in Product Summary",
         "These product rows remain in All Products and the current batch, but cannot be grouped without a Seller SKU.",
     )
-    st.dataframe(
-        dataframe[columns].rename(columns=labels),
-        hide_index=True,
-        key="cross_platform_missing_sku_table",
-        column_config={
-            labels["order_id"]: st.column_config.TextColumn(labels["order_id"], pinned=True, width="medium"),
-            labels["reporting_order_created_date"]: st.column_config.DateColumn(
-                labels["reporting_order_created_date"], format="DD/MM/YYYY", width="small"
-            ),
-            labels["product_name"]: st.column_config.TextColumn(labels["product_name"], width="large"),
-            labels["reporting_variation_name"]: st.column_config.TextColumn(labels["reporting_variation_name"], width="medium"),
-            labels["quantity"]: st.column_config.NumberColumn(labels["quantity"], format="%d", width="small"),
-            labels["reporting_actual_selling_value"]: st.column_config.NumberColumn(
-                labels["reporting_actual_selling_value"], format="RM %.2f", width="small", alignment="right"
-            ),
-            labels["reason"]: st.column_config.TextColumn(labels["reason"], width="medium"),
-        },
-        height=320,
-    )
+    widths = (1.3, 1.1, 3.0, 1.4, 0.7, 1.25, 1.4, 1.0)
+    for column, label in zip(st.columns(widths), (
+        "Order ID", "Order Created Date", "Product Name", "Variation",
+        "Quantity", "Actual Selling Value", "Reason", "Source PDF",
+    ), strict=True):
+        column.caption(label)
+
     for index, row in enumerate(rows):
         source_pdf = str(row.get("source_pdf") or "").strip()
-        with st.container(horizontal=True, vertical_alignment="center"):
-            st.caption(
-                f"Order ID: {row.get('order_id', MISSING_VALUE_PLACEHOLDER)} | "
-                f"Source PDF: {source_pdf or MISSING_VALUE_PLACEHOLDER}"
-            )
+        reporting_date = pd.to_datetime(row.get("reporting_order_created_date"), errors="coerce")
+        date_text = (
+            reporting_date.strftime("%d/%m/%Y")
+            if not pd.isna(reporting_date)
+            else MISSING_VALUE_PLACEHOLDER
+        )
+        quantity = display_numeric_value(row.get("quantity"))
+        quantity_text = (
+            str(int(quantity))
+            if quantity is not None and quantity == quantity.to_integral_value()
+            else str(quantity) if quantity is not None else MISSING_VALUE_PLACEHOLDER
+        )
+        actual_selling_value = display_numeric_value(row.get("reporting_actual_selling_value"))
+        actual_selling_value_text = (
+            f"RM {actual_selling_value:,.2f}"
+            if actual_selling_value is not None
+            else MISSING_VALUE_PLACEHOLDER
+        )
+        variation = str(row.get("reporting_variation_name") or "").strip() or MISSING_VALUE_PLACEHOLDER
+
+        with st.container(border=True):
+            order, created, product, variation_column, qty, actual_value, reason, source = st.columns(widths)
+            order.markdown(str(row.get("order_id") or MISSING_VALUE_PLACEHOLDER))
+            created.markdown(date_text)
+            product.markdown(str(row.get("product_name") or MISSING_VALUE_PLACEHOLDER))
+            variation_column.markdown(variation)
+            qty.markdown(quantity_text)
+            actual_value.markdown(actual_selling_value_text)
+            reason.markdown("Missing Seller SKU")
             archive_path = resolve_archived_pdf_path(batch_id, source_pdf)
             if archive_path is None:
-                st.caption("View PDF unavailable: archived source was not found.")
+                source.caption("PDF unavailable")
             else:
-                st.download_button(
+                source.download_button(
                     "View PDF",
                     data=archive_path.read_bytes(),
                     file_name=archive_path.name,

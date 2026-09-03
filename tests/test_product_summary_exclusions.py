@@ -214,14 +214,9 @@ def test_cross_platform_summary_shows_missing_sku_rows_with_actual_sales_and_pdf
     assert summary["Seller SKU"].tolist() == ["SKU-INCLUDED"]
     assert summary["Total Quantity"].tolist() == [1]
     assert summary["Total Selling Price"].tolist() == [10.0]
-    missing_sku = frames_by_columns[
-        ("Order ID", "Order Created Date", "Product Name", "Variation", "Quantity", "Actual Selling Value", "Reason")
-    ]
-    assert missing_sku["Order ID"].tolist() == ["MISSING-SKU"]
-    assert missing_sku["Product Name"].tolist() == ["Needs seller SKU"]
-    assert missing_sku["Variation"].tolist() == ["Size M"]
-    assert missing_sku["Quantity"].tolist() == [2]
-    assert missing_sku["Actual Selling Value"].tolist() == [12.5]
-    assert missing_sku["Reason"].tolist() == ["Missing Seller SKU"]
-    assert "INCLUDED" not in missing_sku["Order ID"].tolist()
-    assert "View PDF" in {button.label for button in app.get("download_button")}
+    missing_sku_text = {str(element.value) for element in app.markdown}
+    assert {"MISSING-SKU", "Needs seller SKU", "Size M", "2", "RM 12.50", "Missing Seller SKU"}.issubset(
+        missing_sku_text
+    )
+    assert "INCLUDED" not in missing_sku_text
+    assert [button.label for button in app.get("download_button")].count("View PDF") == 1
