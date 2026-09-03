@@ -394,7 +394,7 @@ def dataframe_column_config(
             if column not in {"income_type", "payment_method", "voucher_code", "voucher_funded_by", "voucher_type"} and not col_lower.endswith("quantity") and not col_lower.endswith("count"):
                 config[label] = st.column_config.NumberColumn(label, format="RM %.2f", width="small", alignment="right")
         elif column in DATE_COLUMNS or "date" in col_lower or "timestamp" in col_lower or column in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}):
-            if "timestamp" in col_lower or column in {"order_created_date", "delivered_date", "completed_date"}:
+            if "timestamp" in col_lower or column in {"delivered_date", "completed_date"}:
                 config[label] = st.column_config.DatetimeColumn(label, format="DD/MM/YYYY HH:mm", width="small")
             else:
                 config[label] = st.column_config.DateColumn(label, format="DD/MM/YYYY", width="small")

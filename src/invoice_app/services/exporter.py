@@ -261,7 +261,7 @@ def _format_worksheet(worksheet: Worksheet, platform_name: str | None) -> None:
         for column_index, header in enumerate(headers, start=1):
             cell = worksheet.cell(row=row_index, column=column_index)
             kind = _column_kind(header)
-            _standardize_cell(cell, kind)
+            _standardize_cell(cell, kind, date_only=_is_date_only_header(header))
             cell.fill = WHITE_FILL
             cell.font = BODY_FONT
             cell.border = GRID_BORDER
@@ -327,7 +327,7 @@ def _format_all_products_worksheet(worksheet: Worksheet) -> None:
         for column_index, header in enumerate(headers, start=1):
             cell = worksheet.cell(row=row_index, column=column_index)
             kind = _column_kind(header)
-            _standardize_cell(cell, kind)
+            _standardize_cell(cell, kind, date_only=_is_date_only_header(header))
             cell.fill = WHITE_FILL
             cell.font = BODY_FONT
             cell.border = GRID_BORDER
@@ -385,7 +385,11 @@ def _column_kind(header: str) -> str:
     return "text"
 
 
-def _standardize_cell(cell: Any, kind: str) -> None:
+def _is_date_only_header(header: str) -> bool:
+    return header.strip().casefold() == "order created date"
+
+
+def _standardize_cell(cell: Any, kind: str, *, date_only: bool = False) -> None:
     if cell.value is None or str(cell.value).strip() == "":
         return
 
@@ -399,7 +403,11 @@ def _standardize_cell(cell: Any, kind: str) -> None:
         parsed_date = _coerce_date(cell.value)
         if parsed_date is not None:
             cell.value = parsed_date
-            cell.number_format = DATETIME_FORMAT if parsed_date.time() != datetime.min.time() else DATE_FORMAT
+            cell.number_format = (
+                DATE_FORMAT
+                if date_only or parsed_date.time() == datetime.min.time()
+                else DATETIME_FORMAT
+            )
         return
 
     if kind == "integer":

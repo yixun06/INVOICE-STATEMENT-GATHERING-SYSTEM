@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from pathlib import Path
 from typing import Any
@@ -132,7 +133,18 @@ def extract_order_date(text: str, order_id: str) -> str:
         match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
         if match:
             return normalize_whitespace(match.group(1))
-    return ""
+    return _order_date_from_order_id_prefix(order_id)
+
+
+def _order_date_from_order_id_prefix(order_id: str) -> str:
+    """Derive a Shopee order date only from a valid YYMMDD order-ID prefix."""
+    prefix = str(order_id or "").strip()[:6]
+    if not re.fullmatch(r"\d{6}", prefix):
+        return ""
+    try:
+        return datetime.strptime(f"20{prefix}", "%Y%m%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return ""
 
 
 def extract_order_status(text: str) -> str:
