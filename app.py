@@ -34,6 +34,7 @@ from src.invoice_app.services.all_products import (
     build_cross_platform_product_rows,
     build_shopee_product_level_rows,
     filter_cross_platform_product_rows,
+    missing_sku_product_summary_rows,
     partition_cross_platform_product_summary_rows,
     summarize_cross_platform_products,
 )
@@ -1375,6 +1376,92 @@ def show_cross_platform_summary_exclusions(
                     key=f"cross_platform_summary_excluded_pdf_{index}",
                     icon=":material/picture_as_pdf:",
                 )
+
+
+def show_cross_platform_missing_sku_rows(
+    rows: list[dict],
+    *,
+    batch_id: str | None,
+) -> None:
+    """Show source rows that remain outside Seller-SKU Product Summary totals."""
+    if not rows:
+        return
+
+    columns = [
+        "order_id",
+        "reporting_order_created_date",
+        "product_name",
+        "reporting_variation_name",
+        "quantity",
+        "reporting_actual_selling_value",
+        "reason",
+    ]
+    labels = {
+        "order_id": "Order ID",
+        "reporting_order_created_date": "Order Created Date",
+        "product_name": "Product Name",
+        "reporting_variation_name": "Variation",
+        "quantity": "Quantity",
+        "reporting_actual_selling_value": "Actual Selling Value",
+        "reason": "Reason",
+    }
+    display_rows = [{**row, "reason": "Missing Seller SKU"} for row in rows]
+    dataframe = frame_with_columns(display_rows, columns, missing_value=MISSING_VALUE_PLACEHOLDER)
+    dataframe["reporting_order_created_date"] = pd.to_datetime(
+        dataframe["reporting_order_created_date"], errors="coerce"
+    )
+    dataframe["quantity"] = pd.to_numeric(dataframe["quantity"], errors="coerce").astype("Int64")
+    dataframe["reporting_actual_selling_value"] = pd.to_numeric(
+        dataframe["reporting_actual_selling_value"].map(
+            lambda value: float(value) if isinstance(value, Decimal) else value
+        ),
+        errors="coerce",
+    )
+
+    show_table_section_heading(
+        "Missing SKU / Not included in Product Summary",
+        "These product rows remain in All Products and the current batch, but cannot be grouped without a Seller SKU.",
+    )
+    st.dataframe(
+        dataframe[columns].rename(columns=labels),
+        hide_index=True,
+        key="cross_platform_missing_sku_table",
+        column_config={
+            labels["order_id"]: st.column_config.TextColumn(labels["order_id"], pinned=True, width="medium"),
+            labels["reporting_order_created_date"]: st.column_config.DateColumn(
+                labels["reporting_order_created_date"], format="DD/MM/YYYY", width="small"
+            ),
+            labels["product_name"]: st.column_config.TextColumn(labels["product_name"], width="large"),
+            labels["reporting_variation_name"]: st.column_config.TextColumn(labels["reporting_variation_name"], width="medium"),
+            labels["quantity"]: st.column_config.NumberColumn(labels["quantity"], format="%d", width="small"),
+            labels["reporting_actual_selling_value"]: st.column_config.NumberColumn(
+                labels["reporting_actual_selling_value"], format="RM %.2f", width="small", alignment="right"
+            ),
+            labels["reason"]: st.column_config.TextColumn(labels["reason"], width="medium"),
+        },
+        height=320,
+    )
+    for index, row in enumerate(rows):
+        source_pdf = str(row.get("source_pdf") or "").strip()
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.caption(
+                f"Order ID: {row.get('order_id', MISSING_VALUE_PLACEHOLDER)} | "
+                f"Source PDF: {source_pdf or MISSING_VALUE_PLACEHOLDER}"
+            )
+            archive_path = resolve_archived_pdf_path(batch_id, source_pdf)
+            if archive_path is None:
+                st.caption("View PDF unavailable: archived source was not found.")
+            else:
+                st.download_button(
+                    "View PDF",
+                    data=archive_path.read_bytes(),
+                    file_name=archive_path.name,
+                    mime="application/pdf",
+                    key=f"cross_platform_missing_sku_pdf_{index}",
+                    icon=":material/picture_as_pdf:",
+                )
+
+
 def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
     if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
         return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
@@ -1427,6 +1514,10 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         product_summary_rows = summarize_cross_platform_products(filtered_summary_product_rows)
         show_cross_platform_summary_table(product_summary_rows)
         show_cross_platform_summary_export(product_summary_rows)
+        show_cross_platform_missing_sku_rows(
+            missing_sku_product_summary_rows(filtered_summary_product_rows),
+            batch_id=st.session_state.get("batch_id"),
+        )
         if price_master_message:
             st.caption(price_master_message)
         incomplete_promotion_count = sum(
@@ -1436,14 +1527,6 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         if incomplete_promotion_count:
             st.caption(
                 f"{incomplete_promotion_count} product row(s) have incomplete promotion evidence; unavailable pricing values remain N/A."
-            )
-        missing_sku_count = sum(
-            str(row.get("seller_sku", "")).strip().upper() in {"", MISSING_VALUE_PLACEHOLDER}
-            for row in filtered_summary_product_rows
-        )
-        if missing_sku_count:
-            st.caption(
-                f"{missing_sku_count} Product Summary-eligible row(s) without a Seller SKU remain in All Products but cannot be aggregated."
             )
         show_cross_platform_summary_exclusions(
             filtered_summary_exclusion_rows,

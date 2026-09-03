@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from src.invoice_app.services.all_products import (
     build_cross_platform_product_rows,
+    missing_sku_product_summary_rows,
     summarize_cross_platform_products,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
@@ -88,6 +89,47 @@ def test_summary_keeps_master_unit_price_when_actual_sales_are_unavailable():
     assert summary[0]["total_quantity"] == 1
     assert summary[0]["total_selling_price"] == "N/A"
     assert summary[0]["total_discount_given"] == "N/A"
+
+
+def test_missing_sku_rows_stay_outside_summary_without_changing_summary_totals():
+    rows = [
+        {
+            **_summary_row(
+                sku="",
+                quantity=2,
+                unit_price=Decimal("8.00"),
+                actual_value=Decimal("12.50"),
+            ),
+            "order_id": "MISSING-SKU",
+            "source_pdf": "missing-sku.pdf",
+        },
+        {
+            **_summary_row(
+                sku="SKU-INCLUDED",
+                quantity=1,
+                unit_price=Decimal("10.00"),
+                actual_value=Decimal("10.00"),
+            ),
+            "order_id": "INCLUDED",
+            "source_pdf": "included.pdf",
+        },
+    ]
+
+    missing_rows = missing_sku_product_summary_rows(rows)
+    summary = summarize_cross_platform_products(rows)
+
+    assert [row["order_id"] for row in missing_rows] == ["MISSING-SKU"]
+    assert missing_rows[0]["reporting_actual_selling_value"] == Decimal("12.50")
+    assert summary == [
+        {
+            "seller_sku": "SKU-INCLUDED",
+            "product_name": "Product",
+            "unit_selling_price": Decimal("10.00"),
+            "total_quantity": 1,
+            "total_selling_price": Decimal("10.00"),
+            "total_discount_given": Decimal("0.00"),
+        }
+    ]
 
 
 def test_supported_any_n_promotion_uses_source_group_total_when_participating_quantity_exceeds_target():

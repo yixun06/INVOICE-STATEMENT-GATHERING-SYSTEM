@@ -260,6 +260,15 @@ def filter_cross_platform_product_rows(
     return filtered_rows
 
 
+def missing_sku_product_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return each current reporting row that cannot join Seller-SKU aggregation."""
+    return [
+        row
+        for row in rows
+        if _is_missing(normalize_sku_text(row.get("seller_sku")))
+    ]
+
+
 def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate pricing rows by SKU plus Product Name/Variation price identity."""
     summaries: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -657,6 +666,7 @@ def _all_product_row(
     if include_reporting:
         row.update(
             {
+                "source_pdf": _display_value(product.get("source_pdf")),
                 "reporting_order_created_date": reporting_order_created_date,
                 "reporting_sales_amount": _display_value(
                     product.get(_SALES_FIELD_BY_PLATFORM.get(platform, ""))
