@@ -691,9 +691,9 @@ def _canonical_reporting_order_date(platform: str, order: dict[str, Any]) -> dat
     if not source_field:
         return None
     value = order.get(source_field)
+    if platform == "Shopee" and has_missing_source_date(value):
+        return shopee_order_date_from_id(order.get("order_id"))
     if _is_missing(value):
-        if platform == "Shopee" and has_missing_source_date(value):
-            return shopee_order_date_from_id(order.get("order_id"))
         return None
 
     text = " ".join(str(value).split())

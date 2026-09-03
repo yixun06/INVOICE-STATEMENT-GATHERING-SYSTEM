@@ -17,4 +17,4 @@ def shopee_order_date_from_id(order_id: Any) -> date | None:
 
 
 def has_missing_source_date(value: Any) -> bool:
-    return value is None or not str(value).strip() or str(value).strip().casefold() == "n/a"
+    return value is None or str(value).strip().casefold() in {"", "n/a", "none", "nan", "nat"}

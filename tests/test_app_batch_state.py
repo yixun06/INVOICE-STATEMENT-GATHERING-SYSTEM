@@ -473,7 +473,7 @@ def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
     app.session_state["orders"] = [
-        {"platform": "Shopee", "order_id": "260828J247W9SW", "order_created_date": "N/A"}
+        {"platform": "Shopee", "order_id": "260828J247W9SW", "order_created_date": "None"}
     ]
     app.session_state["products"] = []
     app.session_state["reviews"] = []
