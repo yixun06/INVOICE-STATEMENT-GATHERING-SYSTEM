@@ -8,11 +8,15 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from src.invoice_app.config import APP_TITLE, SHOPEE_PRODUCT_MASTER_PATH
+from src.invoice_app.config import APP_TITLE
 from src.invoice_app.services.auth_service import authenticate
 from src.invoice_app.services.product_price_master import (
     ProductPriceMaster,
-    load_shopee_product_price_master,
+)
+from src.invoice_app.services.product_master_source import (
+    ProductMasterSourceError,
+    configured_product_master_source_settings,
+    load_configured_product_price_master,
 )
 from src.invoice_app.services.analytics import (
     compute_overall_dashboard,
@@ -1067,7 +1071,7 @@ def show_platform_tab(
     order_df = frame_with_columns(platform_orders, platform_order_columns, missing_value)
     product_display_rows = platform_products
     if platform_name == "Shopee":
-        price_master, _ = _load_cross_platform_price_master()
+        price_master, _, _ = _load_cross_platform_price_master()
         product_display_rows = build_shopee_product_level_rows(
             platform_products,
             price_master=price_master,
@@ -1445,16 +1449,16 @@ def show_cross_platform_missing_sku_rows(
                 )
 
 
-def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
-    if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
-        return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
+def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None, str]:
     try:
-        return load_shopee_product_price_master(SHOPEE_PRODUCT_MASTER_PATH), None
-    except (OSError, ValueError) as error:
-        return None, f"Shopee Product Master could not be loaded: {error}"
+        price_master, source_label = load_configured_product_price_master()
+        return price_master, None, source_label
+    except ProductMasterSourceError as error:
+        source_label = configured_product_master_source_settings().source_label
+        return None, f"Shopee Product Master could not be loaded: {error}", source_label
 def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) -> None:
     all_product_rows, all_review_rows = build_all_product_views(orders, products, reviews)
-    price_master, price_master_message = _load_cross_platform_price_master()
+    price_master, price_master_message, price_master_source = _load_cross_platform_price_master()
     reporting_product_rows = build_cross_platform_product_rows(
         orders,
         products,
@@ -1497,6 +1501,7 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         product_summary_rows = summarize_cross_platform_products(filtered_summary_product_rows)
         show_cross_platform_summary_table(product_summary_rows)
         show_cross_platform_summary_export(product_summary_rows)
+        st.caption(f"Product Master Source: {price_master_source}")
         show_cross_platform_missing_sku_rows(
             missing_sku_product_summary_rows(filtered_summary_product_rows),
             batch_id=st.session_state.get("batch_id"),
