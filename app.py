@@ -61,6 +61,7 @@ from src.invoice_app.services.workflow_navigation import (
 from src.invoice_app.services.exporter import (
     export_all_products_report,
     export_platform_report,
+    export_product_summary_report,
     export_review_report,
 )
 from src.invoice_app.ui.data_import import (
@@ -1306,6 +1307,43 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
     )
 
 
+def show_cross_platform_summary_export(summary_rows: list[dict]) -> None:
+    if not summary_rows:
+        st.button(
+            "Export Product Summary",
+            disabled=True,
+            icon=":material/download:",
+            key="cross_platform_product_summary_export_disabled",
+        )
+        return
+
+    export_dir = Path("exports")
+    export_dir.mkdir(exist_ok=True)
+    export_path = export_dir / (
+        f"{st.session_state.get('batch_id', 'batch')}-product-summary-report.xlsx"
+    )
+    export_product_summary_report(
+        destination=export_path,
+        summary_rows=summary_rows,
+        summary_columns=CROSS_PLATFORM_SUMMARY_COLUMNS,
+        column_labels=CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
+    )
+    with open(export_path, "rb") as file_data:
+        st.download_button(
+            "Export Product Summary",
+            file_data.read(),
+            file_name=export_path.name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="cross_platform_product_summary_export",
+            on_click=mark_export_success,
+            args=("Cross Platform Summary", "Product Summary"),
+            icon=":material/download:",
+            type="primary",
+            help="Exports the Product Summary currently matching the active Platform and date filters.",
+        )
+    if st.session_state.pop("Cross Platform Summary_export_success", False):
+        st.toast("Product Summary export is ready.", icon=":material/check_circle:")
+
 def show_cross_platform_summary_exclusions(
     exclusion_rows: list[dict],
     *,
@@ -1386,7 +1424,9 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
             "Product Summary",
             "Grouped by Seller SKU, Product Name, and available Variation. Product pricing uses the Shopee Product Master.",
         )
-        show_cross_platform_summary_table(summarize_cross_platform_products(filtered_summary_product_rows))
+        product_summary_rows = summarize_cross_platform_products(filtered_summary_product_rows)
+        show_cross_platform_summary_table(product_summary_rows)
+        show_cross_platform_summary_export(product_summary_rows)
         if price_master_message:
             st.caption(price_master_message)
         incomplete_promotion_count = sum(

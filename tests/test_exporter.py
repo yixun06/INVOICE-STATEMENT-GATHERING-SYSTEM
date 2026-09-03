@@ -1,12 +1,19 @@
 from datetime import datetime
+from decimal import Decimal
 
 from openpyxl import load_workbook
 
-from src.invoice_app.services.all_products import ALL_PRODUCT_COLUMNS, ALL_PRODUCT_FIELD_LABELS
+from src.invoice_app.services.all_products import (
+    ALL_PRODUCT_COLUMNS,
+    ALL_PRODUCT_FIELD_LABELS,
+    CROSS_PLATFORM_SUMMARY_COLUMNS,
+    CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
+)
 from src.invoice_app.services.batch_service import FIELD_LABELS, PLATFORM_ORDER_FIELDS
 from src.invoice_app.services.exporter import (
     export_all_products_report,
     export_platform_report,
+    export_product_summary_report,
     export_review_report,
 )
 
@@ -126,6 +133,43 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert summary["B8"].value == 1250.5
     assert summary["B8"].number_format == '#,##0.00;[Red]-#,##0.00'
 
+
+def test_product_summary_export_uses_standard_layout_and_types(tmp_path):
+    destination = tmp_path / "product-summary.xlsx"
+    export_product_summary_report(
+        destination=destination,
+        summary_rows=[
+            {
+                "seller_sku": 9555208109860,
+                "product_name": "Synthetic summary product",
+                "unit_selling_price": Decimal("10.00"),
+                "total_quantity": 2,
+                "total_selling_price": Decimal("18.00"),
+                "total_discount_given": Decimal("2.00"),
+            }
+        ],
+        summary_columns=CROSS_PLATFORM_SUMMARY_COLUMNS,
+        column_labels=CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
+    )
+
+    workbook = load_workbook(destination)
+    assert workbook.sheetnames == ["Product Summary"]
+    worksheet = workbook["Product Summary"]
+    assert worksheet["A1"].value == "PRODUCT SUMMARY"
+    assert worksheet.freeze_panes == "A4"
+    assert worksheet.auto_filter.ref == "A3:F4"
+    assert [cell.value for cell in worksheet[3]] == [
+        CROSS_PLATFORM_SUMMARY_FIELD_LABELS[column]
+        for column in CROSS_PLATFORM_SUMMARY_COLUMNS
+    ]
+    assert worksheet["A4"].value == "9555208109860"
+    assert worksheet["A4"].number_format == "@"
+    assert worksheet["C4"].value == 10.0
+    assert worksheet["C4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert worksheet["D4"].value == 2
+    assert worksheet["D4"].number_format == "#,##0"
+    assert worksheet["E4"].value == 18.0
+    assert worksheet["F4"].value == 2.0
 
 def test_review_export_uses_same_standard_format(tmp_path):
     destination = tmp_path / "reviews.xlsx"

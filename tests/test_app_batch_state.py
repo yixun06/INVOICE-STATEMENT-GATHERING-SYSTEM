@@ -295,7 +295,7 @@ def test_all_tab_separates_incomplete_product_rows_without_exporting_them(tmp_pa
     assert product_summary["Seller SKU"].tolist() == ["SKU-A"]
     assert product_summary["Total Quantity"].tolist() == [1]
     assert product_summary["Total Selling Price"].tolist() == [9.0]
-    assert "Export All Products" in {
+    assert {"Export All Products", "Export Product Summary"} <= {
         button.label for button in app.get("download_button")
     }
     all_review = frames_by_columns[

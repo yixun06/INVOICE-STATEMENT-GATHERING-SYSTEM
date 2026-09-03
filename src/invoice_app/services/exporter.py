@@ -115,6 +115,23 @@ def export_all_products_report(
     return filepath
 
 
+def export_product_summary_report(
+    destination: str | Path,
+    summary_rows: Sequence[dict[str, Any]],
+    summary_columns: Sequence[str],
+    column_labels: dict[str, str],
+) -> Path:
+    """Export the current Cross Platform Product Summary using the standard workbook layout."""
+    filepath = Path(destination)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    summary_df = _frame_for_export(summary_rows, summary_columns, column_labels)
+
+    with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, index=False, sheet_name="Product Summary")
+        format_excel_workbook(writer.book)
+
+    return filepath
+
 def export_review_report(reviews: Sequence[dict[str, Any]], destination: str | Path) -> Path:
     actionable_reviews = [review for review in reviews if _is_manual_review_export_row(review)]
     dataframe = pd.DataFrame(actionable_reviews)
@@ -338,6 +355,8 @@ def _report_title(sheet_name: str, platform_name: str | None) -> str:
         prefix = "SALES TRANSACTIONS"
     elif sheet_name == "Products":
         prefix = "PRODUCT DETAILS"
+    elif sheet_name == "Product Summary":
+        prefix = "PRODUCT SUMMARY"
     elif sheet_name == "Manual Review":
         prefix = "MANUAL REVIEW REPORT"
     else:
