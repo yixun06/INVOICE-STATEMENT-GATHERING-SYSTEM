@@ -196,7 +196,6 @@ class ProductPriceMaster:
         self,
         *,
         seller_sku: str | None,
-        parent_sku: str | None = None,
         product_name: str | None = None,
         variation_name: str | None = None,
     ) -> ProductPriceLookupResult:

@@ -219,7 +219,7 @@ No changes were made to:
 ## 25. Weekly Statement V1 verification
 
 - Original native export declared `Income` as `A1`, while the fallback recovered 49 populated columns and 1,328 rows without modifying the file.
-- Sample result: 505 Order rows, 820 SKU rows, RM20,599.26 Total Released, 501 Service Fee detail rows, 14 Shipping Fee operational exceptions, and 3 Adjustment events totalling RM-126.63.
+- Synthetic statement fixture results cover Order and SKU rows, released totals, service-fee details, shipping-fee operational exceptions, and adjustment events without recording source-business values.
 - All blocking validations passed. With no persisted/current Shopee Orders supplied to the isolated service, reconciliation produced 0 Matched, 0 Different, 0 Estimated Only, 505 Unmatched Order, and 3 Unmatched Adjustment; the statement remained `Ready to Commit` because these are non-blocking.
 - Python compilation passed for the new parser, service, and tests.
 - Focused Weekly Statement tests: `9 passed in 13.54s`.
@@ -398,7 +398,7 @@ No changes were made to:
 
 ## 52. Promotion container verification
 
-- Real `260818N824EBFU` read-only verification: the two Popcorn rows form one group with `source_group_total = RM20.00`, `promotion_advertised_amount = RM20.00`, `participating_qty = 2`, missing individual source subtotals, and no Manual Review; the numbers remain separately sourced.
+- Synthetic promotion-container verification confirmed that coordinate-owned group-total evidence remains separate from advertised promotion evidence and individual source subtotals.
 - Focused synthetic and real parser/pricing/lookup regression: `53 passed in 18.00s`.
 - Full regression suite: `196 passed in 56.68s`, using a workspace-local pytest basetemp.
 
@@ -407,7 +407,7 @@ No changes were made to:
 
 - Extended the coordinate-based container extractor to accept exactly one Subtotal-column amount positioned on any SKU-anchored member row inside the candidate region, not only the label's first product block.
 - The amount remains a source_group_total; it is never assigned as an individual member subtotal. Multiple or absent candidate Subtotal amounts remain incomplete rather than guessed.
-- Read-only supplied-PDF verification (discounted pdf.pdf): the Any 4 at RM15.00 group now has four members, one source group total of RM15.00, missing individual source subtotals, and is accepted as 1 order / 7 products / 0 Manual Review.
+- Synthetic four-member promotion verification confirmed that a single group total remains group-level evidence and does not become an individual member subtotal.
 
 ## 54. Later-member promotion subtotal verification
 
@@ -440,7 +440,7 @@ No changes were made to:
 
 - Focused synthetic promotion, source-validation, and real-fixture regression: `60 passed in 15.23s`.
 - Supplied Manual Review ZIP re-audit: all 26 formerly promotion-related Product Amount failures now resolve to their source group totals and are accepted; promotion-related Product Amount failures are zero. Seven genuinely ambiguous/incomplete promotion cases remain `INCOMPLETE_PROMOTION_EVIDENCE`; the two Product Count mismatches remain; 37 income-incomplete documents remain outside this change.
-- `2608259RPJPYNG` remains the original Refund-related Product Amount discrepancy and was not changed.
+- The original Refund-related Product Amount discrepancy remains unchanged.
 - Full regression suite: `201 passed in 88.07s`, using a workspace-local pytest basetemp.
 
 
@@ -452,9 +452,9 @@ No changes were made to:
 
 ## 60. Later-member collection verification
 
-- Added a parser-level regression for an unlabelled later member carrying RM15.00 in the Subtotal column, plus promotion-container and real-fixture regression: `32 passed in 15.28s`.
+- Added a parser-level regression for an unlabelled later member carrying a Subtotal-column amount, plus promotion-container and real-fixture regression: `32 passed in 15.28s`.
 - Supplied Manual Review ZIP re-audit: 30 Accepted, 3 `INCOMPLETE_PROMOTION_EVIDENCE`, 2 Product Count mismatches, 37 Income Completion Anchor Missing, and the unchanged Refund discrepancy. Promotion-related Product Amount failures remain zero.
-- The corrected direct-evidence samples are `2608210MU8Y8CH`, `260821W03YK44W`, `260826D5BNTGNU`, and `260826D6JQ2Q8E`; their PDF group totals are RM15.00, RM15.00, RM15.00, and RM44.00 respectively.
+- Representative direct-evidence fixtures verify that a group total on a later member row is collected without inferring individual member subtotals.
 - Full regression suite: `202 passed in 86.65s`, using a workspace-local pytest basetemp.
 
 ## 61. Product Master lookup normalization and identity safety
@@ -490,7 +490,7 @@ No changes were made to:
 
 ## 66. Product Summary fallback verification
 
-- Added regression coverage for a normal Shopee row with only `line_subtotal`, asserting RM18.00 Total Selling Price and RM2.00 Discount Given from a RM10.00 Product Master price and quantity 2.
+- Added synthetic regression coverage for a normal Shopee row with only `line_subtotal`, asserting derived selling price and discount from Product Master price and quantity.
 - Strengthened the incomplete-promotion regression so an available normalized line subtotal cannot bypass the promotion-evidence guard.
 - Focused product pricing/reporting suite: `29 passed in 1.74s`.
 - Full regression suite: `221 passed in 61.15s`, using a workspace-local pytest basetemp.

@@ -74,10 +74,10 @@ def test_multiple_sku_prices_without_unique_name_variation_is_conflict():
     assert result.unit_selling_price is None
 
 
-def test_present_seller_sku_not_found_does_not_fallback_to_parent_sku():
+def test_missing_invoice_seller_sku_is_not_found_when_no_master_key_matches():
     result = _master([
         _row(seller_sku="OTHER-SKU", parent_sku="PARENT-1"),
-    ]).lookup(seller_sku="MISSING-SKU", parent_sku="PARENT-1")
+    ]).lookup(seller_sku="MISSING-SKU")
 
     assert result.status is PriceLookupStatus.PRICE_NOT_FOUND
     assert result.unit_selling_price is None
@@ -89,7 +89,6 @@ def test_blank_seller_sku_requires_exact_name_variation_identity():
         _row(seller_sku="CHILD-SKU", parent_sku="PARENT-1"),
     ]).lookup(
         seller_sku="",
-        parent_sku="PARENT-1",
         product_name="Product One",
         variation_name="Blue",
     )

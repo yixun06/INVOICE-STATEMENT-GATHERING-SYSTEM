@@ -121,7 +121,6 @@ def _candidate(
     )
     lookup = price_master.lookup(
         seller_sku=normalize_sku_text(row.get("seller_sku")),
-        parent_sku=normalize_sku_text(row.get("parent_sku")),
         product_name=identity.product_name,
         variation_name=identity.variation,
     )
