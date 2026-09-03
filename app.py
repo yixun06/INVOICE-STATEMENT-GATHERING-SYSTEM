@@ -15,6 +15,7 @@ from src.invoice_app.services.product_price_master import (
 )
 from src.invoice_app.services.product_master_source import (
     ProductMasterSourceError,
+    clear_product_master_source_cache,
     configured_product_master_source_settings,
     load_configured_product_price_master,
 )
@@ -702,6 +703,33 @@ def show_sidebar(pdf_count: int) -> str:
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
         render_navigation_section("DEVELOPMENT / TESTING", DEVELOPMENT_NAVIGATION_PAGES)
+
+        st.html('<p class="sidebar-section-label">Product Master</p>')
+        refresh_message = st.session_state.pop("product_master_refresh_message", None)
+        if refresh_message:
+            st.success(refresh_message, icon=":material/check_circle:")
+        refresh_error = st.session_state.pop("product_master_refresh_error", None)
+        if refresh_error:
+            st.error(refresh_error, icon=":material/error:")
+        if st.button(
+            "Refresh Product Master",
+            icon=":material/refresh:",
+            key="refresh_product_master",
+            width="stretch",
+        ):
+            clear_product_master_source_cache()
+            try:
+                price_master, source_label = load_configured_product_price_master()
+            except ProductMasterSourceError as error:
+                st.session_state.product_master_refresh_error = (
+                    f"Product Master refresh failed: {error}"
+                )
+            else:
+                st.session_state.product_master_refresh_message = (
+                    f"Product Master refreshed from {source_label} "
+                    f"({len(price_master.records)} records)."
+                )
+            st.rerun()
 
         st.html('<p class="sidebar-section-label">Current batch</p>')
         batch_id = st.session_state.get("batch_id")

@@ -7,7 +7,11 @@ from src.invoice_app.services.product_master_source import (
     GoogleSheetsProductMasterSource,
     LocalExcelProductMasterSource,
     ProductMasterSourceError,
+    ProductMasterSourceSettings,
+    clear_product_master_source_cache,
+    load_configured_product_price_master,
 )
+from src.invoice_app.services import product_master_source
 from src.invoice_app.services.product_price_master import PriceLookupStatus
 
 
@@ -91,3 +95,39 @@ def test_google_source_preserves_existing_price_master_lookup_contract(tmp_path)
 
     assert result.status is PriceLookupStatus.MATCHED
     assert result.unit_selling_price == Decimal("12.50")
+
+
+def test_clearing_product_master_source_cache_forces_a_fresh_source_load(
+    tmp_path, monkeypatch
+):
+    settings = ProductMasterSourceSettings(
+        source="google_sheets",
+        local_excel_path=tmp_path / "unused.xlsx",
+        google_credentials_path=tmp_path / "service-account.json",
+        google_spreadsheet_id="synthetic-sheet-id",
+        google_worksheet_name="shopee",
+    )
+    source = _google_source(tmp_path, _sheet_rows())
+    load_calls = 0
+
+    def create_source(_settings):
+        nonlocal load_calls
+        load_calls += 1
+        return source
+
+    monkeypatch.setattr(
+        product_master_source,
+        "configured_product_master_source_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(ProductMasterSourceSettings, "create_source", create_source)
+    clear_product_master_source_cache()
+
+    load_configured_product_price_master()
+    load_configured_product_price_master()
+    assert load_calls == 1
+
+    clear_product_master_source_cache()
+    load_configured_product_price_master()
+    assert load_calls == 2
+    clear_product_master_source_cache()
