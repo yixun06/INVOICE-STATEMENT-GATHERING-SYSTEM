@@ -268,8 +268,18 @@ def frame_with_columns(
 def _parse_display_date(series: pd.Series, expected_format: str | None = None) -> pd.Series:
     if expected_format:
         parsed = pd.to_datetime(series, format=expected_format, errors="coerce")
-        if not parsed.isna().all() or series.isna().all():
-            return parsed
+        if parsed.isna().any():
+            # Shopee source dates can include a time while Order ID fallback dates
+            # intentionally contain only YYYY-MM-DD.  Preserve the exact source
+            # parse where it succeeds, then parse only the remaining values.
+            fallback_values = pd.to_datetime(
+                series[parsed.isna()],
+                errors="coerce",
+                format="mixed",
+                dayfirst=True,
+            )
+            parsed.loc[parsed.isna()] = fallback_values
+        return parsed
     return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=True)
 
 

@@ -473,7 +473,12 @@ def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
     app.session_state["orders"] = [
-        {"platform": "Shopee", "order_id": "260828J247W9SW", "order_created_date": "None"}
+        {
+            "platform": "Shopee",
+            "order_id": "260827SOURCE",
+            "order_created_date": "27/08/2026 12:04",
+        },
+        {"platform": "Shopee", "order_id": "260828J247W9SW", "order_created_date": "None"},
     ]
     app.session_state["products"] = []
     app.session_state["reviews"] = []
@@ -489,7 +494,8 @@ def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path
         for dataframe in app.dataframe
         if "Order Created Date" in dataframe.value.columns
     )
-    assert order_table["Order Created Date"].iloc[0].date() == date(2026, 8, 28)
+    assert order_table["Order Created Date"].iloc[0].date() == date(2026, 8, 27)
+    assert order_table["Order Created Date"].iloc[1].date() == date(2026, 8, 28)
 
 
 def test_platform_tables_keep_all_fields_available_in_native_toolbar(tmp_path, monkeypatch):
