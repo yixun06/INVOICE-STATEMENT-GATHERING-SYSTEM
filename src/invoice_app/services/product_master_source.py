@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import json
+import logging
 import os
 from pathlib import Path
+import re
 import tomllib
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -20,6 +23,18 @@ from .product_price_master import (
 
 
 GOOGLE_SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+_LOGGER = logging.getLogger(__name__)
+_SAFE_DIAGNOSTIC_TEXT = re.compile(r"^[A-Za-z0-9 .,:;()'/_-]{1,300}$")
+_UNSAFE_DIAGNOSTIC_MARKERS = (
+    "access token",
+    "authorization",
+    "bearer ",
+    "credential",
+    "private key",
+    "private_key",
+    "token=",
+    "-----begin",
+)
 
 
 class ProductMasterSourceError(RuntimeError):
@@ -115,6 +130,21 @@ class GoogleSheetsProductMasterSource:
         except ProductMasterSourceError:
             raise
         except Exception as error:
+            _log_google_sheets_load_failure(
+                error,
+                worksheet_name=self.worksheet_name,
+                credential_source_type=self._credential_source_type(),
+                private_key=(
+                    self.google_service_account.get("private_key")
+                    if self.google_service_account
+                    else None
+                ),
+                private_key_id=(
+                    self.google_service_account.get("private_key_id")
+                    if self.google_service_account
+                    else None
+                ),
+            )
             raise ProductMasterSourceError(
                 "Google Sheets Product Master load failed. Check the configured "
                 "service account and Google Sheet access."
@@ -131,6 +161,13 @@ class GoogleSheetsProductMasterSource:
         raise ProductMasterSourceError(
             "Google Sheets Product Master credentials are missing; configure "
             "google_service_account or google_credentials_path."
+        )
+
+    def _credential_source_type(self) -> str:
+        return (
+            "service_account_info"
+            if self.google_service_account
+            else "service_account_file"
         )
 
 
@@ -262,6 +299,91 @@ def _load_configured_product_price_master(
 
 def clear_product_master_source_cache() -> None:
     _load_configured_product_price_master.cache_clear()
+
+
+def _log_google_sheets_load_failure(
+    error: Exception,
+    *,
+    worksheet_name: str,
+    credential_source_type: str,
+    private_key: Any,
+    private_key_id: Any,
+) -> None:
+    """Log a minimal Google failure diagnostic without logging exception text."""
+    status_code, reason, message = _safe_google_api_error_details(
+        error,
+        private_key=private_key,
+        private_key_id=private_key_id,
+    )
+    _LOGGER.error(
+        "Google Sheets Product Master load diagnostic: "
+        "exception_type=%s http_status=%s google_reason=%s google_message=%s "
+        "worksheet_name=%s credential_source_type=%s",
+        type(error).__name__,
+        status_code or "unavailable",
+        reason or "unavailable",
+        message or "unavailable",
+        _safe_diagnostic_text(worksheet_name, private_key, private_key_id) or "unavailable",
+        credential_source_type,
+    )
+
+
+def _safe_google_api_error_details(
+    error: Exception,
+    *,
+    private_key: Any,
+    private_key_id: Any,
+) -> tuple[str | None, str | None, str | None]:
+    response = getattr(error, "resp", None)
+    status_code = _safe_http_status(getattr(response, "status", None))
+    content = getattr(error, "content", None)
+    if not isinstance(content, (str, bytes)):
+        return status_code, None, None
+    try:
+        decoded = content.decode("utf-8") if isinstance(content, bytes) else content
+        payload = json.loads(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return status_code, None, None
+    error_payload = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error_payload, dict):
+        return status_code, None, None
+    reason = _safe_diagnostic_text(
+        error_payload.get("status"), private_key, private_key_id
+    )
+    message = _safe_diagnostic_text(
+        error_payload.get("message"), private_key, private_key_id
+    )
+    details = error_payload.get("errors")
+    if reason is None and isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict):
+                reason = _safe_diagnostic_text(
+                    detail.get("reason"), private_key, private_key_id
+                )
+                if reason is not None:
+                    break
+    return status_code, reason, message
+
+
+def _safe_http_status(value: Any) -> str | None:
+    if isinstance(value, int) and 100 <= value <= 599:
+        return str(value)
+    return None
+
+
+def _safe_diagnostic_text(value: Any, *secret_values: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not _SAFE_DIAGNOSTIC_TEXT.fullmatch(text):
+        return None
+    folded = text.casefold()
+    if any(marker in folded for marker in _UNSAFE_DIAGNOSTIC_MARKERS):
+        return None
+    for secret_value in secret_values:
+        if isinstance(secret_value, str) and secret_value and secret_value in text:
+            return None
+    return text
 
 
 def _fetch_google_sheet_values(

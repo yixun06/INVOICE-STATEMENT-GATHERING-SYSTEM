@@ -1,4 +1,6 @@
 from decimal import Decimal
+import json
+import logging
 import sys
 from types import ModuleType
 
@@ -183,6 +185,71 @@ def test_google_auth_error_does_not_expose_service_account_info(tmp_path):
         source.load()
 
     assert secret_value not in str(raised.value)
+
+
+def test_google_load_diagnostic_logs_safe_api_fields_without_service_account_secrets(caplog):
+    private_key = "diagnostic-private-key-must-not-appear"
+    private_key_id = "diagnostic-private-key-id-must-not-appear"
+
+    class FakeGoogleApiError(RuntimeError):
+        def __init__(self):
+            self.resp = type("Response", (), {"status": 403})()
+            self.content = json.dumps(
+                {
+                    "error": {
+                        "status": "PERMISSION_DENIED",
+                        "message": "The caller does not have permission",
+                        "private_key": private_key,
+                        "private_key_id": private_key_id,
+                    }
+                }
+            ).encode("utf-8")
+
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=None,
+        google_service_account={
+            "private_key": private_key,
+            "private_key_id": private_key_id,
+        },
+        spreadsheet_id="synthetic-sheet-id",
+        worksheet_name="shopee",
+        values_fetcher=lambda *_: (_ for _ in ()).throw(FakeGoogleApiError()),
+    )
+
+    caplog.set_level(logging.ERROR, logger=product_master_source.__name__)
+    with pytest.raises(ProductMasterSourceError, match="Google Sheets Product Master load failed"):
+        source.load()
+
+    diagnostic = caplog.text
+    assert "exception_type=FakeGoogleApiError" in diagnostic
+    assert "http_status=403" in diagnostic
+    assert "google_reason=PERMISSION_DENIED" in diagnostic
+    assert "google_message=The caller does not have permission" in diagnostic
+    assert "worksheet_name=shopee" in diagnostic
+    assert "credential_source_type=service_account_info" in diagnostic
+    assert private_key not in diagnostic
+    assert private_key_id not in diagnostic
+    assert "{'private_key'" not in diagnostic
+
+
+def test_google_load_diagnostic_never_logs_generic_exception_text(caplog, tmp_path):
+    secret_value = "generic-secret-must-not-appear"
+    credentials_path = tmp_path / "service-account.json"
+    credentials_path.write_text("unused by fake fetcher", encoding="utf-8")
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=credentials_path,
+        spreadsheet_id="synthetic-sheet-id",
+        worksheet_name="shopee",
+        values_fetcher=lambda *_: (_ for _ in ()).throw(RuntimeError(secret_value)),
+    )
+
+    caplog.set_level(logging.ERROR, logger=product_master_source.__name__)
+    with pytest.raises(ProductMasterSourceError, match="Google Sheets Product Master load failed"):
+        source.load()
+
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "credential_source_type=service_account_file" in caplog.text
+    assert secret_value not in caplog.text
 
 
 def test_streamlit_cloud_secrets_provide_service_account_info(monkeypatch, tmp_path):
