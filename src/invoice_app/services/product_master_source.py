@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 import os
 from pathlib import Path
 import tomllib
-from typing import Any, Callable, Iterable, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from ..config import SECRETS_PATH, SHOPEE_PRODUCT_MASTER_PATH
 from ..utils.normalize import normalize_sku_text, normalize_whitespace
@@ -62,16 +62,19 @@ class LocalExcelProductMasterSource:
         )
 
 
-GoogleSheetValuesFetcher = Callable[[Path, str, str], Sequence[Sequence[Any]]]
+GoogleServiceAccountInfo = Mapping[str, Any]
+GoogleCredentialsSource = Path | GoogleServiceAccountInfo
+GoogleSheetValuesFetcher = Callable[[GoogleCredentialsSource, str, str], Sequence[Sequence[Any]]]
 
 
 @dataclass(frozen=True)
 class GoogleSheetsProductMasterSource:
     """Read the complete Product Master tab once through a read-only Service Account."""
 
-    credentials_path: Path
+    credentials_path: Path | None
     spreadsheet_id: str
     worksheet_name: str
+    google_service_account: GoogleServiceAccountInfo | None = field(default=None, repr=False)
     values_fetcher: GoogleSheetValuesFetcher | None = None
 
     def load(self) -> ProductMasterSourceLoad:
@@ -97,14 +100,15 @@ class GoogleSheetsProductMasterSource:
         )
 
     def _fetch_values(self) -> Sequence[Sequence[Any]]:
-        if not self.credentials_path.is_file():
+        credentials_source = self._credentials_source()
+        if isinstance(credentials_source, Path) and not credentials_source.is_file():
             raise ProductMasterSourceError(
                 "Google Sheets Product Master credentials file is unavailable."
             )
         try:
             fetcher = self.values_fetcher or _fetch_google_sheet_values
             rows = fetcher(
-                self.credentials_path,
+                credentials_source,
                 self.spreadsheet_id,
                 self.worksheet_name,
             )
@@ -112,11 +116,22 @@ class GoogleSheetsProductMasterSource:
             raise
         except Exception as error:
             raise ProductMasterSourceError(
-                f"Google Sheets Product Master load failed: {error}"
+                "Google Sheets Product Master load failed. Check the configured "
+                "service account and Google Sheet access."
             ) from error
         if not rows:
             raise ProductMasterSourceError("Google Sheets Product Master is empty.")
         return rows
+
+    def _credentials_source(self) -> GoogleCredentialsSource:
+        if self.google_service_account:
+            return self.google_service_account
+        if self.credentials_path is not None:
+            return self.credentials_path
+        raise ProductMasterSourceError(
+            "Google Sheets Product Master credentials are missing; configure "
+            "google_service_account or google_credentials_path."
+        )
 
 
 @dataclass(frozen=True)
@@ -124,8 +139,22 @@ class ProductMasterSourceSettings:
     source: str
     local_excel_path: Path
     google_credentials_path: Path | None = None
+    google_service_account: GoogleServiceAccountInfo | None = field(default=None, repr=False)
     google_spreadsheet_id: str | None = None
     google_worksheet_name: str | None = None
+
+    def __hash__(self) -> int:
+        """Keep source caching compatible with a non-hashable secret mapping."""
+        return hash(
+            (
+                self.source,
+                self.local_excel_path,
+                self.google_credentials_path,
+                bool(self.google_service_account),
+                self.google_spreadsheet_id,
+                self.google_worksheet_name,
+            )
+        )
 
     @property
     def source_label(self) -> str:
@@ -141,12 +170,13 @@ class ProductMasterSourceSettings:
         missing = [
             name
             for name, value in (
-                ("google_credentials_path", self.google_credentials_path),
                 ("google_spreadsheet_id", self.google_spreadsheet_id),
                 ("google_worksheet_name", self.google_worksheet_name),
             )
             if not value
         ]
+        if not self.google_service_account and self.google_credentials_path is None:
+            missing.insert(0, "google_service_account or google_credentials_path")
         if missing:
             raise ProductMasterSourceError(
                 "Google Sheets Product Master configuration is incomplete: "
@@ -157,11 +187,12 @@ class ProductMasterSourceSettings:
             credentials_path=self.google_credentials_path,
             spreadsheet_id=self.google_spreadsheet_id,
             worksheet_name=self.google_worksheet_name,
+            google_service_account=self.google_service_account,
         )
 
 
 def configured_product_master_source_settings() -> ProductMasterSourceSettings:
-    """Read non-secret source settings from environment, then local Streamlit secrets."""
+    """Read source settings from environment, then Streamlit secrets when available."""
     values: dict[str, str] = {
         "source": os.getenv("INV_PRODUCT_MASTER_SOURCE", "local_excel"),
         "local_excel_path": os.getenv(
@@ -171,18 +202,14 @@ def configured_product_master_source_settings() -> ProductMasterSourceSettings:
         "google_spreadsheet_id": os.getenv("INV_GOOGLE_SPREADSHEET_ID", ""),
         "google_worksheet_name": os.getenv("INV_GOOGLE_WORKSHEET_NAME", ""),
     }
-    if SECRETS_PATH.is_file():
-        try:
-            with SECRETS_PATH.open("rb") as handle:
-                secrets = tomllib.load(handle)
-            source_config = secrets.get("product_master", {})
-            for key in values:
-                if source_config.get(key):
-                    values[key] = str(source_config[key])
-        except (OSError, tomllib.TOMLDecodeError) as error:
-            raise ProductMasterSourceError(
-                f"Product Master configuration could not be read: {error}"
-            ) from error
+    google_service_account: GoogleServiceAccountInfo | None = None
+    source_config = _configured_product_master_secret_mapping()
+    for key in values:
+        if source_config.get(key):
+            values[key] = str(source_config[key])
+    configured_service_account = source_config.get("google_service_account")
+    if isinstance(configured_service_account, Mapping) and configured_service_account:
+        google_service_account = dict(configured_service_account)
     return ProductMasterSourceSettings(
         source=values["source"].strip().casefold(),
         local_excel_path=Path(values["local_excel_path"]),
@@ -191,9 +218,33 @@ def configured_product_master_source_settings() -> ProductMasterSourceSettings:
             if values["google_credentials_path"]
             else None
         ),
+        google_service_account=google_service_account,
         google_spreadsheet_id=values["google_spreadsheet_id"].strip() or None,
         google_worksheet_name=values["google_worksheet_name"].strip() or None,
     )
+
+
+def _configured_product_master_secret_mapping() -> Mapping[str, Any]:
+    if SECRETS_PATH.is_file():
+        try:
+            with SECRETS_PATH.open("rb") as handle:
+                secrets = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ProductMasterSourceError(
+                f"Product Master configuration could not be read: {error}"
+            ) from error
+        source_config = secrets.get("product_master", {})
+        return source_config if isinstance(source_config, Mapping) else {}
+
+    try:
+        import streamlit as st
+
+        source_config = st.secrets.get("product_master", {})
+    except Exception:
+        # In non-Streamlit contexts, or before Cloud Secrets are configured,
+        # environment/default settings remain the safe baseline.
+        return {}
+    return source_config if isinstance(source_config, Mapping) else {}
 
 
 def load_configured_product_price_master() -> tuple[ProductPriceMaster, str]:
@@ -214,7 +265,7 @@ def clear_product_master_source_cache() -> None:
 
 
 def _fetch_google_sheet_values(
-    credentials_path: Path,
+    credentials_source: GoogleCredentialsSource,
     spreadsheet_id: str,
     worksheet_name: str,
 ) -> Sequence[Sequence[Any]]:
@@ -226,9 +277,14 @@ def _fetch_google_sheet_values(
             "Google Sheets dependencies are unavailable; install google-api-python-client."
         ) from error
 
-    credentials = Credentials.from_service_account_file(
-        str(credentials_path), scopes=[GOOGLE_SHEETS_READONLY_SCOPE]
-    )
+    if isinstance(credentials_source, Path):
+        credentials = Credentials.from_service_account_file(
+            str(credentials_source), scopes=[GOOGLE_SHEETS_READONLY_SCOPE]
+        )
+    else:
+        credentials = Credentials.from_service_account_info(
+            dict(credentials_source), scopes=[GOOGLE_SHEETS_READONLY_SCOPE]
+        )
     service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
     response = (
         service.spreadsheets()
