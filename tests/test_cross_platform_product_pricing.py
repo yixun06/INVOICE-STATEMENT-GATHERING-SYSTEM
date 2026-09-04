@@ -29,7 +29,114 @@ def test_cross_platform_summary_uses_master_price_and_platform_actual_values():
     rows = build_cross_platform_product_rows(orders, products, price_master=master)
     assert [row["reporting_actual_selling_value"] for row in rows] == [Decimal("18.00"), Decimal("8.00"), Decimal("10.00")]
     assert [row["reporting_pricing_status"] for row in rows] == ["normal_priced", "platform_source_only", "platform_source_only"]
-    assert summarize_cross_platform_products(rows)[0]["total_discount_given"] == "N/A"
+    summary_rows = summarize_cross_platform_products(rows)
+    assert [(row["unit_selling_price"], row["total_quantity"], row["total_selling_price"]) for row in summary_rows] == [
+        (Decimal("10.00"), 2, Decimal("18.00")),
+        (Decimal("9.00"), 2, Decimal("18.00")),
+    ]
+
+
+def _summary_row(
+    *,
+    seller_sku="SKU-1",
+    product_name="Product",
+    variation_name="",
+    unit_price=Decimal("10.00"),
+    quantity=1,
+    actual_selling_value=Decimal("10.00"),
+    pricing_status="normal_priced",
+    price_lookup_status="matched",
+):
+    return {
+        "seller_sku": seller_sku,
+        "product_name": product_name,
+        "reporting_variation_name": variation_name,
+        "reporting_unit_selling_price": unit_price,
+        "quantity": quantity,
+        "reporting_actual_selling_value": actual_selling_value,
+        "reporting_pricing_status": pricing_status,
+        "reporting_price_lookup_status": price_lookup_status,
+    }
+
+
+def test_product_summary_merges_only_matching_sku_name_variation_and_decimal_price():
+    rows = [
+        _summary_row(product_name="  Product   Name ", variation_name="500ml", unit_price=Decimal("10.0"), quantity=2, actual_selling_value=Decimal("19.00")),
+        _summary_row(product_name="Product Name", variation_name="500ml", unit_price=Decimal("10.00"), quantity=3, actual_selling_value=Decimal("28.50")),
+    ]
+
+    summary_row = summarize_cross_platform_products(rows)[0]
+    assert summary_row["seller_sku"] == "SKU-1"
+    assert summary_row["unit_selling_price"] == Decimal("10.00")
+    assert summary_row["total_quantity"] == 5
+    assert summary_row["total_selling_price"] == Decimal("47.50")
+    assert summary_row["total_discount_given"] == Decimal("2.50")
+
+
+def test_product_summary_merges_pdf_word_wrap_product_name_artifacts():
+    rows = [
+        _summary_row(
+            product_name="Oil Plant-Ba sed Omega-3",
+            unit_price=Decimal("89.90"),
+            quantity=1,
+            actual_selling_value=Decimal("79.11"),
+        ),
+        _summary_row(
+            product_name="Oil Plant-Base d Omega-3",
+            unit_price=Decimal("89.90"),
+            quantity=3,
+            actual_selling_value=Decimal("159.01"),
+            pricing_status="promotion_allocated",
+        ),
+    ]
+
+    summary_rows = summarize_cross_platform_products(rows)
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["total_quantity"] == 4
+    assert summary_rows[0]["total_selling_price"] == Decimal("238.12")
+
+
+def test_product_summary_keeps_different_variations_separate():
+    rows = [
+        _summary_row(variation_name="250ml"),
+        _summary_row(variation_name="500ml"),
+    ]
+
+    assert len(summarize_cross_platform_products(rows)) == 2
+
+
+def test_product_summary_keeps_different_decimal_unit_prices_separate():
+    rows = [
+        _summary_row(unit_price=Decimal("10.00")),
+        _summary_row(unit_price=Decimal("11.00")),
+    ]
+
+    assert [row["unit_selling_price"] for row in summarize_cross_platform_products(rows)] == [
+        Decimal("10.00"),
+        Decimal("11.00"),
+    ]
+
+
+def test_product_summary_keeps_different_product_names_separate():
+    rows = [
+        _summary_row(product_name="Product A"),
+        _summary_row(product_name="Product B"),
+    ]
+
+    assert len(summarize_cross_platform_products(rows)) == 2
+
+
+def test_product_summary_does_not_merge_unresolved_pricing_rows():
+    rows = [
+        _summary_row(unit_price=None, pricing_status="price_not_found", price_lookup_status="not_found"),
+        _summary_row(unit_price=None, pricing_status="price_not_found", price_lookup_status="not_found"),
+        _summary_row(unit_price=None, pricing_status="pricing_conflict", price_lookup_status="conflict"),
+    ]
+
+    summary_rows = summarize_cross_platform_products(rows)
+    assert len(summary_rows) == 3
+    assert all(row["unit_selling_price"] == "N/A" for row in summary_rows)
+    assert all(row["total_selling_price"] == Decimal("10.00") for row in summary_rows)
 
 def test_shopee_normal_line_subtotal_is_used_when_legacy_source_field_is_absent():
     master = _master([
@@ -88,7 +195,11 @@ def test_shopee_promotion_and_normal_source_rows_stay_independent_until_pricing(
 
     pricing_rows = build_cross_platform_product_rows(orders, products, price_master=master)
     assert [row["reporting_actual_selling_value"] for row in pricing_rows] == [Decimal("176.40"), Decimal("58.80")]
-    assert summarize_cross_platform_products(pricing_rows) == [
+    summary_rows = summarize_cross_platform_products(pricing_rows)
+    assert sum(row["reporting_actual_selling_value"] for row in pricing_rows) == sum(
+        row["total_selling_price"] for row in summary_rows
+    ) == Decimal("235.20")
+    assert summary_rows == [
         {
             "seller_sku": "9555208013938",
             "product_name": "Sea Buckthorn Elixir — 500ml",

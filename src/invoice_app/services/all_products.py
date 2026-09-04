@@ -5,7 +5,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..review_reason_codes import PRODUCT_SUMMARY_EXCLUSION_REASON_CODES
-from ..utils.normalize import normalize_sku_text, normalize_whitespace, parse_quantity
+from ..utils.normalize import (
+    normalize_match_text,
+    normalize_sku_text,
+    normalize_whitespace,
+    parse_quantity,
+)
 from ..utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from .batch_service import (
     MISSING_VALUE_PLACEHOLDER,
@@ -272,15 +277,17 @@ def missing_sku_product_summary_rows(rows: list[dict[str, Any]]) -> list[dict[st
 
 def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate pricing rows by SKU plus Product Name/Variation price identity."""
-    summaries: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for row in rows:
+    summaries: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row_index, row in enumerate(rows):
         seller_sku = normalize_sku_text(row.get("seller_sku"))
         if _is_missing(seller_sku):
             continue
+        unit_price = _decimal_or_none(row.get("reporting_unit_selling_price"))
         identity = (
             seller_sku,
-            _normalized_identity_text(row.get("product_name")),
+            _normalized_product_summary_name(row.get("product_name")),
             _normalized_identity_text(row.get("reporting_variation_name")),
+            *_product_summary_unit_price_identity(row, row_index, unit_price),
         )
         summary = summaries.setdefault(
             identity,
@@ -296,7 +303,6 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
             },
         )
         summary["total_quantity"] += parse_quantity(row.get("quantity"))
-        unit_price = _decimal_or_none(row.get("reporting_unit_selling_price"))
         if unit_price is None:
             summary["_has_unavailable_unit_price"] = True
         else:
@@ -351,6 +357,24 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
         result,
         key=lambda row: (str(row["seller_sku"]).casefold(), str(row["product_name"]).casefold()),
     )
+
+
+def _product_summary_unit_price_identity(
+    row: dict[str, Any],
+    row_index: int,
+    unit_price: Decimal | None,
+) -> tuple[Any, ...]:
+    """Return a safe Product Summary price identity without collapsing N/A prices."""
+    if unit_price is not None:
+        return ("reliable", unit_price)
+    return (
+        "unresolved",
+        _normalized_identity_text(row.get("reporting_pricing_status")),
+        _normalized_identity_text(row.get("reporting_price_lookup_status")),
+        row_index,
+    )
+
+
 def _apply_cross_platform_product_pricing(
     rows: list[dict[str, Any]],
     price_master: ProductPriceMaster | None,
@@ -485,6 +509,11 @@ def _lookup_input_text(value: Any) -> str:
 
 def _normalized_identity_text(value: Any) -> str:
     return normalize_whitespace(_lookup_input_text(value)).casefold()
+
+
+def _normalized_product_summary_name(value: Any) -> str:
+    """Use the existing match normalizer to ignore PDF word-wrap whitespace."""
+    return normalize_match_text(_lookup_input_text(value))
 
 
 def _product_summary_label(row: dict[str, Any]) -> Any:
