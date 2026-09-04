@@ -8,12 +8,18 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from src.invoice_app.config import APP_TITLE, SHOPEE_PRODUCT_MASTER_PATH
+from src.invoice_app.config import APP_TITLE
 from src.invoice_app.services.auth_service import authenticate
 from src.invoice_app.services.product_price_master import (
     ProductPriceMaster,
-    load_shopee_product_price_master,
 )
+from src.invoice_app.services.product_master_source import (
+    ProductMasterSourceError,
+    clear_product_master_source_cache,
+    configured_product_master_source_settings,
+    load_configured_product_price_master,
+)
+from src.invoice_app.utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from src.invoice_app.services.analytics import (
     compute_overall_dashboard,
     compute_platform_dashboard,
@@ -262,8 +268,18 @@ def frame_with_columns(
 def _parse_display_date(series: pd.Series, expected_format: str | None = None) -> pd.Series:
     if expected_format:
         parsed = pd.to_datetime(series, format=expected_format, errors="coerce")
-        if not parsed.isna().all() or series.isna().all():
-            return parsed
+        if parsed.isna().any():
+            # Shopee source dates can include a time while Order ID fallback dates
+            # intentionally contain only YYYY-MM-DD.  Preserve the exact source
+            # parse where it succeeds, then parse only the remaining values.
+            fallback_values = pd.to_datetime(
+                series[parsed.isna()],
+                errors="coerce",
+                format="mixed",
+                dayfirst=True,
+            )
+            parsed.loc[parsed.isna()] = fallback_values
+        return parsed
     return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=True)
 
 
@@ -389,10 +405,14 @@ def dataframe_column_config(
             if column not in {"income_type", "payment_method", "voucher_code", "voucher_funded_by", "voucher_type"} and not col_lower.endswith("quantity") and not col_lower.endswith("count"):
                 config[label] = st.column_config.NumberColumn(label, format="RM %.2f", width="small", alignment="right")
         elif column in DATE_COLUMNS or "date" in col_lower or "timestamp" in col_lower or column in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}):
-            if "timestamp" in col_lower or column in {"order_created_date", "delivered_date", "completed_date"}:
+            if "timestamp" in col_lower or column in {"delivered_date", "completed_date"}:
                 config[label] = st.column_config.DatetimeColumn(label, format="DD/MM/YYYY HH:mm", width="small")
             else:
-                config[label] = st.column_config.DateColumn(label, format="DD/MM/YYYY", width="small")
+                config[label] = st.column_config.DateColumn(
+                    label,
+                    format="YYYY-MM-DD" if column == "order_created_date" else "DD/MM/YYYY",
+                    width="small",
+                )
         elif column in PINNED_COLUMNS:
             config[label] = st.column_config.TextColumn(label, pinned=True, width="medium")
         elif column in {"reason", "source_pdf", "all_review_reason"}:
@@ -698,6 +718,33 @@ def show_sidebar(pdf_count: int) -> str:
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
         render_navigation_section("DEVELOPMENT / TESTING", DEVELOPMENT_NAVIGATION_PAGES)
+
+        st.html('<p class="sidebar-section-label">Product Master</p>')
+        refresh_message = st.session_state.pop("product_master_refresh_message", None)
+        if refresh_message:
+            st.success(refresh_message, icon=":material/check_circle:")
+        refresh_error = st.session_state.pop("product_master_refresh_error", None)
+        if refresh_error:
+            st.error(refresh_error, icon=":material/error:")
+        if st.button(
+            "Refresh Product Master",
+            icon=":material/refresh:",
+            key="refresh_product_master",
+            width="stretch",
+        ):
+            clear_product_master_source_cache()
+            try:
+                price_master, source_label = load_configured_product_price_master()
+            except ProductMasterSourceError as error:
+                st.session_state.product_master_refresh_error = (
+                    f"Product Master refresh failed: {error}"
+                )
+            else:
+                st.session_state.product_master_refresh_message = (
+                    f"Product Master refreshed from {source_label} "
+                    f"({len(price_master.records)} records)."
+                )
+            st.rerun()
 
         st.html('<p class="sidebar-section-label">Current batch</p>')
         batch_id = st.session_state.get("batch_id")
@@ -1006,6 +1053,30 @@ def apply_platform_filters(
     return order_df, product_df
 
 
+def _platform_order_display_rows(
+    platform_name: str,
+    orders: list[dict],
+) -> list[dict]:
+    if platform_name != "Shopee":
+        return orders
+
+    display_rows: list[dict] = []
+    for order in orders:
+        if not has_missing_source_date(order.get("order_created_date")):
+            display_rows.append(order)
+            continue
+        derived_date = shopee_order_date_from_id(order.get("order_id"))
+        display_rows.append(
+            {
+                **order,
+                "order_created_date": (
+                    derived_date.strftime("%d/%m/%Y") if derived_date else order.get("order_created_date")
+                ),
+            }
+        )
+    return display_rows
+
+
 def show_platform_tab(
     platform_name: str,
     platform_orders: list[dict],
@@ -1064,10 +1135,14 @@ def show_platform_tab(
         product_optional_columns,
     )
     missing_value = MISSING_VALUE_PLACEHOLDER if platform_name == "Shopee" else None
-    order_df = frame_with_columns(platform_orders, platform_order_columns, missing_value)
+    order_df = frame_with_columns(
+        _platform_order_display_rows(platform_name, platform_orders),
+        platform_order_columns,
+        missing_value,
+    )
     product_display_rows = platform_products
     if platform_name == "Shopee":
-        price_master, _ = _load_cross_platform_price_master()
+        price_master, _, _ = _load_cross_platform_price_master()
         product_display_rows = build_shopee_product_level_rows(
             platform_products,
             price_master=price_master,
@@ -1445,16 +1520,16 @@ def show_cross_platform_missing_sku_rows(
                 )
 
 
-def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None]:
-    if not SHOPEE_PRODUCT_MASTER_PATH.is_file():
-        return None, f"Shopee Product Master is unavailable at {SHOPEE_PRODUCT_MASTER_PATH.name}."
+def _load_cross_platform_price_master() -> tuple[ProductPriceMaster | None, str | None, str]:
     try:
-        return load_shopee_product_price_master(SHOPEE_PRODUCT_MASTER_PATH), None
-    except (OSError, ValueError) as error:
-        return None, f"Shopee Product Master could not be loaded: {error}"
+        price_master, source_label = load_configured_product_price_master()
+        return price_master, None, source_label
+    except ProductMasterSourceError as error:
+        source_label = configured_product_master_source_settings().source_label
+        return None, f"Shopee Product Master could not be loaded: {error}", source_label
 def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) -> None:
     all_product_rows, all_review_rows = build_all_product_views(orders, products, reviews)
-    price_master, price_master_message = _load_cross_platform_price_master()
+    price_master, price_master_message, price_master_source = _load_cross_platform_price_master()
     reporting_product_rows = build_cross_platform_product_rows(
         orders,
         products,
@@ -1497,6 +1572,7 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
         product_summary_rows = summarize_cross_platform_products(filtered_summary_product_rows)
         show_cross_platform_summary_table(product_summary_rows)
         show_cross_platform_summary_export(product_summary_rows)
+        st.caption(f"Product Master Source: {price_master_source}")
         show_cross_platform_missing_sku_rows(
             missing_sku_product_summary_rows(filtered_summary_product_rows),
             batch_id=st.session_state.get("batch_id"),
@@ -1547,7 +1623,7 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
             CROSS_PLATFORM_PRODUCT_DISPLAY_COLUMNS, CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS
         )
         product_column_config[CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS["reporting_order_created_date"]] = (
-            st.column_config.DateColumn("Order Created Date", format="DD/MM/YYYY", width="small")
+            st.column_config.DateColumn("Order Created Date", format="YYYY-MM-DD", width="small")
         )
         st.dataframe(
             product_df[CROSS_PLATFORM_PRODUCT_DISPLAY_COLUMNS].rename(

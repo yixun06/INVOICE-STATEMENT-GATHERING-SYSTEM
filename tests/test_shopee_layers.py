@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.invoice_app.parsers.shopee_extractor import extract_shopee_data
+from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import parse_buyer_payment, parse_income_details
 from src.invoice_app.parsers.shopee_mapper import map_shopee_records, map_shopee_review_payloads
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
@@ -92,6 +92,13 @@ def test_shopee_extraction_layer_returns_source_facts_only():
     assert extracted.product_items[0]["line_total"] == Decimal("25.00")
     assert not hasattr(extracted, "batch_id")
     assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_order_id_date_prefix_fills_only_a_missing_explicit_created_date():
+    assert extract_order_date("Order ID: 2609016SVMTG5", "2609016SVMTG5") == "01/09/2026"
+    assert extract_order_date("2609016SVMTG5 02/09/2026 11:34", "2609016SVMTG5") == "02/09/2026 11:34"
+    assert extract_order_date("", "2602316SVMTG5") == ""
+    assert extract_order_date("", "SHP-260901") == ""
 
 
 def test_shopee_valid_normal_product_and_financial_reconciliation_are_accepted():

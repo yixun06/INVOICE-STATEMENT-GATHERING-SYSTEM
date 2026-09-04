@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..utils.normalize import normalize_whitespace
+from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
     parse_buyer_payment,
     parse_income_details,
@@ -132,7 +133,13 @@ def extract_order_date(text: str, order_id: str) -> str:
         match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
         if match:
             return normalize_whitespace(match.group(1))
-    return ""
+    return _order_date_from_order_id_prefix(order_id)
+
+
+def _order_date_from_order_id_prefix(order_id: str) -> str:
+    """Derive a Shopee order date only from a valid YYMMDD order-ID prefix."""
+    derived_date = shopee_order_date_from_id(order_id)
+    return derived_date.strftime("%d/%m/%Y") if derived_date else ""
 
 
 def extract_order_status(text: str) -> str:

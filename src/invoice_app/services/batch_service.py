@@ -17,6 +17,7 @@ from ..parsers.lazada_parser import LazadaParser
 from ..parsers.shopee_parser import ShopeeParser
 from ..parsers.zenxin_parser import ZenxinParser
 from ..utils.normalize import parse_decimal, parse_quantity
+from ..utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 
 PARSER_MAP = {
     "Shopee": ShopeeParser(),
@@ -866,6 +867,14 @@ def _normalize_order_record(row: dict[str, Any]) -> dict[str, Any]:
     for field in _all_order_fields():
         normalized.setdefault(field, "")
     _sync_order_aliases(normalized)
+    if (
+        str(normalized.get("platform", "")).strip() == "Shopee"
+        and has_missing_source_date(normalized.get("order_created_date"))
+    ):
+        derived_date = shopee_order_date_from_id(normalized.get("order_id"))
+        if derived_date:
+            normalized["order_created_date"] = derived_date.strftime("%d/%m/%Y")
+            _sync_order_aliases(normalized)
     for field in (
         "gross_sales",
         "delivery_fee",
