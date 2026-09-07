@@ -49,6 +49,7 @@ def map_shopee_review_payloads(
             "delivery_fee": delivery_fee,
             "shipping_fee_paid_by_buyer": delivery_fee,
             "fund_transfer_date": data.fund_transfer_date,
+            "refund_amount": _source_money(data.refund_amount),
             "income_type": income_type,
             "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
             "source_pdf": data.source_pdf,
@@ -117,6 +118,7 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "income_type": income_type,
         "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
         "final_amount": final_amount,
+        "refund_amount": _source_money(data.refund_amount),
         "buyer_merchandise_subtotal": _financial_value(
             buyer_payment, "buyer_merchandise_subtotal"
         ),
@@ -131,6 +133,11 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
 def _financial_value(values: dict[str, str], field: str) -> str:
     value = values.get(field)
     return MISSING_FINANCIAL_VALUE if is_missing_financial_value(value) else str(value).strip()
+
+
+def _source_money(value: Decimal | None) -> str:
+    return MISSING_FINANCIAL_VALUE if value is None else str(value.quantize(Decimal("0.01")))
+
 
 def _has_source_value(value: str | None) -> bool:
     return value is not None and str(value).strip() not in {"", MISSING_FINANCIAL_VALUE}

@@ -78,6 +78,16 @@ def parse_income_details(text: str) -> dict[str, str]:
     return result
 
 
+def extract_refund_amount(text: str) -> Decimal | None:
+    """Return only the amount explicitly labelled ``Refund Amount`` in the source."""
+    match = re.search(
+        rf"\bRefund\s+Amount\b(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return parse_decimal(match.group(1)).quantize(Decimal("0.01")) if match else None
+
+
 def missing_income_detail_fields(text: str, income: dict[str, str]) -> list[str]:
     missing: list[str] = []
     if not re.search(r"(?:Hide\s+)?Income Details", text, flags=re.IGNORECASE):

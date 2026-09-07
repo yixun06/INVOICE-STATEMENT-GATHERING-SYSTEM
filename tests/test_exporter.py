@@ -211,6 +211,7 @@ def test_shopee_canonical_order_column_selection_exports_labels_and_types(tmp_pa
         "income_type",
         "payment_status",
         "shipping_fee_rebate_from_shopee",
+        "refund_amount",
     ]
     for column in selected_order_columns:
         assert column in PLATFORM_ORDER_FIELDS["Shopee"]
@@ -228,6 +229,7 @@ def test_shopee_canonical_order_column_selection_exports_labels_and_types(tmp_pa
                 "income_type": "Estimated",
                 "payment_status": "Pending",
                 "shipping_fee_rebate_from_shopee": "3.20",
+                "refund_amount": "-27.67",
             }
         ],
         products=[],
@@ -245,6 +247,8 @@ def test_shopee_canonical_order_column_selection_exports_labels_and_types(tmp_pa
     assert orders["D4"].number_format == "@"
     assert orders["E4"].value == "Pending"
     assert orders["F4"].value == 3.2
+    assert orders["G4"].value == -27.67
+    assert orders["G4"].number_format == '#,##0.00;[Red]-#,##0.00'
 
 
 def test_export_format_remains_stable_for_empty_and_large_datasets(tmp_path):
