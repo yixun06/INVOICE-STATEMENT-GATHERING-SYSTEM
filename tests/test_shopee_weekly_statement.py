@@ -14,6 +14,8 @@ import pytest
 
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
+    INCOME_REQUIRED_COLUMNS,
+    _parse_income_rows,
     parse_shopee_weekly_statement,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
@@ -164,6 +166,20 @@ def test_income_payout_period_validation_is_unchanged(parsed_sample):
     statement = replace(statement, income_rows=(income, *statement.income_rows[1:]))
 
     assert "payout_date_outside_statement_period" in _validation_codes(statement)
+
+
+def test_footer_like_income_row_is_preserved_as_one_source_quality_warning():
+    header = tuple(INCOME_REQUIRED_COLUMNS)
+    footer = [None] * len(header)
+    footer[header.index("Product Name")] = "Order Income"
+    issues = []
+
+    parsed = _parse_income_rows([header, tuple(footer)], issues)
+
+    assert len(parsed) == 1
+    assert parsed[0].view_by == ""
+    assert parsed[0].order_id == ""
+    assert [issue.code for issue in issues] == ["unrecognized_income_row"]
 
 
 def test_each_confirmed_blocking_financial_validation_detects_mismatch(parsed_sample):

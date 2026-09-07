@@ -452,39 +452,43 @@ def _parse_income_rows(
     for row_number, row in enumerate(rows[header_index + 1:], start=header_index + 2):
         if not any(value not in (None, "") for value in row):
             continue
-        view_by = _text(row[positions["View By"]])
-        order_id = _text(row[positions["Order ID"]])
-        order_created = _parse_date(row[positions["Order Creation Date"]])
-        payout_completed = _parse_date(row[positions["Payout Completed Date"]])
-        total_released = _parse_decimal(row[positions["Total Released Amount (RM)"]])
+        row_value = lambda header: row[positions[header]] if positions[header] < len(row) else None
+        view_by = _text(row_value("View By"))
+        order_id = _text(row_value("Order ID"))
+        order_created = _parse_date(row_value("Order Creation Date"))
+        payout_completed = _parse_date(row_value("Payout Completed Date"))
+        total_released = _parse_decimal(row_value("Total Released Amount (RM)"))
         components = {
-            header: _parse_decimal(row[positions[header]])
+            header: _parse_decimal(row_value(header))
             for header in INCOME_COMPONENT_COLUMNS
         }
-        if view_by not in {"Order", "Sku"}:
-            _record_issue(issues, code="invalid_view_by", sheet="Income", row_number=row_number, column="View By", value=view_by)
-        if not order_id:
-            _record_issue(issues, code="missing_order_id", sheet="Income", row_number=row_number, column="Order ID", value=order_id)
-        if order_created is None:
-            _record_issue(issues, code="invalid_order_creation_date", sheet="Income", row_number=row_number, column="Order Creation Date", value=row[positions["Order Creation Date"]])
-        if payout_completed is None:
-            _record_issue(issues, code="invalid_payout_completed_date", sheet="Income", row_number=row_number, column="Payout Completed Date", value=row[positions["Payout Completed Date"]])
-        if total_released is None:
-            _record_issue(issues, code="invalid_total_released", sheet="Income", row_number=row_number, column="Total Released Amount (RM)", value=row[positions["Total Released Amount (RM)"]])
+        if view_by not in {"Order", "Sku"} and not order_id:
+            _record_issue(issues, code="unrecognized_income_row", sheet="Income", row_number=row_number, column="View By", value=view_by)
+        else:
+            if view_by not in {"Order", "Sku"}:
+                _record_issue(issues, code="invalid_view_by", sheet="Income", row_number=row_number, column="View By", value=view_by)
+            if not order_id:
+                _record_issue(issues, code="missing_order_id", sheet="Income", row_number=row_number, column="Order ID", value=order_id)
+            if order_created is None:
+                _record_issue(issues, code="invalid_order_creation_date", sheet="Income", row_number=row_number, column="Order Creation Date", value=row_value("Order Creation Date"))
+            if payout_completed is None:
+                _record_issue(issues, code="invalid_payout_completed_date", sheet="Income", row_number=row_number, column="Payout Completed Date", value=row_value("Payout Completed Date"))
+            if total_released is None:
+                _record_issue(issues, code="invalid_total_released", sheet="Income", row_number=row_number, column="Total Released Amount (RM)", value=row_value("Total Released Amount (RM)"))
         if view_by == "Order":
-            for header, value in components.items():
-                if value is None:
-                    _record_issue(issues, code="invalid_financial_component", sheet="Income", row_number=row_number, column=header, value=row[positions[header]])
+            for header, component_value in components.items():
+                if component_value is None:
+                    _record_issue(issues, code="invalid_financial_component", sheet="Income", row_number=row_number, column=header, value=row[positions[header]] if positions[header] < len(row) else None)
         parsed.append(SettlementIncomeRow(
-            sequence_no=_text(row[positions["Sequence No."]]),
+            sequence_no=_text(row_value("Sequence No.")),
             view_by=view_by,
             order_id=order_id,
-            product_id=_text(row[positions["Product ID"]]),
-            product_name=_text(row[positions["Product Name"]]),
+            product_id=_text(row_value("Product ID")),
+            product_name=_text(row_value("Product Name")),
             order_creation_date=order_created,
             payout_completed_date=payout_completed,
-            release_channel=_text(row[positions["Release Channel"]]),
-            order_type=_text(row[positions["Order Type"]]),
+            release_channel=_text(row_value("Release Channel")),
+            order_type=_text(row_value("Order Type")),
             total_released_amount=total_released,
             financial_components=components,
             source_values=_source_mapping(headers, row),

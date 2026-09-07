@@ -75,16 +75,16 @@ def render_settlement_test_lab() -> None:
         st.info("Validate a Shopee Weekly Statement in this lab to view the settlement comparison.", icon=":material/info:")
         return
     _render_statement_validation(stage)
-    if not stage.eligible_for_future_atomic_commit or stage.statement is None:
+    if stage.statement is None:
         st.warning(
-            "Settlement comparison is unavailable until the test statement passes its existing validation. No source data was changed.",
+            "Settlement comparison is unavailable because the test statement could not be parsed. No source data was changed.",
             icon=":material/warning:",
         )
         return
 
     result = build_shopee_settlement_reporting(session_orders, stage.statement)
     _render_summary(result.summary)
-    _render_projection(result.rows, stage.statement.order_rows)
+    _render_projection(result.rows, stage.statement)
 
 
 def _render_sources(orders: tuple[Mapping[str, Any], ...]) -> None:
@@ -172,7 +172,11 @@ def _render_statement_validation(stage: StagedShopeeWeeklyStatement) -> None:
             st.success("Passed — the existing statement validation is ready for this session-only test.", icon=":material/check_circle:")
         elif stage.validation_issues or stage.rejection_reasons:
             reasons = [*stage.rejection_reasons, *(issue.message for issue in stage.validation_issues)]
-            st.error("Blocking Failure — " + " ".join(reasons[:3]), icon=":material/error:")
+            st.warning(
+                "Statement quality warnings — per-order comparison remains available for valid Order evidence. "
+                + " ".join(reasons[:3]),
+                icon=":material/warning:",
+            )
         else:
             reasons = [*stage.review_reasons, *( [stage.duplicate_status] if stage.duplicate_status else [])]
             st.warning("Warning — " + " ".join(reasons[:3]), icon=":material/warning:")
@@ -185,18 +189,18 @@ def _render_summary(summary: Any) -> None:
         st.metric("Total Shopee Orders", summary.total_shopee_orders, border=True)
         st.metric("Statement Matched", summary.statement_matched, border=True)
         st.metric("No Settlement Evidence", summary.no_settlement_evidence, border=True)
-        st.metric("Pending → Released", summary.pending_to_released, border=True)
+        st.metric("Pending → Settled", summary.pending_to_released, border=True)
     second_row = st.container(horizontal=True, gap="small")
     with second_row:
-        st.metric("Already Released → Released", summary.already_released_to_released, border=True)
+        st.metric("Already Released → Settled", summary.already_released_to_released, border=True)
         st.metric("Different Amount", summary.different_amount, border=True)
         st.metric("Unmatched Statement Orders", summary.unmatched_statement_orders, border=True)
-    st.caption("Different Amount is an amount-only comparison at the existing RM0.02 tolerance. It is not an underpayment decision.")
+    st.caption("Difference is informational only at the existing RM0.02 tolerance. It is not an underpayment decision.")
 
 
-def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, ...]) -> None:
+def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
     st.subheader("Invoice source facts and derived settlement reporting")
-    st.caption("Before / after comparison. Invoice Payment Signal remains the original invoice `payment_status`; all settlement fields are derived for this temporary display.")
+    st.caption("Invoice Payment Signal remains the original invoice `payment_status`; all settlement and Ready to Invoice fields are derived for this temporary display.")
     dataframe = pd.DataFrame(
         [
             {
@@ -205,12 +209,13 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
                 "Income Type": row.income_type,
                 "Final / Estimated Order Income": float(row.order_income) if row.order_income not in (None, "") else None,
                 "Invoice Payment Signal": row.invoice_payment_signal,
-                "Statement Match": "Matched" if row.statement_match else "No Statement Match",
-                "Effective Payment Status": row.effective_payment_status,
-                "Payment Evidence Source": row.payment_evidence_source,
                 "Settlement Status": row.settlement_status,
                 "Payout Completed Date": pd.to_datetime(row.payout_completed_date, errors="coerce", dayfirst=True) if row.payout_completed_date else None,
                 "Released Amount": float(row.released_amount) if row.released_amount not in (None, "") else None,
+                "Invoice Refund Amount": float(row.invoice_refund_amount) if row.invoice_refund_amount is not None else None,
+                "Statement Refund Amount": float(row.statement_refund_amount) if row.statement_refund_amount is not None else None,
+                "Refund Validation": row.refund_validation,
+                "Ready to Invoice": row.ready_to_invoice,
                 "Difference": float(row.difference) if row.difference not in (None, "") else None,
             }
             for row in rows
@@ -223,6 +228,8 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
             "Payout Completed Date": st.column_config.DateColumn("Payout Completed Date", format="DD/MM/YYYY"),
             "Final / Estimated Order Income": st.column_config.NumberColumn(format="RM %.2f"),
             "Released Amount": st.column_config.NumberColumn(format="RM %.2f"),
+            "Invoice Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),
+            "Statement Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),
             "Difference": st.column_config.NumberColumn(format="RM %.2f"),
         },
         hide_index=True,
@@ -230,8 +237,31 @@ def _render_projection(rows: tuple[Any, ...], statement_order_rows: tuple[Any, .
     )
     known_order_ids = {row.order_id for row in rows}
     unmatched_ids = []
-    for statement_row in statement_order_rows:
+    for statement_row in statement.order_rows:
         if statement_row.order_id not in known_order_ids and statement_row.order_id not in unmatched_ids:
             unmatched_ids.append(statement_row.order_id)
     if unmatched_ids:
         st.caption("Representative unmatched statement orders: " + ", ".join(unmatched_ids[:5]))
+    if statement.adjustments:
+        st.subheader("Adjustment / CN source events")
+        st.caption("These are separate post-payment source events and do not reopen the original settlement decision.")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Linked Order ID": adjustment.linked_order_id,
+                        "Adjustment Complete Date": adjustment.adjustment_complete_date,
+                        "Adjustment Type": adjustment.adjustment_type,
+                        "Adjustment Amount": float(adjustment.adjustment_amount)
+                        if adjustment.adjustment_amount is not None else None,
+                    }
+                    for adjustment in statement.adjustments
+                ]
+            ),
+            column_config={
+                "Adjustment Complete Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "Adjustment Amount": st.column_config.NumberColumn(format="RM %.2f"),
+            },
+            hide_index=True,
+            key="settlement_test_lab_adjustments",
+        )
