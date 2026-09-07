@@ -188,13 +188,13 @@ def validate_shopee_weekly_statement(
         ))
     adjustment_out_of_period = [
         row for row in statement.adjustments
-        if row.payout_completed_date is not None
-        and not (period_from <= row.payout_completed_date <= period_to)
+        if row.adjustment_complete_date is not None
+        and not (period_from <= row.adjustment_complete_date <= period_to)
     ]
     if adjustment_out_of_period:
         issues.append(ValidationIssue(
-            "adjustment_payout_date_outside_statement_period",
-            f"{len(adjustment_out_of_period)} Adjustment row(s) have Payout Completed Date outside the statement period.",
+            "adjustment_complete_date_outside_statement_period",
+            f"{len(adjustment_out_of_period)} Adjustment row(s) have Adjustment Complete Date outside the statement period.",
         ))
 
     if order_rows and all(row.total_released_amount is not None for row in order_rows):
