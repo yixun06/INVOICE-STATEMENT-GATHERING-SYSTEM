@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import re
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from ..utils.normalize import normalize_whitespace
 from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
+    extract_refund_amount,
     parse_buyer_payment,
     parse_income_details,
     parse_voucher_detail,
@@ -43,6 +45,7 @@ class ShopeeExtractedData:
     completed_date: str
     fund_transfer_date: str
     product_items: tuple[dict[str, Any], ...]
+    refund_amount: Decimal | None
     income: dict[str, str]
     buyer_payment: dict[str, str]
     voucher: dict[str, str]
@@ -79,6 +82,7 @@ def extract_shopee_data(
         completed_date=extract_completed_date(normalized_text),
         fund_transfer_date=extract_fund_transfer_date(normalized_text),
         product_items=tuple(product_items),
+        refund_amount=extract_refund_amount(normalized_text),
         income=income,
         buyer_payment=parse_buyer_payment(normalized_text),
         voucher=parse_voucher_detail(normalized_text),

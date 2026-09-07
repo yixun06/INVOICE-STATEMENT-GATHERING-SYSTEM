@@ -137,6 +137,7 @@ MONEY_COLUMNS = {
     "ads_escrow_top_up_fee",
     "order_income",
     "final_amount",
+    "refund_amount",
     "buyer_merchandise_subtotal",
     "buyer_shipping_fee",
     "shopee_voucher",

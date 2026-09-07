@@ -437,6 +437,7 @@ def test_platform_order_defaults_are_compact_for_shopee_and_lazada_only(tmp_path
         if "Payment Status" in dataframe.value.columns
     )
     assert shopee_order_table["Payment Status"].tolist() == ["Pending"]
+    assert "Refund Amount" in shopee_order_table.columns
     navigate(app, "Lazada")
     assert app.exception == []
     navigate(app, "ZENXIN")

@@ -66,6 +66,7 @@ CANONICAL_SHOPEE_FINANCIAL_ORDER_FIELDS = (
     "transaction_fee",
     "ads_escrow_top_up_fee",
     "final_amount",
+    "refund_amount",
     "buyer_merchandise_subtotal",
     "buyer_shipping_fee",
     "shopee_voucher",
@@ -81,10 +82,19 @@ def test_shopee_canonical_financial_order_fields_are_available_and_labeled():
 
     assert FIELD_LABELS["order_income"] == "Order Income"
     assert FIELD_LABELS["income_type"] == "Income Type"
+    assert FIELD_LABELS["refund_amount"] == "Refund Amount"
     assert FIELD_LABELS["shipping_fee_rebate_from_shopee"] == "Shipping Fee Rebate from Shopee"
     assert "adjustment_complete_date" not in PLATFORM_ORDER_FIELDS["Shopee"]
     assert "adjustment_reason" not in PLATFORM_ORDER_FIELDS["Shopee"]
     assert "released_amount" not in PLATFORM_ORDER_FIELDS["Shopee"]
+
+
+def test_shopee_refund_amount_is_an_optional_order_level_column():
+    required_order_fields = {"platform", "order_id"}
+
+    assert "refund_amount" in PLATFORM_ORDER_FIELDS["Shopee"]
+    assert "refund_amount" not in required_order_fields
+    assert FIELD_LABELS["refund_amount"] == "Refund Amount"
 
 
 def test_review_payload_keys_stay_internal_to_review_records():
@@ -155,6 +165,7 @@ def test_preview_money_column_contract_covers_canonical_money_fields_only():
             break
 
     assert "shipping_fee_rebate_from_shopee" in money_columns
+    assert "refund_amount" in money_columns
     assert "released_amount" not in money_columns
     assert "income_type" not in money_columns
     assert "adjustment_complete_date" not in money_columns

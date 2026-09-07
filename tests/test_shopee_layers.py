@@ -6,6 +6,7 @@ import pytest
 from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import parse_buyer_payment, parse_income_details
 from src.invoice_app.parsers.shopee_mapper import map_shopee_records, map_shopee_review_payloads
+from src.invoice_app.parsers.shopee_parser import ShopeeParser
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
 from src.invoice_app.parsers.validation import (
     extract_expected_product_count,
@@ -86,11 +87,59 @@ def test_shopee_extraction_layer_returns_source_facts_only():
     assert extracted.order_status == "Order Received"
     assert extracted.order_created_date == "07/08/2026"
     assert extracted.income["merchandise_subtotal"] == "25.00"
+    assert extracted.refund_amount is None
     assert len(extracted.product_items) == 1
     assert extracted.product_items[0]["seller_sku"] == "ABC-001"
     assert extracted.product_items[0]["quantity"] == 2
     assert extracted.product_items[0]["line_total"] == Decimal("25.00")
     assert not hasattr(extracted, "batch_id")
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_explicit_refund_amount_preserves_negative_source_sign():
+    extracted = extract_shopee_data(
+        f"{VALID_SHOPEE_TEXT}\nRefund Amount -RM27.67",
+        "refund-negative.pdf",
+    )
+    order, _ = map_shopee_records(extracted, "batch-refund-negative")
+
+    assert extracted.refund_amount == Decimal("-27.67")
+    assert order["refund_amount"] == "-27.67"
+
+
+def test_shopee_explicit_zero_refund_amount_is_not_missing():
+    extracted = extract_shopee_data(
+        f"{VALID_SHOPEE_TEXT}\nRefund Amount RM0.00",
+        "refund-zero.pdf",
+    )
+    order, _ = map_shopee_records(extracted, "batch-refund-zero")
+
+    assert extracted.refund_amount == Decimal("0.00")
+    assert order["refund_amount"] == "0.00"
+
+
+def test_shopee_missing_refund_amount_stays_empty_without_manual_review():
+    orders, products, reviews = ShopeeParser().parse(
+        VALID_SHOPEE_TEXT,
+        "no-refund-label.pdf",
+        "batch-no-refund-label",
+    )
+
+    assert len(orders) == 1
+    assert len(products) == 1
+    assert reviews == []
+    assert orders[0]["refund_amount"] == "N/A"
+
+
+def test_shopee_return_refund_product_text_does_not_infer_refund_amount():
+    extracted = extract_shopee_data(
+        VALID_SHOPEE_TEXT.replace("Test Product 1", "Return/Refund product"),
+        "refund-product-text-only.pdf",
+    )
+    order, _ = map_shopee_records(extracted, "batch-refund-product-text")
+
+    assert extracted.refund_amount is None
+    assert order["refund_amount"] == "N/A"
     assert find_shopee_review_issue(extracted) is None
 
 
