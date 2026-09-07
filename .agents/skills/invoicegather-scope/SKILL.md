@@ -3,7 +3,7 @@ name: invoicegather-scope
 description: Long-term system consensus, business rules, data semantics, architecture guardrails, import/commit workflow, validation/reconciliation boundaries, UI/UX direction, and development constraints for InvoiceGather V2. Use whenever developing, debugging, reviewing requirements, architecture, parsers, validation, reconciliation, Streamlit UI, reporting, persistence, database, settlement, shipment, roles, or Excel export. Preserve stable extraction behavior, separate batch validation from pre-commit database validation, preserve source facts, and ask before locking uncertain business rules.
 ---
 
-# InvoiceGather Scope & Development Guardrails — V2.2
+# InvoiceGather Scope & Development Guardrails — V2.3 (UAT2)
 
 ## 0. How to use this skill
 
@@ -33,6 +33,247 @@ Manual/Admin Review > Wrong Financial Data
 Stable Existing Behavior > Unnecessary Rewrite
 Current Confirmed Requirement > Historical Intermediate Design
 ```
+
+---
+
+# UAT2 — Authoritative Current Delivery Scope
+
+## UAT2 purpose and precedence — Confirmed
+
+UAT2 delivers **Statement-Driven Weekly Billing + Historical Invoice Source
+Tracking + Invoice ↔ Statement Verification**. One Shopee Weekly Statement
+period produces one consolidated billing dataset for the company's external
+invoicing/accounting software.
+
+This section is authoritative for UAT2. Preserve all non-conflicting guidance
+in the later sections, especially stable parser contracts, Product Master
+lookup, promotion pricing, safe Product Summary grouping, Weekly Statement
+parsing, Adjustment Complete Date period ownership, Git/data safety, and
+stop-and-ask behaviour. Where an older rule conflicts, this UAT2 section
+explicitly supersedes it.
+
+UAT2 is limited to **Shopee Weekly Billing**. Lazada and ZENXIN parsers and
+weekly-billing behaviour are unchanged unless a later task explicitly expands
+scope.
+
+## UAT2 workflow — Statement first
+
+Historical Invoice PDFs are parsed and validated through the existing flow.
+Accepted Invoice order/item source facts are persisted for use by future Weekly
+Statements. They provide historical product/order facts, reliable sold quantity,
+and statement validation; they do not decide which orders belong in a billing
+period.
+
+```text
+Upload Weekly Statement
+→ authoritative Order View determines target Order IDs
+→ look up historical Invoice sources
+→ show Found / Missing Order IDs explicitly
+→ upload only the missing Invoice PDFs
+→ update historical repository
+→ Reload / Recheck coverage
+→ Invoice ↔ Statement verification and reconciliation
+→ READY TO EXPORT
+→ export one consolidated billing dataset
+```
+
+Do not require users to guess an Invoice date range. The Weekly Statement period
+is a payout/settlement period, **not** an Order Creation Date period. Final
+billing export requires 100% required Invoice-source coverage.
+
+## UAT2 interim persistence — Confirmed
+
+For UAT2, Google Sheets is the temporary persistence layer. **Do not introduce
+PostgreSQL, SQLAlchemy, or Alembic in UAT2.** Use a new dedicated InvoiceGather
+UAT2 data spreadsheet; never use the Product Master spreadsheet as this
+database.
+
+Canonical source-fact tabs are:
+
+```text
+Invoice_Orders
+Invoice_Items
+Settlement_Orders
+Settlement_Items
+Adjustments
+```
+
+Derived/reporting tabs are:
+
+```text
+Settled_View
+Unsettled_View
+Missing_Source_View
+```
+
+Settled/Unsettled are derived states. Never physically move canonical rows
+between tabs, duplicate canonical facts, or use a derived view as the source of
+truth. Preserve source hash/reference and auditability where practical.
+
+## Identity and historical-source conflict handling
+
+The primary identity remains `(Platform, Order ID)`; for this UAT2 flow,
+`Platform = Shopee`. A repeated upload with the same Order ID and materially
+identical source facts is **Already Imported** and must not append a duplicate.
+The same Order ID with materially different facts is **Source Conflict / Needs
+Review**. Do not silently overwrite historical source facts.
+
+## Billing source authority and required invariants
+
+Use signed `Decimal` values and the established RM0.02 tolerance unless a
+stricter task rule is confirmed.
+
+| Billing field | Authority | Rule |
+|---|---|---|
+| Total Quantity | Invoice | Use reliable Invoice item quantity. Refund never reduces quantity; never infer refund quantity. |
+| Unit Price | Product Master | Use the normal/POS Unit Price. Do not substitute Invoice or Statement Product Price. |
+| Sold Amount | Weekly Statement SKU View | Per SKU: `Product Price + signed Refund Amount`; never apply `abs()` to a refund. |
+| Financial Summary | Weekly Statement | Merchandise, Shipping, Vouchers & Rebates, Fees & Charges, their combined total, and Total Released Amount come from the statement. |
+
+Consolidated product Sold Amount is the sum of Net SKU Sold Amount for target
+statement orders. It must reconcile to Statement Merchandise Subtotal. The
+following is also a billing gate:
+
+```text
+Merchandise Subtotal
++ Shipping Subtotal
++ Vouchers & Rebates Total
++ Fees & Charges Total
+≈ Total Released Amount
+```
+
+The required consolidated-product fields are Seller SKU, Product Name,
+Variation, Total Quantity, Product Master Unit Price, and Total Sold Amount.
+Reuse existing safe Product Summary identity/grouping rules; do not merge
+identities merely because product names look similar.
+
+## Refund-aware Invoice and Statement validation — Required
+
+For a Shopee Invoice, extract an order-level Refund Amount only from its
+explicit `Refund Amount` label. Preserve its sign: `-RM27.67` becomes
+`Decimal("-27.67")`, explicit `RM0.00` becomes `Decimal("0.00")`, and an
+absent label remains `None`/`N/A`. Do not infer it from Return/Refund text,
+Product Price, Merchandise Subtotal, Order Income, Final Amount, or another
+field. Its absence alone does not cause Manual Review.
+
+Refund-aware Invoice validation is mandatory:
+
+```text
+Gross source product amount + signed Invoice Refund Amount ≈ Merchandise Subtotal
+```
+
+For example, `380.46 + -27.67 = 352.79`. This valid relationship must not be
+classified as `PRODUCT_AMOUNT_RECONCILIATION_FAILED`; continue existing
+financial reconciliation from Merchandise Subtotal and do not subtract the
+refund twice. Refund does not modify product quantity.
+
+Weekly Statement refund evidence has two related levels:
+
+```text
+Refund Event           = Order ID + Refund ID + order-level signed Refund Amount
+Refund Item Allocation = Order ID + product/SKU + signed SKU Refund Amount
+```
+
+Do not assume a refund affects one SKU. For each order,
+`SUM(SKU Refund Amount) ≈ Order-level Refund Amount` is required; a failure is
+Needs Review and a billing-gate failure.
+
+Compare signed Invoice and Statement order-level Refund Amounts:
+
+```text
+same non-zero amount                         → Matched
+different non-zero amounts                   → Mismatch
+Invoice None + Statement non-zero            → Mismatch
+Invoice non-zero + Statement zero/no refund  → Mismatch
+Invoice None/N/A + Statement explicit 0.00   → equivalent No Refund for derived validation only
+```
+
+Keep the original source distinction even for the derived equivalence. A refund
+mismatch never reverses settlement, but it blocks Ready to Invoice until
+reviewed.
+
+## Settlement and Adjustment/CN rule — Confirmed
+
+Authoritative target-order settlement evidence is an `Income` Order View row
+with valid Order ID, Payout Completed Date, and Total Released Amount. If it is
+valid, Settlement Status is **Settled**; the released amount may be positive,
+zero, or negative. Without matching authoritative evidence, status is **No
+Settlement Evidence**—not Unpaid. Bank receipt and Order Creation Date are not
+required to establish settlement.
+
+Evaluate settlement per target Order ID. Malformed unrelated rows may remain
+statement-quality warnings and do not block valid target evidence. Malformed or
+conflicting target evidence, including conflicting duplicate Order View rows,
+is Needs Review; never use first-row-wins.
+
+Florence Golden Rule: after an Invoice is shipped and payment is received, the
+order is complete and only moves one way. Later post-payment changes are
+separate CN/Adjustment events. They must not reverse Settled, reopen the
+original transaction, change original Released Amount/billing/Invoice facts, or
+automatically block the original Ready to Invoice state. **Adjustment Complete
+Date owns the statement period; Adjustment Payout Completed Date is historical
+reference only.**
+
+## Coverage, verification, and readiness gate
+
+Target orders are the valid Order IDs in Statement `View By = Order`. For each,
+derive Found/Missing based on the historical Invoice repository. The missing
+list should show Order ID and, when available, Statement Order Creation Date,
+Payout Completed Date, and Statement Period. After missing PDFs are uploaded,
+Reload/Recheck must update coverage without restarting the whole workflow.
+
+Show business-facing readiness such as Statement Orders, Invoice Source Found,
+Missing Invoice Source, Order Verification, Refund Verification pass/fail,
+Product Reconciliation pass/fail, and Merchandise Difference. READY TO EXPORT
+requires every gate to pass. Blocking conditions are:
+
+- Missing Invoice source.
+- Malformed or conflicting target settlement evidence.
+- Invoice ↔ Statement refund mismatch.
+- Statement Order ↔ SKU refund reconciliation failure.
+- Unreliable required Invoice quantity/product identity.
+- Consolidated Product Sold Amount not reconciling to Merchandise Subtotal.
+- Required Product Master Unit Price unresolved or conflicting.
+
+Use actionable reasons: Missing Source, Refund Mismatch, Product Mismatch,
+Pricing Conflict, and Statement Evidence Review. A Released Amount − Order
+Income difference remains informational only; do not infer underpayment.
+
+## UAT2 architecture, implementation order, and non-goals
+
+Keep these boundaries explicit:
+
+```text
+Invoice source parsing ≠ Statement source parsing
+Source facts ≠ derived billing values
+Validation ≠ persistence
+Settlement ≠ refund validation
+Settlement ≠ Adjustment/CN
+Historical source repository ≠ billing projection
+Product Master normal price ≠ actual Sold Amount
+Canonical data ≠ derived Google Sheet views
+```
+
+Implement incrementally in this order: (1) refund-aware Invoice validation,
+(2) Google Sheets historical-Invoice persistence abstraction, (3) persist
+Invoice_Orders/Invoice_Items, (4) Statement Order/SKU persistence, (5)
+statement-first coverage, (6) Reload/Recheck, (7) Invoice ↔ Statement
+verification, (8) SKU refund reconciliation, (9) consolidated projection,
+(10) financial summary/reconciliation, (11) readiness gate, (12) export, then
+(13) UAT2 polish. Each phase requires focused tests, full regression, diff
+review, sensitive scan, and its own safe commit/push.
+
+UAT2 excludes PostgreSQL; bank reconciliation/receipt confirmation; automatic
+CN accounting; reopening completed transactions; refund-quantity inference;
+fuzzy matching; automatic source overwrite; Lazada/ZENXIN Weekly Billing;
+replacing Product Master authority; major unrelated UI redesign; and broad
+parser rewrites.
+
+Stop and ask before deciding an unspecified field's source authority, a money
+allocation without explicit evidence, product identity merging, conflict
+overwrite, refund-quantity treatment, automatic acceptance of a financial
+mismatch, whether an Adjustment can alter original billing, destructive Git
+actions, or whether real/sensitive data may be committed.
 
 ---
 
@@ -71,7 +312,7 @@ Admin Review
       ↓
 Atomic Commit
       ↓
-PostgreSQL Production Database
+Long-term PostgreSQL Production Database
       ↓
 User Dashboard / Summary / Search / Export
 ```
@@ -81,6 +322,11 @@ User Dashboard / Summary / Search / Export
 The current application should gradually become the:
 
 > **Admin Data Ingestion & Review Workspace**
+
+For UAT2, this workspace persists the confirmed historical Invoice and Shopee
+settlement source facts to the dedicated Google Sheets UAT2 data spreadsheet.
+PostgreSQL remains the long-term production direction, not the current UAT2
+persistence target.
 
 It is responsible for:
 
@@ -1527,7 +1773,12 @@ The exact formula/classification is not yet locked. Ask before implementing the 
 
 ---
 
-# 14. Production Database Direction — Confirmed Engine, Hosting TODO
+# 14. Long-Term Production Database Direction — Post-UAT2
+
+This section is a long-term direction only. It is superseded for the current
+UAT2 delivery by the authoritative UAT2 Google Sheets interim-persistence
+contract above. Do not begin PostgreSQL work while implementing UAT2 unless the
+user explicitly reopens that scope.
 
 The production database engine direction is now confirmed:
 
@@ -2079,7 +2330,11 @@ Shipment Confirmation proves actual shipment
 
 ---
 
-# 25. Current Development Roadmap — Guidance, Not Automatic Execution
+# 25. Long-Term Development Roadmap — Post-UAT2 Guidance
+
+For the current delivery, follow the UAT2 implementation order above. This
+roadmap resumes after UAT2 and must not be read as permission to introduce
+PostgreSQL during UAT2.
 
 Use the following sequence by default to reduce refactor/rework cost. A task prompt may intentionally work on an isolated later concern.
 
