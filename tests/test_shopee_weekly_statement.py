@@ -103,6 +103,69 @@ def _validation_codes(statement):
     return {issue.code for issue in validate_shopee_weekly_statement(statement)}
 
 
+def _august_statement_with_in_period_income_and_adjustments(parsed_sample):
+    august_start = date(2026, 8, 1)
+    return replace(
+        parsed_sample,
+        statement_period_from=august_start,
+        statement_period_to=date(2026, 8, 31),
+        income_rows=tuple(
+            replace(row, payout_completed_date=august_start)
+            for row in parsed_sample.income_rows
+        ),
+        adjustments=tuple(
+            replace(
+                row,
+                adjustment_complete_date=august_start,
+                payout_completed_date=august_start,
+            )
+            for row in parsed_sample.adjustments
+        ),
+    )
+
+
+def test_adjustment_period_uses_complete_date_not_historical_payout_date(parsed_sample):
+    statement = _august_statement_with_in_period_income_and_adjustments(parsed_sample)
+    replacement_amount = Decimal("-17.67")
+    adjustment_total_delta = replacement_amount - statement.adjustments[0].adjustment_amount
+    adjustment = replace(
+        statement.adjustments[0],
+        adjustment_complete_date=date(2026, 8, 1),
+        payout_completed_date=date(2026, 7, 27),
+        adjustment_amount=replacement_amount,
+    )
+    statement = replace(
+        statement,
+        adjustments=(adjustment, *statement.adjustments[1:]),
+        adjustment_control_total=statement.adjustment_control_total + adjustment_total_delta,
+        adjustment_footer_total=statement.adjustment_footer_total + adjustment_total_delta,
+    )
+
+    assert "adjustment_complete_date_outside_statement_period" not in _validation_codes(statement)
+    assert stage_parsed_shopee_weekly_statement(statement).result == READY_TO_COMMIT
+    assert statement.adjustments[0].payout_completed_date == date(2026, 7, 27)
+
+
+def test_adjustment_complete_date_outside_statement_period_still_fails(parsed_sample):
+    statement = _august_statement_with_in_period_income_and_adjustments(parsed_sample)
+    adjustment = replace(
+        statement.adjustments[0],
+        adjustment_complete_date=date(2026, 7, 31),
+        payout_completed_date=date(2026, 8, 1),
+    )
+    statement = replace(statement, adjustments=(adjustment, *statement.adjustments[1:]))
+
+    assert "adjustment_complete_date_outside_statement_period" in _validation_codes(statement)
+
+
+def test_income_payout_period_validation_is_unchanged(parsed_sample):
+    statement = _august_statement_with_in_period_income_and_adjustments(parsed_sample)
+    income = replace(statement.income_rows[0], payout_completed_date=date(2026, 7, 31))
+    statement = replace(statement, income_rows=(income, *statement.income_rows[1:]))
+
+    assert "payout_date_outside_statement_period" in _validation_codes(statement)
+
+
 def test_each_confirmed_blocking_financial_validation_detects_mismatch(parsed_sample):
     assert "order_total_vs_summary_mismatch" in _validation_codes(
         replace(
