@@ -32,6 +32,8 @@ class ImportResult:
 
 
 class HistoricalInvoiceRepository(Protocol):
+    def refresh(self) -> None: ...
+
     def get_order(self, platform: str, order_id: str) -> CanonicalInvoiceOrder | None: ...
 
     def get_orders_by_ids(
@@ -68,6 +70,10 @@ class InMemoryHistoricalInvoiceRepository:
 
     def __init__(self) -> None:
         self._bundles: dict[tuple[str, str], InvoiceBundle] = {}
+
+    def refresh(self) -> None:
+        """Keep the storage-neutral refresh lifecycle harmless in memory."""
+        return None
 
     def get_order(self, platform: str, order_id: str) -> CanonicalInvoiceOrder | None:
         bundle = self._bundles.get(_identity(platform, order_id))
