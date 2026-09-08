@@ -82,6 +82,10 @@ from src.invoice_app.ui.settlement_test_lab import (
     render_settlement_test_lab,
     reset_settlement_test_lab_state,
 )
+from src.invoice_app.ui.weekly_billing import (
+    WEEKLY_BILLING_PAGE,
+    render_weekly_billing,
+)
 
 st.set_page_config(page_title=APP_TITLE, page_icon=":material/receipt_long:", layout="wide")
 
@@ -186,9 +190,11 @@ DATE_COLUMNS = {
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 REPORT_NAVIGATION_PAGES = ["Dashboard", "Cross Platform Summary", *PLATFORMS]
+UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE]
 DEVELOPMENT_NAVIGATION_PAGES = [SETTLEMENT_TEST_LAB_PAGE]
 NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
+    WEEKLY_BILLING_PAGE: "calendar_month",
     "Dashboard": "dashboard",
     "Cross Platform Summary": "inventory_2",
     "Shopee": "storefront",
@@ -695,6 +701,7 @@ def show_sidebar(pdf_count: int) -> str:
             navigation = "Cross Platform Summary"
         if navigation not in {
             DATA_IMPORT_PAGE,
+            *UAT2_NAVIGATION_PAGES,
             *REPORT_NAVIGATION_PAGES,
             *DEVELOPMENT_NAVIGATION_PAGES,
         }:
@@ -717,6 +724,7 @@ def show_sidebar(pdf_count: int) -> str:
                 )
 
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
+        render_navigation_section("UAT2", UAT2_NAVIGATION_PAGES)
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
         render_navigation_section("DEVELOPMENT / TESTING", DEVELOPMENT_NAVIGATION_PAGES)
 
@@ -1751,6 +1759,8 @@ if selected_page == DATA_IMPORT_PAGE:
     )
 elif selected_page == SETTLEMENT_TEST_LAB_PAGE:
     render_settlement_test_lab()
+elif selected_page == WEEKLY_BILLING_PAGE:
+    render_weekly_billing()
 elif selected_page == "Dashboard":
     st.title("Dashboard")
     st.caption("Current active-batch reporting view. Import and validation remain in Data Import.")
