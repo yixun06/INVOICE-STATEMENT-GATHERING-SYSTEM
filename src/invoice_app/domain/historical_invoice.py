@@ -60,6 +60,8 @@ class InvoiceBundle:
     items: tuple[CanonicalInvoiceItem, ...]
 
     def __post_init__(self) -> None:
+        if not self.items:
+            raise ValueError("InvoiceBundle must contain at least one item.")
         identity = (self.order.platform, self.order.order_id)
         if not all((item.platform, item.order_id) == identity for item in self.items):
             raise ValueError("Every InvoiceBundle item must match the order platform and order ID.")
@@ -120,14 +122,15 @@ def _map_accepted_shopee_item(
     if _text(product.get("status")) != "Accepted":
         raise ValueError("Historical invoice persistence accepts only Accepted product data.")
 
-    source_line_subtotal = _money(product.get("source_line_subtotal"))
-    if source_line_subtotal is None:
-        source_line_subtotal = _money(product.get("line_subtotal") or product.get("line_total"))
-    actual_selling_value = _money(
-        product.get("actual_selling_value") or product.get("reporting_actual_selling_value")
+    source_line_subtotal = _first_present_money(
+        product.get("source_line_subtotal"),
+        product.get("line_subtotal"),
+        product.get("line_total"),
     )
-    if actual_selling_value is None:
-        actual_selling_value = source_line_subtotal
+    actual_selling_value = _first_present_money(
+        product.get("actual_selling_value"),
+        product.get("reporting_actual_selling_value"),
+    )
 
     evidence = product.get("allocation_evidence") or product.get("reporting_allocation_evidence") or ()
     if isinstance(evidence, str):
@@ -138,18 +141,22 @@ def _map_accepted_shopee_item(
         item_index=index,
         seller_sku=_optional_text(product.get("seller_sku")),
         product_name=_optional_text(product.get("product_name")),
-        variation=_optional_text(product.get("variation") or product.get("variation_name")),
+        variation=_first_present_text(product.get("variation"), product.get("variation_name")),
         quantity=_quantity(product.get("quantity")),
         source_unit_price=_money(product.get("unit_price")),
         source_line_subtotal=source_line_subtotal,
         actual_selling_value=actual_selling_value,
-        pricing_status=_optional_text(product.get("pricing_status") or product.get("reporting_pricing_status"))
+        pricing_status=_first_present_text(product.get("pricing_status"), product.get("reporting_pricing_status"))
         or "invoice_source",
         source_hash=source_hash,
         promotion_group_id=_optional_text(product.get("promotion_group_id")),
         promotion_label=_optional_text(product.get("promotion_label")),
-        source_group_total=_money(product.get("source_group_total") or product.get("promotion_group_total")),
-        allocation_method=_optional_text(product.get("allocation_method") or product.get("reporting_allocation_method")),
+        source_group_total=_first_present_money(
+            product.get("source_group_total"), product.get("promotion_group_total")
+        ),
+        allocation_method=_first_present_text(
+            product.get("allocation_method"), product.get("reporting_allocation_method")
+        ),
         allocation_evidence=tuple(str(value) for value in evidence),
     )
 
@@ -181,6 +188,14 @@ def _money(value: Any) -> Decimal | None:
         raise ValueError(f"Invalid money value: {value!r}") from error
 
 
+def _first_present_money(*values: Any) -> Decimal | None:
+    for value in values:
+        money = _money(value)
+        if money is not None:
+            return money
+    return None
+
+
 def _quantity(value: Any) -> int | None:
     if value is None or _text(value) in {"", "N/A"}:
         return None
@@ -197,6 +212,14 @@ def _text(value: Any) -> str:
 def _optional_text(value: Any) -> str | None:
     text = _text(value)
     return None if text in {"", "N/A"} else text
+
+
+def _first_present_text(*values: Any) -> str | None:
+    for value in values:
+        text = _optional_text(value)
+        if text is not None:
+            return text
+    return None
 
 
 def _required_text(value: Any, field_name: str) -> str:

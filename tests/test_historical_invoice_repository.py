@@ -99,7 +99,7 @@ def test_mapper_explicitly_converts_accepted_shopee_rows_without_parser_changes(
     )
     assert bundle.order.order_created_date == date(2026, 8, 7)
     assert bundle.order.refund_amount == Decimal("-27.67")
-    assert bundle.items[0].actual_selling_value == Decimal("380.46")
+    assert bundle.items[0].actual_selling_value is None
     assert bundle.items[0].pricing_status == "invoice_source"
 
 
@@ -109,3 +109,45 @@ def test_domain_and_repository_modules_have_no_streamlit_or_google_api_dependenc
     assert "streamlit" not in contents
     assert "gspread" not in contents
     assert "google." not in contents
+
+
+def test_mapper_preserves_explicit_zero_money_facts_without_truthiness_fallback():
+    bundle = map_accepted_shopee_invoice(
+        {"platform": "Shopee", "order_id": "ORDER-0", "status": "Accepted"},
+        [{
+            "platform": "Shopee", "order_id": "ORDER-0", "status": "Accepted",
+            "quantity": "1", "source_line_subtotal": Decimal("0.00"),
+            "line_subtotal": Decimal("99.99"), "actual_selling_value": Decimal("0.00"),
+            "reporting_actual_selling_value": Decimal("88.88"),
+            "source_group_total": Decimal("0.00"), "promotion_group_total": Decimal("77.77"),
+        }],
+        source_hash="content-sha256",
+    )
+
+    item = bundle.items[0]
+    assert item.source_line_subtotal == Decimal("0.00")
+    assert item.actual_selling_value == Decimal("0.00")
+    assert item.source_group_total == Decimal("0.00")
+
+
+def test_mapper_keeps_actual_selling_value_missing_when_no_explicit_evidence_exists():
+    bundle = map_accepted_shopee_invoice(
+        {"platform": "Shopee", "order_id": "ORDER-NONE", "status": "Accepted"},
+        [{
+            "platform": "Shopee", "order_id": "ORDER-NONE", "status": "Accepted",
+            "quantity": "1", "source_line_subtotal": Decimal("12.34"),
+        }],
+        source_hash="content-sha256",
+    )
+
+    assert bundle.items[0].source_line_subtotal == Decimal("12.34")
+    assert bundle.items[0].actual_selling_value is None
+
+
+def test_empty_invoice_bundle_is_rejected():
+    try:
+        InvoiceBundle(order=_bundle().order, items=())
+    except ValueError as error:
+        assert "at least one item" in str(error)
+    else:
+        raise AssertionError("An empty InvoiceBundle must be rejected.")
