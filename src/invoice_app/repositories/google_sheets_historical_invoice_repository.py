@@ -22,8 +22,13 @@ from src.invoice_app.domain.historical_invoice import (
     InvoiceBundle,
 )
 from src.invoice_app.repositories.historical_invoice_repository import (
+    BulkImportResult,
+    HistoricalInvoiceBulkImportError,
     ImportResult,
     ImportStatus,
+    _chunks,
+    _unique_bundles,
+    _validate_chunk_size,
     source_fact_fingerprint,
 )
 
@@ -56,6 +61,13 @@ class GoogleSheetsHistoricalInvoiceGateway(Protocol):
         self, spreadsheet_id: str, order_values: Sequence[str], item_values: Sequence[Sequence[str]]
     ) -> None: ...
 
+    def append_bundles(
+        self,
+        spreadsheet_id: str,
+        order_values: Sequence[Sequence[str]],
+        item_values: Sequence[Sequence[str]],
+    ) -> None: ...
+
 
 GoogleServiceAccountInfo = Mapping[str, Any]
 GoogleCredentialsSource = Path | GoogleServiceAccountInfo
@@ -67,6 +79,7 @@ class GoogleApiHistoricalInvoiceGateway:
     def __init__(self, credentials_source: GoogleCredentialsSource) -> None:
         self._credentials_source = credentials_source
         self._service: Any | None = None
+        self._sheet_ids_by_spreadsheet: dict[str, Mapping[str, int]] = {}
 
     def read_tabs(self, spreadsheet_id: str, tabs: Sequence[str]) -> Mapping[str, Sequence[Sequence[Any]]]:
         try:
@@ -87,10 +100,18 @@ class GoogleApiHistoricalInvoiceGateway:
             raise HistoricalInvoiceStorageError("UAT2 Google Sheets read failed; check service account access and spreadsheet configuration.") from error
 
     def append_bundle(self, spreadsheet_id: str, order_values: Sequence[str], item_values: Sequence[Sequence[str]]) -> None:
+        self.append_bundles(spreadsheet_id, (order_values,), item_values)
+
+    def append_bundles(
+        self,
+        spreadsheet_id: str,
+        order_values: Sequence[Sequence[str]],
+        item_values: Sequence[Sequence[str]],
+    ) -> None:
         try:
             sheet_ids = self._sheet_ids(spreadsheet_id)
             requests = [
-                _append_cells_request(sheet_ids[INVOICE_ORDERS_TAB], (order_values,)),
+                _append_cells_request(sheet_ids[INVOICE_ORDERS_TAB], order_values),
                 _append_cells_request(sheet_ids[INVOICE_ITEMS_TAB], item_values),
             ]
             self._service_client().spreadsheets().batchUpdate(
@@ -102,6 +123,9 @@ class GoogleApiHistoricalInvoiceGateway:
             raise HistoricalInvoiceStorageError("UAT2 Google Sheets bundle write failed; no overwrite was attempted.") from error
 
     def _sheet_ids(self, spreadsheet_id: str) -> Mapping[str, int]:
+        cached = self._sheet_ids_by_spreadsheet.get(spreadsheet_id)
+        if cached is not None:
+            return cached
         response = self._service_client().spreadsheets().get(
             spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))"
         ).execute()
@@ -115,7 +139,9 @@ class GoogleApiHistoricalInvoiceGateway:
         missing = [tab for tab in (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB) if not isinstance(ids.get(tab), int)]
         if missing:
             raise HistoricalInvoiceStorageError("UAT2 spreadsheet required tab is missing: " + ", ".join(missing))
-        return ids  # type: ignore[return-value]
+        resolved = {tab: ids[tab] for tab in (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB)}
+        self._sheet_ids_by_spreadsheet[spreadsheet_id] = resolved  # type: ignore[assignment]
+        return resolved  # type: ignore[return-value]
 
     def _service_client(self) -> Any:
         if self._service is not None:
@@ -222,6 +248,71 @@ class GoogleSheetsHistoricalInvoiceRepository:
             raise HistoricalInvoiceStorageError("UAT2 historical invoice bundle write failed.") from error
         self.refresh()
         return ImportResult(ImportStatus.NEW, identity[0], identity[1], fingerprint)
+
+    def classify_invoices(self, bundles: Iterable[InvoiceBundle]) -> tuple[ImportResult, ...]:
+        candidates = _unique_bundles(bundles)
+        snapshot = self._snapshot().bundles
+        results = []
+        for bundle in candidates:
+            fingerprint = source_fact_fingerprint(bundle)
+            identity = _identity(bundle.order.platform, bundle.order.order_id)
+            existing = snapshot.get(identity)
+            status = (
+                ImportStatus.NEW
+                if existing is None
+                else ImportStatus.ALREADY_IMPORTED
+                if source_fact_fingerprint(existing) == fingerprint
+                else ImportStatus.SOURCE_CONFLICT
+            )
+            results.append(ImportResult(status, identity[0], identity[1], fingerprint))
+        return tuple(results)
+
+    def import_invoices(
+        self, bundles: Iterable[InvoiceBundle], *, chunk_size: int = 50
+    ) -> BulkImportResult:
+        candidates = _unique_bundles(bundles)
+        _validate_chunk_size(chunk_size)
+        classification = self.classify_invoices(candidates)
+        new_candidates = tuple(
+            (bundle, result)
+            for bundle, result in zip(candidates, classification)
+            if result.status is ImportStatus.NEW
+        )
+        # Preflight every incoming NEW bundle before the first network write.
+        serialized = tuple(
+            (
+                bundle.with_source_fingerprint(result.source_fingerprint),
+                result,
+                _serialize_order(bundle.with_source_fingerprint(result.source_fingerprint).order),
+                tuple(_serialize_item(item) for item in bundle.with_source_fingerprint(result.source_fingerprint).items),
+            )
+            for bundle, result in new_candidates
+        )
+        confirmed: list[ImportResult] = []
+        chunks = _chunks(serialized, chunk_size)
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            order_rows = tuple(values[2] for values in chunk)
+            item_rows = tuple(item for values in chunk for item in values[3])
+            try:
+                self._gateway.append_bundles(self._spreadsheet_id, order_rows, item_rows)
+            except Exception as error:
+                self.refresh()
+                pending = tuple(
+                    _identity(values[0].order.platform, values[0].order.order_id)
+                    for remaining in chunks[chunk_index - 1 :]
+                    for values in remaining
+                )
+                raise HistoricalInvoiceBulkImportError(
+                    "UAT2 historical invoice bulk write stopped; refresh and reclassify before retrying.",
+                    confirmed_results=confirmed,
+                    pending_identities=pending,
+                ) from error
+            confirmed.extend(values[1] for values in chunk)
+        self.refresh()
+        return BulkImportResult(
+            results=classification,
+            chunk_sizes=tuple(len(chunk) for chunk in chunks),
+        )
 
     def _snapshot(self) -> _Snapshot:
         now = monotonic()

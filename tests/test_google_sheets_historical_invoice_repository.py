@@ -23,7 +23,7 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
     _serialize_item,
     _serialize_order,
 )
-from src.invoice_app.repositories.historical_invoice_repository import ImportStatus
+from src.invoice_app.repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError, ImportStatus
 from src.invoice_app.repositories.historical_invoice_repository import source_fact_fingerprint
 from src.invoice_app.services.product_master_source import GOOGLE_SHEETS_READONLY_SCOPE
 from src.invoice_app.services.uat2_data_settings import (
@@ -48,6 +48,11 @@ class FakeGateway:
     def append_bundle(self, _spreadsheet_id, order_values, item_values):
         self.append_calls += 1
         self.tabs[INVOICE_ORDERS_TAB].append(list(order_values))
+        self.tabs[INVOICE_ITEMS_TAB].extend(list(row) for row in item_values)
+
+    def append_bundles(self, _spreadsheet_id, order_values, item_values):
+        self.append_calls += 1
+        self.tabs[INVOICE_ORDERS_TAB].extend(list(row) for row in order_values)
         self.tabs[INVOICE_ITEMS_TAB].extend(list(row) for row in item_values)
 
 
@@ -139,6 +144,54 @@ def test_many_requested_ids_use_one_snapshot_not_per_id():
     assert gateway.read_calls == 1
 
 
+def test_bulk_import_uses_50_invoice_chunks_with_one_order_and_item_append_per_chunk():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    bundles = tuple(_bundle(order_id=f"BULK-{index:03}", items=2) for index in range(120))
+
+    result = repository.import_invoices(bundles)
+
+    assert result.chunk_sizes == (50, 50, 20)
+    assert gateway.read_calls == 1
+    assert gateway.append_calls == 3
+    assert len(gateway.tabs[INVOICE_ORDERS_TAB]) == 121
+    assert len(gateway.tabs[INVOICE_ITEMS_TAB]) == 241
+
+
+def test_bulk_preflight_rejects_invalid_bundle_before_the_first_write():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    malformed = _bundle(order_id="BAD", imported_at=datetime(2026, 8, 8, 12, 30))
+
+    with pytest.raises(HistoricalInvoiceStorageError, match="timezone"):
+        repository.import_invoices((_bundle(order_id="GOOD"), malformed))
+
+    assert gateway.append_calls == 0
+
+
+def test_bulk_chunk_failure_stops_later_chunks_and_invalidates_cached_snapshot():
+    class FailingGateway(FakeGateway):
+        def append_bundles(self, *args):
+            if self.append_calls == 1:
+                self.append_calls += 1
+                raise HistoricalInvoiceStorageError("synthetic chunk failure")
+            return super().append_bundles(*args)
+
+    gateway = FailingGateway()
+    repository = _repository(gateway)
+    bundles = tuple(_bundle(order_id=f"FAIL-{index:03}") for index in range(120))
+
+    with pytest.raises(HistoricalInvoiceBulkImportError) as caught:
+        repository.import_invoices(bundles)
+
+    assert len(caught.value.confirmed_results) == 50
+    assert len(caught.value.pending_identities) == 70
+    assert gateway.append_calls == 2
+    reads_before = gateway.read_calls
+    repository.list_orders()
+    assert gateway.read_calls == reads_before + 1
+
+
 def test_successful_write_invalidates_cache_and_refresh_observes_external_rows():
     gateway = FakeGateway()
     repository = _repository(gateway)
@@ -201,6 +254,48 @@ def test_google_api_gateway_uses_the_uat2_write_scope(monkeypatch):
 
     GoogleApiHistoricalInvoiceGateway({"private_key": "placeholder"})._service_client()
     assert calls == [({"private_key": "placeholder"}, [GOOGLE_SHEETS_WRITE_SCOPE])]
+
+
+def test_google_gateway_bulk_chunk_uses_one_batch_update_with_two_append_requests():
+    class Request:
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class SheetsApi:
+        def __init__(self):
+            self.batch_bodies = []
+
+        def get(self, **_kwargs):
+            return Request({"sheets": [
+                {"properties": {"sheetId": 11, "title": INVOICE_ORDERS_TAB}},
+                {"properties": {"sheetId": 12, "title": INVOICE_ITEMS_TAB}},
+            ]})
+
+        def batchUpdate(self, **kwargs):
+            self.batch_bodies.append(kwargs["body"])
+            return Request({})
+
+    class Service:
+        def __init__(self, sheets):
+            self.sheets_api = sheets
+
+        def spreadsheets(self):
+            return self.sheets_api
+
+    sheets = SheetsApi()
+    gateway = GoogleApiHistoricalInvoiceGateway({"private_key": "placeholder"})
+    gateway._service = Service(sheets)
+
+    gateway.append_bundles("synthetic-sheet", (("order-a",), ("order-b",)), (("item-a",), ("item-b",)))
+
+    assert len(sheets.batch_bodies) == 1
+    requests = sheets.batch_bodies[0]["requests"]
+    assert len(requests) == 2
+    assert [len(request["appendCells"]["rows"]) for request in requests] == [2, 2]
+    assert all("updateCells" not in request and "delete" not in request for request in requests)
 
 
 def test_adapter_has_no_streamlit_ui_dependency():

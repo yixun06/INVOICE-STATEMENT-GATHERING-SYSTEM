@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
-from typing import Iterable, Protocol
+from typing import Iterable, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
@@ -31,6 +31,29 @@ class ImportResult:
     source_fingerprint: str
 
 
+@dataclass(frozen=True)
+class BulkImportResult:
+    """Results for an explicitly requested bulk import operation."""
+
+    results: tuple[ImportResult, ...]
+    chunk_sizes: tuple[int, ...]
+
+
+class HistoricalInvoiceBulkImportError(RuntimeError):
+    """A chunk failed after earlier chunks may already have been persisted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        confirmed_results: Sequence[ImportResult] = (),
+        pending_identities: Sequence[tuple[str, str]] = (),
+    ) -> None:
+        super().__init__(message)
+        self.confirmed_results = tuple(confirmed_results)
+        self.pending_identities = tuple(pending_identities)
+
+
 class HistoricalInvoiceRepository(Protocol):
     def refresh(self) -> None: ...
 
@@ -45,6 +68,12 @@ class HistoricalInvoiceRepository(Protocol):
     ) -> dict[str, tuple[CanonicalInvoiceItem, ...]]: ...
 
     def import_invoice(self, bundle: InvoiceBundle) -> ImportResult: ...
+
+    def classify_invoices(self, bundles: Iterable[InvoiceBundle]) -> tuple[ImportResult, ...]: ...
+
+    def import_invoices(
+        self, bundles: Iterable[InvoiceBundle], *, chunk_size: int = 50
+    ) -> BulkImportResult: ...
 
     def list_orders(
         self,
@@ -110,6 +139,39 @@ class InMemoryHistoricalInvoiceRepository:
         else:
             status = ImportStatus.SOURCE_CONFLICT
         return ImportResult(status, identity[0], identity[1], fingerprint)
+
+    def classify_invoices(self, bundles: Iterable[InvoiceBundle]) -> tuple[ImportResult, ...]:
+        candidates = _unique_bundles(bundles)
+        results = []
+        for bundle in candidates:
+            fingerprint = source_fact_fingerprint(bundle)
+            identity = _identity(bundle.order.platform, bundle.order.order_id)
+            existing = self._bundles.get(identity)
+            status = (
+                ImportStatus.NEW
+                if existing is None
+                else ImportStatus.ALREADY_IMPORTED
+                if source_fact_fingerprint(existing) == fingerprint
+                else ImportStatus.SOURCE_CONFLICT
+            )
+            results.append(ImportResult(status, identity[0], identity[1], fingerprint))
+        return tuple(results)
+
+    def import_invoices(
+        self, bundles: Iterable[InvoiceBundle], *, chunk_size: int = 50
+    ) -> BulkImportResult:
+        candidates = _unique_bundles(bundles)
+        _validate_chunk_size(chunk_size)
+        results = self.classify_invoices(candidates)
+        for bundle, result in zip(candidates, results):
+            if result.status is ImportStatus.NEW:
+                self._bundles[_identity(bundle.order.platform, bundle.order.order_id)] = bundle.with_source_fingerprint(
+                    result.source_fingerprint
+                )
+        return BulkImportResult(
+            results=results,
+            chunk_sizes=tuple(len(chunk) for chunk in _chunks(candidates, chunk_size)),
+        )
 
     def list_orders(
         self,
@@ -188,3 +250,21 @@ def _distinct_order_ids(order_ids: Iterable[str]) -> tuple[str, ...]:
 
 def _text(value: object) -> str:
     return str(value).strip()
+
+
+def _unique_bundles(bundles: Iterable[InvoiceBundle]) -> tuple[InvoiceBundle, ...]:
+    candidates = tuple(bundles)
+    identities = [_identity(bundle.order.platform, bundle.order.order_id) for bundle in candidates]
+    duplicates = sorted({identity for identity in identities if identities.count(identity) > 1})
+    if duplicates:
+        raise ValueError(f"Incoming historical invoice bundles duplicate canonical identities: {duplicates!r}.")
+    return candidates
+
+
+def _validate_chunk_size(chunk_size: int) -> None:
+    if chunk_size <= 0:
+        raise ValueError("Historical invoice bulk chunk size must be positive.")
+
+
+def _chunks(values: Sequence[InvoiceBundle], size: int) -> tuple[tuple[InvoiceBundle, ...], ...]:
+    return tuple(tuple(values[index:index + size]) for index in range(0, len(values), size))

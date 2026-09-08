@@ -38,17 +38,22 @@ def test_weekly_billing_is_the_single_uat2_sidebar_page_and_existing_pages_remai
     assert WEEKLY_BILLING_PAGE in {title.value for title in app.title}
     assert tuple(tab.label for tab in app.tabs) == WEEKLY_BILLING_TABS
     labels = {button.label for button in app.button}
-    assert {"Data Import", "Dashboard", "Settlement Test Lab", WEEKLY_BILLING_PAGE} <= labels
+    assert {
+        "Data Import", "Dashboard", "Settlement Test Lab", WEEKLY_BILLING_PAGE,
+        "Process for preview", "Import Accepted Invoices",
+    } <= labels
+    assert next(button for button in app.button if button.label == "Import Accepted Invoices").disabled is True
     assert app.session_state.filtered_state["batch_id"] == "active-batch"
     assert app.session_state.filtered_state["orders"] == [
         {"platform": "Shopee", "order_id": "SHP-1", "status": "Accepted"}
     ]
 
 
-def test_weekly_billing_shell_has_no_processing_persistence_or_export_dependency():
+def test_weekly_billing_invoice_intake_keeps_google_and_parser_boundaries_out_of_the_ui():
     source = (Path(__file__).parents[1] / "src" / "invoice_app" / "ui" / "weekly_billing.py").read_text(encoding="utf-8").casefold()
-    assert "from src.invoice_app" not in source
-    assert "import src.invoice_app" not in source
-    assert "import_invoice(" not in source
-    assert "process_uploads(" not in source
-    assert "disabled=true" in source
+    assert "googleapihistoricalinvoicegateway" not in source
+    assert "product_master" not in source
+    assert "process_pdf_file_with_outcome" not in source
+    assert "import accepted invoices" in source
+    assert "disabled=not new_entries or refresh_required" in source
+    assert "configured_uat2_data_settings().create_repository()" in source
