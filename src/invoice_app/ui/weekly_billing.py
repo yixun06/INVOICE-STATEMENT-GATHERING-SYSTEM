@@ -4,17 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from src.invoice_app.repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
-from src.invoice_app.repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
-from src.invoice_app.services.historical_invoice_intake import (
-    IntakeStatus,
-    InvoiceIntakeUpload,
-    classify_staging,
-    import_new_staging,
-    process_and_classify_uploads,
-    remove_staging_entry,
-)
-from src.invoice_app.services.uat2_data_settings import configured_uat2_data_settings
+from src.invoice_app.services.workflow_navigation import request_navigation
+from src.invoice_app.ui.data_import import DATA_IMPORT_PAGE
 
 
 WEEKLY_BILLING_PAGE = "Weekly Billing"
@@ -27,8 +18,6 @@ WEEKLY_BILLING_TABS = (
     "Billing Preview",
     "Export",
 )
-_INTAKE_ENTRIES_KEY = "uat2_invoice_intake_entries"
-_INTAKE_REFRESH_REQUIRED_KEY = "uat2_invoice_intake_refresh_required"
 
 
 def render_weekly_billing() -> None:
@@ -36,7 +25,7 @@ def render_weekly_billing() -> None:
     st.title(WEEKLY_BILLING_PAGE)
     st.caption("Statement-driven weekly billing workspace for Shopee UAT2.")
     st.info(
-        "Invoice Intake supports preview-before-write historical Shopee invoices. "
+        "Historical Invoice documents are processed through Data Import. "
         "The remaining billing workflow is delivered in later UAT2 phases.",
         icon=":material/info:",
     )
@@ -98,115 +87,14 @@ def _render_overview() -> None:
 
 def _render_invoice_intake() -> None:
     with st.container(border=True):
-        st.subheader("Historical Invoice intake")
-        st.caption(
-            "Upload Shopee Invoice PDFs, process a no-write preview, then explicitly import only New invoices."
+        st.subheader("Historical Invoice Sources")
+        st.write(
+            "Historical Invoice PDFs are processed and committed through Data Import. "
+            "Weekly Billing uses persisted Shopee historical sources."
         )
-        uploaded_files = st.file_uploader(
-            "Upload Shopee Invoice PDFs",
-            type="pdf",
-            accept_multiple_files=True,
-            key="uat2_invoice_intake_uploads",
-        )
-        if st.button("Process for preview", icon=":material/preview:", key="uat2_invoice_intake_preview"):
-            if not uploaded_files:
-                st.warning("Select one or more Shopee Invoice PDFs before processing.")
-            else:
-                try:
-                    repository = configured_uat2_data_settings().create_repository()
-                    st.session_state[_INTAKE_ENTRIES_KEY] = process_and_classify_uploads(
-                        (InvoiceIntakeUpload(source_filename=file.name, content=file.getvalue()) for file in uploaded_files),
-                        repository,
-                    )
-                    st.session_state[_INTAKE_REFRESH_REQUIRED_KEY] = False
-                except HistoricalInvoiceStorageError as error:
-                    st.error(f"Historical Invoice storage is unavailable: {error}")
-
-    entries = tuple(st.session_state.get(_INTAKE_ENTRIES_KEY, ()))
-    if not entries:
-        st.button(
-            "Import Accepted Invoices",
-            icon=":material/upload:",
-            type="primary",
-            disabled=True,
-            key="uat2_invoice_intake_import",
-        )
-        return
-    _render_intake_preview(entries)
-
-
-def _render_intake_preview(entries) -> None:
-    counts = {status: sum(entry.status is status for entry in entries) for status in IntakeStatus}
-    with st.container(horizontal=True, gap="small"):
-        st.metric("Selected PDFs", len({entry.source_hash for entry in entries}), border=True)
-        st.metric("New", counts[IntakeStatus.NEW], border=True)
-        st.metric("Already Imported", counts[IntakeStatus.ALREADY_IMPORTED], border=True)
-        st.metric("Needs Review", counts[IntakeStatus.NEEDS_REVIEW], border=True)
-        st.metric("Source Conflict", counts[IntakeStatus.SOURCE_CONFLICT], border=True)
-        if counts[IntakeStatus.IMPORTED]:
-            st.metric("Imported", counts[IntakeStatus.IMPORTED], border=True)
-
-    with st.container(border=True):
-        st.subheader("Preview results")
-        st.dataframe(
-            [
-                {
-                    "Source PDF": entry.source_filename,
-                    "Order ID": entry.order_id or "N/A",
-                    "Status": entry.status.value.replace("_", " ").title(),
-                    "Reason / message": entry.message or "Ready for explicit import.",
-                }
-                for entry in entries
-            ],
-            hide_index=True,
-        )
-        for entry in entries:
-            if entry.status in {IntakeStatus.NEEDS_REVIEW, IntakeStatus.SOURCE_CONFLICT}:
-                if st.button(
-                    f"Remove {entry.source_filename} ({entry.order_id or 'no Order ID'})",
-                    icon=":material/remove_circle:",
-                    key=f"uat2_invoice_intake_remove_{entry.staging_id}",
-                ):
-                    st.session_state[_INTAKE_ENTRIES_KEY] = remove_staging_entry(entries, entry.staging_id)
-                    st.rerun()
-
-    refresh_required = bool(st.session_state.get(_INTAKE_REFRESH_REQUIRED_KEY, False))
-    if refresh_required:
-        st.warning("A storage write was interrupted. Refresh status before attempting another import.")
-        if st.button("Refresh Status", icon=":material/refresh:", key="uat2_invoice_intake_refresh"):
-            try:
-                repository = configured_uat2_data_settings().create_repository()
-                repository.refresh()
-                st.session_state[_INTAKE_ENTRIES_KEY] = classify_staging(entries, repository)
-                st.session_state[_INTAKE_REFRESH_REQUIRED_KEY] = False
+        if st.button("Go to Data Import", icon=":material/arrow_forward:", key="uat2_go_to_data_import"):
+            if request_navigation(st.session_state, DATA_IMPORT_PAGE):
                 st.rerun()
-            except HistoricalInvoiceStorageError as error:
-                st.error(f"Historical Invoice storage refresh failed: {error}")
-
-    new_entries = [entry for entry in entries if entry.status is IntakeStatus.NEW and entry.bundle is not None]
-    if st.button(
-        "Import Accepted Invoices",
-        icon=":material/upload:",
-        type="primary",
-        disabled=not new_entries or refresh_required,
-        key="uat2_invoice_intake_import",
-    ):
-        try:
-            repository = configured_uat2_data_settings().create_repository()
-            outcome = import_new_staging(entries, repository)
-            st.session_state[_INTAKE_ENTRIES_KEY] = outcome.entries
-            st.success(f"Imported {len(new_entries)} historical Invoice bundle(s) in chunks: {outcome.bulk_result.chunk_sizes}.")
-        except HistoricalInvoiceBulkImportError as error:
-            st.session_state[_INTAKE_REFRESH_REQUIRED_KEY] = True
-            confirmed_order_ids = ", ".join(result.order_id for result in error.confirmed_results) or "none"
-            pending_order_ids = ", ".join(order_id for _platform, order_id in error.pending_identities) or "none"
-            st.error(
-                "Historical Invoice write was interrupted after "
-                f"{len(error.confirmed_results)} confirmed bundle(s). Confirmed Order IDs: {confirmed_order_ids}. "
-                f"Pending Order IDs: {pending_order_ids}. Refresh Status before retrying."
-            )
-        except HistoricalInvoiceStorageError as error:
-            st.error(f"Historical Invoice storage write failed: {error}")
 
 
 def _render_weekly_statement() -> None:

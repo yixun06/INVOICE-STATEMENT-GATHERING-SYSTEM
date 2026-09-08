@@ -103,6 +103,15 @@ def test_mapper_explicitly_converts_accepted_shopee_rows_without_parser_changes(
     assert bundle.items[0].pricing_status == "invoice_source"
 
 
+def test_mapper_accepts_authoritative_shopee_date_with_minutes_as_a_canonical_date():
+    bundle = map_accepted_shopee_invoice(
+        {"platform": "Shopee", "order_id": "DATE-1", "order_created_date": "19/08/2026 14:32", "status": "Accepted"},
+        [{"platform": "Shopee", "order_id": "DATE-1", "status": "Accepted", "quantity": 1}],
+        source_hash="content-sha256",
+    )
+    assert bundle.order.order_created_date == date(2026, 8, 19)
+
+
 def test_domain_and_repository_modules_have_no_streamlit_or_google_api_dependency():
     root = Path(__file__).parents[1] / "src" / "invoice_app"
     contents = "\n".join((root / path).read_text(encoding="utf-8").casefold() for path in ("domain/historical_invoice.py", "repositories/historical_invoice_repository.py"))

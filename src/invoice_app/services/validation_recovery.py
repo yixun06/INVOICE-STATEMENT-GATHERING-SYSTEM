@@ -95,6 +95,12 @@ def execute_current_batch_recovery(
         state[bucket] = retained
 
     _revalidate_platform_batch_state(state)
+    for key in (
+        "uat2_historical_commit_entries",
+        "uat2_historical_commit_refresh_required",
+        "uat2_historical_commit_signature",
+    ):
+        state.pop(key, None)
     changed = any(removed_counts.values())
     return RecoveryExecution(
         action_id=action.action_id,

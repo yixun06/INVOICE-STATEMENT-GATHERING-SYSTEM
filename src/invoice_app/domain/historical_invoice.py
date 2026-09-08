@@ -169,7 +169,7 @@ def _canonical_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     if isinstance(value, str):
-        for pattern in ("%d/%m/%Y", "%Y-%m-%d"):
+        for pattern in ("%d/%m/%Y", "%d/%m/%Y %H:%M", "%Y-%m-%d"):
             try:
                 return datetime.strptime(value.strip(), pattern).date()
             except ValueError:

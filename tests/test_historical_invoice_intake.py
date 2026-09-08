@@ -4,22 +4,17 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import pytest
-
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder, InvoiceBundle
 from src.invoice_app.repositories.historical_invoice_repository import (
     HistoricalInvoiceBulkImportError,
     InMemoryHistoricalInvoiceRepository,
 )
-from src.invoice_app.services.batch_service import PdfProcessingResult
 from src.invoice_app.services.historical_invoice_intake import (
     IntakeStatus,
     InvoiceIntakeEntry,
-    InvoiceIntakeUpload,
+    build_current_batch_staging,
     classify_staging,
     import_new_staging,
-    process_and_classify_uploads,
-    remove_staging_entry,
 )
 
 
@@ -58,16 +53,6 @@ def test_preview_is_no_write_and_classifies_new_duplicate_and_conflict_independe
     assert repository.get_order("Shopee", "NEW") is None
 
 
-def test_remove_only_changes_staging_and_never_existing_repository_data():
-    repository = InMemoryHistoricalInvoiceRepository()
-    existing = _bundle("EXISTING")
-    repository.import_invoice(existing)
-    removed = remove_staging_entry((_entry(existing, IntakeStatus.SOURCE_CONFLICT),), "EXISTING")
-
-    assert removed == ()
-    assert repository.get_order("Shopee", "EXISTING") is not None
-
-
 def test_incoming_duplicate_identity_becomes_needs_review_and_cannot_write():
     repository = InMemoryHistoricalInvoiceRepository()
     preview = classify_staging((_entry(_bundle("DUP")), _entry(_bundle("DUP"))), repository)
@@ -88,38 +73,53 @@ def test_explicit_import_only_writes_new_candidates_in_50_bundle_chunks():
     assert all(entry.status is IntakeStatus.IMPORTED for entry in outcome.entries)
 
 
-def test_parser_staging_hashes_actual_bytes_and_preserves_zero_and_missing(monkeypatch):
-    def fake_process(source_pdf, _path, _batch_id):
-        return PdfProcessingResult(
-            orders=[{"platform": "Shopee", "order_id": "PDF-1", "source_pdf": source_pdf, "status": "Accepted", "refund_amount": Decimal("0.00")}],
-            products=[{"platform": "Shopee", "order_id": "PDF-1", "source_pdf": source_pdf, "status": "Accepted", "seller_sku": "SKU", "product_name": "Tea", "quantity": 1, "source_line_subtotal": Decimal("0.00")}],
-            reviews=[], unsupported_files=[], processing_errors=[],
-        )
+def test_current_batch_builds_only_accepted_shopee_from_archived_bytes(tmp_path, monkeypatch):
+    archived = tmp_path / "member.pdf"
+    archived.write_bytes(b"zip-member-pdf-bytes")
+    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.resolve_archived_pdf_path", lambda *_: archived)
+    entries = build_current_batch_staging(
+        batch_id="batch", orders=[
+            {"platform": "Shopee", "order_id": "SHP-ARCHIVE", "source_pdf": "archive.zip::folder/order.pdf", "status": "Accepted", "refund_amount": Decimal("0.00")},
+            {"platform": "Lazada", "order_id": "LZD-1", "source_pdf": "lazada.pdf", "status": "Accepted"},
+        ], products=[
+            {"platform": "Shopee", "order_id": "SHP-ARCHIVE", "source_pdf": "archive.zip::folder/order.pdf", "status": "Accepted", "seller_sku": "SKU", "product_name": "Tea", "quantity": 1, "source_line_subtotal": Decimal("0.00")},
+        ], reviews=[],
+    )
+    assert len(entries) == 1 and entries[0].status is IntakeStatus.NEW
+    assert entries[0].source_hash == "fb4ce2ff2d5cccdcee4defe77618fa4a10b25970aaf1e5de427274193d8f08a6"
+    assert entries[0].bundle.items[0].actual_selling_value is None
 
-    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.process_pdf_file_with_outcome", fake_process)
-    preview = process_and_classify_uploads((InvoiceIntakeUpload("real.pdf", b"actual-pdf-bytes"),), InMemoryHistoricalInvoiceRepository())
 
-    assert preview[0].source_hash == "040e68fe0fe0e1fba9e14f342d988209de6260012d88faf45b98f2e2e7eda118"
-    assert preview[0].bundle is not None
-    assert preview[0].bundle.order.refund_amount == Decimal("0.00")
-    assert preview[0].bundle.items[0].actual_selling_value is None
+def test_current_batch_fails_closed_for_related_manual_review_or_unavailable_archive(tmp_path, monkeypatch):
+    archived = tmp_path / "member.pdf"
+    archived.write_bytes(b"source")
+    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.resolve_archived_pdf_path", lambda *_: archived)
+    order = {"platform": "Shopee", "order_id": "SHP-REVIEW", "source_pdf": "source.pdf", "status": "Accepted"}
+
+    review_entries = build_current_batch_staging(
+        batch_id="batch", orders=[order], products=[],
+        reviews=[{"platform": "Shopee", "order_id": "SHP-REVIEW", "source_pdf": "source.pdf", "status": "Manual Review"}],
+    )
+    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.resolve_archived_pdf_path", lambda *_: None)
+    unavailable_entries = build_current_batch_staging(batch_id="batch", orders=[order], products=[], reviews=[])
+
+    assert review_entries[0].status is IntakeStatus.NEEDS_REVIEW and review_entries[0].bundle is None
+    assert unavailable_entries[0].status is IntakeStatus.NEEDS_REVIEW and unavailable_entries[0].bundle is None
 
 
-def test_non_shopee_parser_outcome_is_staging_review_and_never_a_persistence_candidate(monkeypatch):
-    def fake_process(source_pdf, _path, _batch_id):
-        return PdfProcessingResult(
-            orders=[{"platform": "Lazada", "order_id": "LZD-1", "source_pdf": source_pdf, "status": "Accepted"}],
-            products=[{"platform": "Lazada", "order_id": "LZD-1", "source_pdf": source_pdf, "status": "Accepted", "seller_sku": "SKU", "product_name": "Tea", "quantity": 1}],
-            reviews=[], unsupported_files=[], processing_errors=[],
-        )
-
-    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.process_pdf_file_with_outcome", fake_process)
+def test_import_reclassifies_a_changed_repository_result_without_silent_overwrite():
     repository = InMemoryHistoricalInvoiceRepository()
-    preview = process_and_classify_uploads((InvoiceIntakeUpload("lazada.pdf", b"lazada-bytes"),), repository)
+    original = _bundle("EXISTING")
+    repository.import_invoice(original)
 
-    assert preview[0].status is IntakeStatus.NEEDS_REVIEW
-    assert preview[0].bundle is None
-    assert repository.list_orders() == ()
+    already_imported = import_new_staging((_entry(original),), repository)
+    conflicting = import_new_staging(
+        (_entry(replace(original, order=replace(original.order, refund_amount=Decimal("-1.00")))),), repository
+    )
+
+    assert already_imported.entries[0].status is IntakeStatus.ALREADY_IMPORTED
+    assert conflicting.entries[0].status is IntakeStatus.SOURCE_CONFLICT
+    assert repository.get_order("Shopee", "EXISTING").refund_amount == Decimal("0.00")
 
 
 class RecordingMemoryRepository(InMemoryHistoricalInvoiceRepository):

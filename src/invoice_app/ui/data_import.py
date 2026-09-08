@@ -7,6 +7,7 @@ persistence rules.
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any, Callable
 
 import streamlit as st
@@ -17,7 +18,18 @@ from ..services.import_result_adapters import (
     adapt_shopee_weekly_statement_import_result,
 )
 from ..services.import_result_contract import ImportResult, ReconciliationException, RecoveryAction, ValidationIssue
-from ..services.validation_recovery import VIEW_DETAILS, execute_current_batch_recovery
+from ..services.validation_recovery import (
+    REMOVE_SOURCE,
+    VIEW_DETAILS,
+    execute_current_batch_recovery,
+    recovery_actions_for_source,
+)
+from ..services.historical_invoice_intake import (
+    IntakeStatus, build_current_batch_staging, classify_staging, import_new_staging,
+)
+from ..services.uat2_data_settings import configured_uat2_data_settings
+from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
+from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
 from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
 from ..services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
@@ -44,6 +56,9 @@ _WORKFLOW_KEYS = (
     "weekly_statement_stage",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
+    "uat2_historical_commit_entries",
+    "uat2_historical_commit_refresh_required",
+    "uat2_historical_commit_signature",
 )
 
 
@@ -350,6 +365,8 @@ def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationE
 
 def _render_review_and_commit_step() -> None:
     st.subheader("Review & Commit")
+    if st.session_state.get("pending_validation_recovery_action"):
+        _render_recovery_confirmation()
     result = _current_import_result()
     _render_source_summary(result)
     readiness = result.commit_readiness
@@ -357,6 +374,9 @@ def _render_review_and_commit_step() -> None:
         st.success("Ready to Commit — current batch review is complete.", icon=":material/check_circle:")
     else:
         st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
+    if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        _render_historical_invoice_commit()
+        return
     st.caption(
         "Future database commit is disabled in this Self-Test Version. "
         "This review never writes or marks production data as committed."
@@ -397,9 +417,95 @@ def _current_import_result() -> ImportResult:
         unsupported_files=st.session_state.get("unsupported_files", []),
     )
 
+
+def _render_historical_invoice_commit() -> None:
+    signature = _historical_commit_signature()
+    if st.session_state.get("uat2_historical_commit_signature") not in (None, signature):
+        st.session_state.pop("uat2_historical_commit_entries", None)
+        st.session_state.pop("uat2_historical_commit_refresh_required", None)
+        st.session_state.pop("uat2_historical_commit_signature", None)
+        st.info("Current batch changed. Check Historical Status again before committing.")
+    st.subheader("Historical Invoice Commit")
+    st.caption(
+        "Only Accepted Shopee invoices are eligible. Lazada and ZENXIN remain outside UAT2 Phase 3 persistence. "
+        "Checking historical status does not write."
+    )
+    if st.button("Check Historical Status", icon=":material/manage_search:", key="uat2_historical_commit_check"):
+        try:
+            repository = configured_uat2_data_settings().create_repository()
+            candidates = build_current_batch_staging(
+                batch_id=st.session_state.get("batch_id"), orders=st.session_state.get("orders", []),
+                products=st.session_state.get("products", []), reviews=st.session_state.get("reviews", []),
+            )
+            st.session_state.uat2_historical_commit_entries = classify_staging(candidates, repository)
+            st.session_state.uat2_historical_commit_refresh_required = False
+            st.session_state.uat2_historical_commit_signature = signature
+        except HistoricalInvoiceStorageError as error:
+            st.error(f"Historical Invoice storage is unavailable: {error}")
+    entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
+    if not entries:
+        st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", disabled=True, key="uat2_historical_commit")
+        return
+    counts = {status: sum(entry.status is status for entry in entries) for status in IntakeStatus}
+    st.dataframe([{
+        "Source PDF": entry.source_filename, "Order ID": entry.order_id or "N/A",
+        "Historical Status": entry.status.value.replace("_", " ").title(),
+        "Reason / Message": entry.message or "Ready for explicit commit.",
+    } for entry in entries], hide_index=True)
+    for entry in entries:
+        if entry.status not in {IntakeStatus.NEEDS_REVIEW, IntakeStatus.SOURCE_CONFLICT}:
+            continue
+        actions = recovery_actions_for_source(
+            source=entry.source_filename,
+            action_type=REMOVE_SOURCE,
+            remove_label="Remove source from current batch",
+            include_details=False,
+        )
+        if actions and st.button(
+            f"Remove {entry.source_filename} from current batch",
+            icon=":material/delete_outline:",
+            key=f"uat2_historical_remove_{entry.staging_id}",
+        ):
+            st.session_state.pending_validation_recovery_action = actions[0]
+            st.rerun()
+    st.caption(
+        f"Shopee Sources: {len(entries)} · New: {counts[IntakeStatus.NEW]} · "
+        f"Already Imported: {counts[IntakeStatus.ALREADY_IMPORTED]} · Needs Review: {counts[IntakeStatus.NEEDS_REVIEW]} · "
+        f"Source Conflict: {counts[IntakeStatus.SOURCE_CONFLICT]}"
+    )
+    refresh_required = bool(st.session_state.get("uat2_historical_commit_refresh_required", False))
+    if refresh_required:
+        st.warning("A historical write was interrupted. Check Historical Status again before retrying.")
+    new_entries = [entry for entry in entries if entry.status is IntakeStatus.NEW and entry.bundle is not None]
+    if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not new_entries or refresh_required, key="uat2_historical_commit"):
+        try:
+            repository = configured_uat2_data_settings().create_repository()
+            outcome = import_new_staging(entries, repository)
+            st.session_state.uat2_historical_commit_entries = outcome.entries
+            actual = outcome.bulk_result.results
+            st.success(
+                f"Historical Invoice Commit Complete — Imported: {sum(item.status.value == 'NEW' for item in actual)}; "
+                f"Already Imported: {sum(item.status.value == 'ALREADY_IMPORTED' for item in actual)}; "
+                f"Source Conflict: {sum(item.status.value == 'SOURCE_CONFLICT' for item in actual)}."
+            )
+        except HistoricalInvoiceBulkImportError as error:
+            st.session_state.uat2_historical_commit_refresh_required = True
+            st.error(f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). Check Historical Status again before retrying.")
+        except HistoricalInvoiceStorageError as error:
+            st.error(f"Historical Invoice storage write failed: {error}")
+
 def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
     stage = st.session_state.get("weekly_statement_stage")
     return stage if isinstance(stage, StagedShopeeWeeklyStatement) else None
+
+
+def _historical_commit_signature() -> str:
+    rows = []
+    for bucket in ("orders", "products", "reviews", "processing_errors", "duplicate_skipped", "unsupported_files"):
+        for record in st.session_state.get(bucket, []):
+            if isinstance(record, dict):
+                rows.append((bucket, tuple(sorted((str(key), repr(value)) for key, value in record.items()))))
+    return sha256(repr((st.session_state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
 
 
 def _render_next_step(label: str, step: int) -> None:

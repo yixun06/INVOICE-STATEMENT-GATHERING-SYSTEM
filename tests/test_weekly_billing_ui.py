@@ -40,20 +40,19 @@ def test_weekly_billing_is_the_single_uat2_sidebar_page_and_existing_pages_remai
     labels = {button.label for button in app.button}
     assert {
         "Data Import", "Dashboard", "Settlement Test Lab", WEEKLY_BILLING_PAGE,
-        "Process for preview", "Import Accepted Invoices",
+        "Go to Data Import",
     } <= labels
-    assert next(button for button in app.button if button.label == "Import Accepted Invoices").disabled is True
     assert app.session_state.filtered_state["batch_id"] == "active-batch"
     assert app.session_state.filtered_state["orders"] == [
         {"platform": "Shopee", "order_id": "SHP-1", "status": "Accepted"}
     ]
 
 
-def test_weekly_billing_invoice_intake_keeps_google_and_parser_boundaries_out_of_the_ui():
+def test_weekly_billing_invoice_intake_has_no_uploader_or_repository_access():
     source = (Path(__file__).parents[1] / "src" / "invoice_app" / "ui" / "weekly_billing.py").read_text(encoding="utf-8").casefold()
     assert "googleapihistoricalinvoicegateway" not in source
     assert "product_master" not in source
     assert "process_pdf_file_with_outcome" not in source
-    assert "import accepted invoices" in source
-    assert "disabled=not new_entries or refresh_required" in source
-    assert "configured_uat2_data_settings().create_repository()" in source
+    assert "file_uploader" not in source
+    assert "create_repository" not in source
+    assert "go to data import" in source

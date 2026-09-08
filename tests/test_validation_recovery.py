@@ -16,6 +16,7 @@ from src.invoice_app.services.workflow_navigation import (
     end_workflow_activity,
     request_navigation,
 )
+from src.invoice_app.services.historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
 
 
 
@@ -176,6 +177,39 @@ def test_recovery_remove_requires_confirmation_before_current_batch_changes(tmp_
     assert app.session_state.filtered_state["reviews"] == []
 
 
+def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "historical-conflict-batch"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 5
+    app.session_state["orders"] = [{"platform": "Shopee", "order_id": "SHP-CONFLICT", "source_pdf": "conflict.pdf", "status": "Accepted"}]
+    app.session_state["products"] = []
+    app.session_state["reviews"] = []
+    app.session_state["processing_errors"] = []
+    app.session_state["duplicate_skipped"] = []
+    app.session_state["unsupported_files"] = []
+    app.session_state["uat2_historical_commit_entries"] = (
+        InvoiceIntakeEntry(
+            staging_id="conflict", source_filename="conflict.pdf", source_hash="hash",
+            order_id="SHP-CONFLICT", status=IntakeStatus.SOURCE_CONFLICT,
+            message="Stored historical invoice has different material source facts.", bundle=None,
+        ),
+    )
+    app.run(timeout=20)
+
+    next(button for button in app.button if button.label == "Remove conflict.pdf from current batch").click().run(timeout=20)
+    assert app.session_state.filtered_state["orders"][0]["source_pdf"] == "conflict.pdf"
+    next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert state["orders"] == []
+    assert "uat2_historical_commit_entries" not in state
+
+
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
@@ -193,4 +227,3 @@ def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward
     app.run(timeout=20)
     next(button for button in app.button if button.label == "Data Import").click().run(timeout=20)
     assert app.session_state.filtered_state["navigation"] == "Data Import"
-

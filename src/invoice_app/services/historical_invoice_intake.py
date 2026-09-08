@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 from hashlib import sha256
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Iterable, Protocol
+from typing import Iterable
 
 from src.invoice_app.domain.historical_invoice import InvoiceBundle, map_accepted_shopee_invoice
 from src.invoice_app.repositories.historical_invoice_repository import (
@@ -16,7 +14,7 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     ImportResult,
     ImportStatus,
 )
-from src.invoice_app.services.batch_service import apply_batch_rules, process_pdf_file_with_outcome
+from src.invoice_app.services.batch_service import resolve_archived_pdf_path
 
 
 DEFAULT_BULK_CHUNK_SIZE = 50
@@ -28,16 +26,6 @@ class IntakeStatus(str, Enum):
     SOURCE_CONFLICT = "SOURCE_CONFLICT"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     IMPORTED = "IMPORTED"
-
-
-class HistoricalInvoiceIntakeError(RuntimeError):
-    """A source could not become a safe historical-invoice staging candidate."""
-
-
-@dataclass(frozen=True)
-class InvoiceIntakeUpload:
-    source_filename: str
-    content: bytes
 
 
 @dataclass(frozen=True)
@@ -57,12 +45,49 @@ class InvoiceIntakeImportOutcome:
     bulk_result: BulkImportResult
 
 
-def process_and_classify_uploads(
-    uploads: Iterable[InvoiceIntakeUpload], repository: HistoricalInvoiceRepository
+def build_current_batch_staging(
+    *, batch_id: str | None, orders: Iterable[dict], products: Iterable[dict], reviews: Iterable[dict]
 ) -> tuple[InvoiceIntakeEntry, ...]:
-    """Parse files into temporary staging, then perform one no-write repository snapshot lookup."""
-    staged = tuple(entry for upload in uploads for entry in _process_upload(upload))
-    return classify_staging(staged, repository)
+    """Map existing Data Import staging without parsing a source document again."""
+    all_products = tuple(products)
+    all_reviews = tuple(reviews)
+    entries: list[InvoiceIntakeEntry] = []
+    for order in orders:
+        if str(order.get("platform", "")).strip() != "Shopee" or str(order.get("status", "")).strip() != "Accepted":
+            continue
+        source_pdf = str(order.get("source_pdf", "")).strip()
+        order_id = str(order.get("order_id", "")).strip() or None
+        source_path = resolve_archived_pdf_path(batch_id, source_pdf)
+        if source_path is None:
+            entries.append(_review_entry(source_pdf, source_pdf, "", order_id, "Archived source is unavailable for historical source hashing."))
+            continue
+        try:
+            source_hash = sha256(source_path.read_bytes()).hexdigest()
+        except OSError as error:
+            entries.append(_review_entry(source_pdf, source_pdf, "", order_id, f"Archived source cannot be read: {error}"))
+            continue
+        staging_id = f"{source_pdf}:{source_hash}:{order_id or 'unknown'}"
+        related_review = any(
+            str(review.get("source_pdf", "")).strip() == source_pdf
+            and str(review.get("order_id", "")).strip() == (order_id or "")
+            for review in all_reviews
+        )
+        if related_review:
+            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, "Source has a related Manual Review record."))
+            continue
+        candidate_products = [
+            product for product in all_products
+            if str(product.get("platform", "")).strip() == "Shopee"
+            and str(product.get("order_id", "")).strip() == (order_id or "")
+            and str(product.get("source_pdf", "")).strip() == source_pdf
+        ]
+        try:
+            bundle = map_accepted_shopee_invoice(order, candidate_products, source_hash=source_hash)
+        except (TypeError, ValueError) as error:
+            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, str(error)))
+            continue
+        entries.append(InvoiceIntakeEntry(staging_id, source_pdf, source_hash, bundle.order.order_id, IntakeStatus.NEW, None, bundle))
+    return tuple(entries)
 
 
 def classify_staging(
@@ -97,80 +122,14 @@ def import_new_staging(
     staged = tuple(entries)
     candidates = tuple(entry for entry in staged if entry.status is IntakeStatus.NEW and entry.bundle is not None)
     result = repository.import_invoices((entry.bundle for entry in candidates), chunk_size=DEFAULT_BULK_CHUNK_SIZE)
-    imported = {
-        (item.platform, item.order_id)
-        for item in result.results
-        if item.status is ImportStatus.NEW
-    }
+    result_by_id = {(item.platform, item.order_id): item for item in result.results}
     return InvoiceIntakeImportOutcome(
         entries=tuple(
-            replace(entry, status=IntakeStatus.IMPORTED, message="Imported to historical invoice storage.")
-            if entry.bundle is not None and (entry.bundle.order.platform, entry.bundle.order.order_id) in imported
-            else entry
+            _with_import_result(entry, result_by_id)
             for entry in staged
         ),
         bulk_result=result,
     )
-
-
-def remove_staging_entry(entries: Iterable[InvoiceIntakeEntry], staging_id: str) -> tuple[InvoiceIntakeEntry, ...]:
-    """Remove temporary UI staging only; this has no repository or storage side effect."""
-    return tuple(entry for entry in entries if entry.staging_id != staging_id)
-
-
-def _process_upload(upload: InvoiceIntakeUpload) -> tuple[InvoiceIntakeEntry, ...]:
-    source_hash = sha256(upload.content).hexdigest()
-    staging_id = f"{upload.source_filename}:{source_hash}"
-    if not upload.content:
-        return (_review_entry(staging_id, upload.source_filename, source_hash, None, "Uploaded PDF is empty."),)
-    try:
-        with TemporaryDirectory(prefix="invoicegather-uat2-") as temporary_directory:
-            path = Path(temporary_directory) / "invoice.pdf"
-            path.write_bytes(upload.content)
-            outcome = process_pdf_file_with_outcome(upload.source_filename, path, "uat2-invoice-intake")
-    except Exception as error:
-        return (_review_entry(staging_id, upload.source_filename, source_hash, None, f"PDF processing failed: {error}"),)
-
-    orders, products, reviews = apply_batch_rules(outcome.orders, outcome.products, outcome.reviews)
-    messages = [str(row.get("message") or row.get("reason") or "Unsupported source.") for row in (*outcome.unsupported_files, *outcome.processing_errors)]
-    review_order_ids = {
-        str(row.get("order_id")).strip()
-        for row in reviews
-        if str(row.get("source_pdf", "")).strip() == upload.source_filename and str(row.get("order_id", "")).strip()
-    }
-    entries: list[InvoiceIntakeEntry] = []
-    for order in orders:
-        if str(order.get("source_pdf", "")).strip() != upload.source_filename:
-            continue
-        order_id = str(order.get("order_id", "")).strip() or None
-        if str(order.get("platform", "")).strip() != "Shopee":
-            entries.append(_review_entry(staging_id, upload.source_filename, source_hash, order_id, "Only Shopee invoices can enter UAT2 historical persistence."))
-            continue
-        if str(order.get("status", "")).strip() != "Accepted" or (order_id and order_id in review_order_ids):
-            entries.append(_review_entry(staging_id, upload.source_filename, source_hash, order_id, "Source requires Manual Review before historical persistence."))
-            continue
-        order_products = [
-            product for product in products
-            if str(product.get("platform", "")).strip() == "Shopee"
-            and str(product.get("order_id", "")).strip() == order_id
-            and str(product.get("source_pdf", "")).strip() == upload.source_filename
-        ]
-        try:
-            bundle = map_accepted_shopee_invoice(order, order_products, source_hash=source_hash)
-        except (TypeError, ValueError) as error:
-            entries.append(_review_entry(staging_id, upload.source_filename, source_hash, order_id, str(error)))
-            continue
-        entries.append(
-            InvoiceIntakeEntry(
-                staging_id=f"{staging_id}:{bundle.order.order_id}", source_filename=upload.source_filename,
-                source_hash=source_hash, order_id=bundle.order.order_id, status=IntakeStatus.NEW,
-                message=None, bundle=bundle,
-            )
-        )
-    if entries:
-        return tuple(entries)
-    message = messages[0] if messages else "No accepted Shopee invoice was produced by the existing parser and validation flow."
-    return (_review_entry(staging_id, upload.source_filename, source_hash, None, message),)
 
 
 def _with_repository_result(
@@ -185,6 +144,19 @@ def _with_repository_result(
         ImportStatus.SOURCE_CONFLICT: "Stored historical invoice has different material source facts.",
     }
     return replace(entry, status=IntakeStatus(result.status.value), message=messages[result.status])
+
+
+def _with_import_result(
+    entry: InvoiceIntakeEntry, results: dict[tuple[str, str], ImportResult]
+) -> InvoiceIntakeEntry:
+    if entry.bundle is None:
+        return entry
+    result = results.get((entry.bundle.order.platform, entry.bundle.order.order_id))
+    if result is None:
+        return entry
+    if result.status is ImportStatus.NEW:
+        return replace(entry, status=IntakeStatus.IMPORTED, message="Imported to historical invoice storage.")
+    return _with_repository_result(entry, results)
 
 
 def _duplicate_candidate_ids(entries: Iterable[InvoiceIntakeEntry]) -> set[tuple[str, str]]:
