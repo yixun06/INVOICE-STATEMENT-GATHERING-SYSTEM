@@ -79,6 +79,36 @@ def mapped_order_from_financials(financial_lines: str, *, status: str = "Order R
     return order
 
 
+def refund_order_data(
+    refund_amount: Decimal | None,
+    *,
+    merchandise_subtotal: str = "352.79",
+    order_income: str = "249.84",
+):
+    extracted = extract_shopee_data(VALID_SHOPEE_TEXT, "refund-validation.pdf")
+    gross_product = dict(
+        extracted.product_items[0],
+        quantity=2,
+        unit_price=Decimal("190.23"),
+        line_total=Decimal("380.46"),
+    )
+    income = dict(
+        extracted.income,
+        merchandise_subtotal=merchandise_subtotal,
+        product_price="380.46",
+        shipping_subtotal="-9.54",
+        vouchers_rebates_total="-9.27",
+        fees_charges_total="-84.14",
+        order_income=order_income,
+    )
+    return replace(
+        extracted,
+        product_items=(gross_product,),
+        refund_amount=refund_amount,
+        income=income,
+    )
+
+
 def test_shopee_extraction_layer_returns_source_facts_only():
     extracted = extract_shopee_data(VALID_SHOPEE_TEXT, "sample-shopee.pdf")
 
@@ -160,6 +190,76 @@ def test_shopee_valid_normal_product_and_financial_reconciliation_are_accepted()
     ) is None
     assert validate_shopee_financial_reconciliation(extracted.income) is None
     assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_explicit_refund_reconciles_gross_product_total_to_merchandise_subtotal():
+    extracted = refund_order_data(Decimal("-27.67"))
+
+    assert validate_shopee_product_amounts(
+        list(extracted.product_items),
+        extracted.income["merchandise_subtotal"],
+        extracted.refund_amount,
+    ) is None
+    assert find_shopee_review_issue(extracted) is None
+    assert extracted.product_items[0]["quantity"] == 2
+
+
+def test_shopee_wrong_explicit_refund_still_requires_product_amount_manual_review():
+    extracted = refund_order_data(Decimal("-20.00"))
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert issue is not None
+    assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
+    assert "Refund Amount -20.00" in issue.reason
+
+
+def test_shopee_explicit_zero_refund_uses_existing_non_refund_product_arithmetic():
+    extracted = refund_order_data(
+        Decimal("0.00"),
+        merchandise_subtotal="380.46",
+        order_income="277.51",
+    )
+
+    assert validate_shopee_product_amounts(
+        list(extracted.product_items),
+        extracted.income["merchandise_subtotal"],
+        extracted.refund_amount,
+    ) is None
+
+
+def test_shopee_refund_financial_reconciliation_starts_from_net_merchandise_subtotal():
+    extracted = refund_order_data(Decimal("-27.67"))
+
+    assert validate_shopee_financial_reconciliation(
+        extracted.income,
+        extracted.refund_amount,
+    ) is None
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_refund_is_not_double_subtracted_in_financial_reconciliation():
+    extracted = refund_order_data(Decimal("-27.67"), order_income="222.17")
+
+    error = validate_shopee_financial_reconciliation(
+        extracted.income,
+        extracted.refund_amount,
+    )
+
+    assert error is not None
+    assert error.startswith("Financial Reconciliation Failed:")
+
+
+def test_shopee_refund_financial_reconciliation_still_rejects_wrong_totals():
+    extracted = refund_order_data(Decimal("-27.67"), order_income="249.87")
+
+    error = validate_shopee_financial_reconciliation(
+        extracted.income,
+        extracted.refund_amount,
+    )
+
+    assert error is not None
+    assert error.startswith("Financial Reconciliation Failed:")
 
 
 def test_shopee_product_count_mismatch_requires_manual_review():
