@@ -102,6 +102,7 @@ def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | N
     product_amount_error = validate_shopee_product_amounts(
         product_items,
         data.income.get("merchandise_subtotal"),
+        data.refund_amount,
     )
     if product_amount_error:
         return ShopeeReviewIssue(
@@ -110,7 +111,10 @@ def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | N
             reason_code=PRODUCT_AMOUNT_RECONCILIATION_FAILED,
         )
 
-    financial_error = validate_shopee_financial_reconciliation(data.income)
+    financial_error = validate_shopee_financial_reconciliation(
+        data.income,
+        data.refund_amount,
+    )
     if financial_error:
         return ShopeeReviewIssue(order_id=data.order_id, reason=financial_error)
 

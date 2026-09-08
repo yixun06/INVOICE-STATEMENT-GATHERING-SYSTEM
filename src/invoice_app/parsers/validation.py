@@ -94,6 +94,7 @@ def validate_shopee_promotion_evidence(items: list[dict[str, Any]]) -> str | Non
 def validate_shopee_product_amounts(
     items: list[dict[str, Any]],
     merchandise_subtotal: Any,
+    refund_amount: Any = None,
 ) -> str | None:
     totals: list[Decimal] = []
     seen_promotion_groups: set[str] = set()
@@ -128,18 +129,36 @@ def validate_shopee_product_amounts(
     if seller_subtotal is None or not totals:
         return None
     extracted_total = sum(totals, Decimal("0"))
-    if abs(extracted_total - seller_subtotal) > MONEY_TOLERANCE:
+    signed_refund = _decimal_value(refund_amount)
+    reconciled_total = extracted_total + (
+        signed_refund if signed_refund is not None else Decimal("0")
+    )
+    if abs(reconciled_total - seller_subtotal) > MONEY_TOLERANCE:
+        refund_detail = (
+            f" plus explicit Refund Amount {signed_refund:.2f}"
+            if signed_refund is not None
+            else ""
+        )
         return (
             "Product Amount Reconciliation Failed: "
-            f"extracted source subtotals total {extracted_total:.2f}, "
+            f"extracted source subtotals total {extracted_total:.2f}{refund_detail}, "
             f"but seller Merchandise Subtotal is {seller_subtotal:.2f}."
         )
     return None
 
 
-def validate_shopee_financial_reconciliation(income: dict[str, str]) -> str | None:
+def validate_shopee_financial_reconciliation(
+    income: dict[str, str],
+    refund_amount: Any = None,
+) -> str | None:
+    signed_refund = _decimal_value(refund_amount)
+    product_component = (
+        "merchandise_subtotal"
+        if signed_refund is not None
+        else "product_price"
+    )
     required_fields = (
-        "product_price",
+        product_component,
         "shipping_subtotal",
         "fees_charges_total",
         "order_income",
@@ -155,7 +174,7 @@ def validate_shopee_financial_reconciliation(income: dict[str, str]) -> str | No
         return "Financial Reconciliation Failed: a seller financial component is not numeric."
 
     expected_income = (
-        required_values["product_price"]
+        required_values[product_component]
         + required_values["shipping_subtotal"]
         + required_values["fees_charges_total"]
     )
