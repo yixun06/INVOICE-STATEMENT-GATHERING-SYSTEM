@@ -40,6 +40,13 @@ def test_exact_sku_with_unique_price_matches():
     assert result.matched_by == "matched"
 
 
+def test_nav_code_is_returned_from_the_same_resolved_product_master_row():
+    result = _master([_row() | {"nav_code": "NAV-001"}]).lookup(seller_sku="SKU-1")
+
+    assert result.unit_selling_price == Decimal("12.50")
+    assert result.nav_code == "NAV-001"
+
+
 def test_duplicate_sku_with_same_price_is_conflict_without_identity_evidence():
     result = _master([
         _row(product_name="Product One"),

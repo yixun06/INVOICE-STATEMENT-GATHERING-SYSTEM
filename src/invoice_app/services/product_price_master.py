@@ -39,6 +39,7 @@ class ProductPriceMasterRecord:
     variation_name: str
     unit_selling_price: Decimal
     source_row: int
+    nav_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class ProductPriceLookupResult:
     source_metadata: ProductPriceMasterMetadata
     source_rows: tuple[int, ...]
     reason: str | None = None
+    nav_code: str | None = None
 
     alias_rule: str | None = None
 
@@ -74,6 +76,7 @@ _REQUIRED_HEADERS = {
     "seller_sku": "sku",
     "unit_selling_price": "price",
 }
+_NAV_HEADER = "nav code"
 _STRICT_PRICE = re.compile(
     r"^(?:RM\s*)?(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)$",
     re.IGNORECASE,
@@ -132,6 +135,7 @@ class ProductPriceMaster:
                         variation_name=_display_text(values["variation_name"]),
                         unit_selling_price=price,
                         source_row=row_number,
+                        nav_code=_optional_nav(values.get("nav_code")),
                     )
                 )
 
@@ -175,8 +179,9 @@ class ProductPriceMaster:
                     parent_sku=parent_sku,
                     product_name=_display_text(row.get("product_name")),
                     variation_name=_display_text(row.get("variation_name")),
-                    unit_selling_price=price,
-                    source_row=source_row,
+                        unit_selling_price=price,
+                        source_row=source_row,
+                        nav_code=_optional_nav(row.get("nav_code")),
                 )
             )
         return cls(
@@ -349,6 +354,7 @@ class ProductPriceMaster:
             source_metadata=self.metadata,
             source_rows=tuple(sorted(item.source_row for item in records)),
             alias_rule=alias_rule,
+            nav_code=record.nav_code,
         )
 
 
@@ -374,6 +380,7 @@ class ProductPriceMaster:
                 "Candidate identities remain unresolved, but all exact SKU / Parent SKU "
                 "candidates share one unique Unit Selling Price."
             ),
+            nav_code=None,
         )
 
     def _matched(
@@ -395,6 +402,7 @@ class ProductPriceMaster:
             matched_variation_name=record.variation_name or None,
             source_metadata=self.metadata,
             source_rows=tuple(sorted(item.source_row for item in records)),
+            nav_code=record.nav_code,
         )
 
     def _conflict(
@@ -460,9 +468,12 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
             if _header_text(value)
         }
         if all(expected in headers for expected in _REQUIRED_HEADERS.values()):
-            return row_number, {
+            columns = {
                 field: headers[expected] for field, expected in _REQUIRED_HEADERS.items()
             }
+            if _NAV_HEADER in headers:
+                columns["nav_code"] = headers[_NAV_HEADER]
+            return row_number, columns
         if row_number >= 50:
             break
     raise ValueError("Shopee Product Listing required headers were not found.")
@@ -479,6 +490,11 @@ def _sku_text(value: Any) -> str:
 
 def _display_text(value: Any) -> str:
     return normalize_whitespace(str(value or ""))
+
+
+def _optional_nav(value: Any) -> str | None:
+    value = _display_text(value)
+    return value or None
 
 
 def _strict_decimal(value: Any) -> Decimal | None:

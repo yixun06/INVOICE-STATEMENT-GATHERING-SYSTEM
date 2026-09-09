@@ -21,13 +21,12 @@ from src.invoice_app.services.historical_invoice_intake import (
 def _bundle(order_id: str = "SHP-1", *, refund=Decimal("0.00")) -> InvoiceBundle:
     order = CanonicalInvoiceOrder(
         platform="Shopee", order_id=order_id, order_created_date=None, income_type="Final",
-        order_income=Decimal("10.00"), refund_amount=refund, invoice_payment_signal="Released",
-        source_filename="invoice.pdf", source_hash="source", first_imported_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+        order_income=Decimal("10.00"), refund_amount=refund, payment_status="Released",
+        source_pdf="invoice.pdf", source_hash="source", first_imported_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
     )
     item = CanonicalInvoiceItem(
         platform="Shopee", order_id=order_id, item_index=0, seller_sku="000-SKU", product_name="Tea",
-        variation=None, quantity=1, source_unit_price=Decimal("10.00"), source_line_subtotal=Decimal("10.00"),
-        actual_selling_value=None, pricing_status="invoice_source", source_hash="source",
+        nav="NAV", variation=None, quantity=1, unit_price=Decimal("10.00"), actual_selling_unit_price=Decimal("10.00"), line_subtotal=Decimal("10.00"), source_pdf="invoice.pdf", source_hash="source",
     )
     return InvoiceBundle(order=order, items=(item,))
 
@@ -83,11 +82,11 @@ def test_current_batch_builds_only_accepted_shopee_from_archived_bytes(tmp_path,
             {"platform": "Lazada", "order_id": "LZD-1", "source_pdf": "lazada.pdf", "status": "Accepted"},
         ], products=[
             {"platform": "Shopee", "order_id": "SHP-ARCHIVE", "source_pdf": "archive.zip::folder/order.pdf", "status": "Accepted", "seller_sku": "SKU", "product_name": "Tea", "quantity": 1, "source_line_subtotal": Decimal("0.00")},
-        ], reviews=[],
+        ], reviews=[], price_master=__import__("src.invoice_app.services.product_price_master", fromlist=["ProductPriceMaster"]).ProductPriceMaster.from_rows([{"seller_sku":"SKU","parent_sku":"","product_name":"Tea","variation_name":"","unit_selling_price":"10.00","nav_code":"NAV"}]),
     )
     assert len(entries) == 1 and entries[0].status is IntakeStatus.NEW
     assert entries[0].source_hash == "fb4ce2ff2d5cccdcee4defe77618fa4a10b25970aaf1e5de427274193d8f08a6"
-    assert entries[0].bundle.items[0].actual_selling_value is None
+    assert entries[0].bundle.items[0].actual_selling_unit_price is None
 
 
 def test_current_batch_fails_closed_for_related_manual_review_or_unavailable_archive(tmp_path, monkeypatch):
@@ -120,6 +119,28 @@ def test_import_reclassifies_a_changed_repository_result_without_silent_overwrit
     assert already_imported.entries[0].status is IntakeStatus.ALREADY_IMPORTED
     assert conflicting.entries[0].status is IntakeStatus.SOURCE_CONFLICT
     assert repository.get_order("Shopee", "EXISTING").refund_amount == Decimal("0.00")
+
+
+def test_option_a_blocks_every_mixed_batch_before_any_write():
+    repository = RecordingMemoryRepository()
+    outcome = import_new_staging((_entry(_bundle("NEW")), _entry(_bundle("REVIEW"), IntakeStatus.NEEDS_REVIEW)), repository)
+
+    assert outcome.bulk_result.results == ()
+    assert repository.write_chunks == ()
+
+
+def test_blank_nav_or_pricing_failure_routes_whole_order_to_needs_review(tmp_path, monkeypatch):
+    from src.invoice_app.services.product_price_master import ProductPriceMaster
+    archived = tmp_path / "source.pdf"
+    archived.write_bytes(b"source")
+    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.resolve_archived_pdf_path", lambda *_: archived)
+    order = {"platform": "Shopee", "order_id": "SHP-NAV", "source_pdf": "source.pdf", "status": "Accepted"}
+    product = {"platform": "Shopee", "order_id": "SHP-NAV", "source_pdf": "source.pdf", "status": "Accepted", "seller_sku": "SKU", "product_name": "Tea", "quantity": 1}
+    master = ProductPriceMaster.from_rows([{"seller_sku": "SKU", "parent_sku": "", "product_name": "Tea", "variation_name": "", "unit_selling_price": "10.00", "nav_code": ""}])
+
+    entries = build_current_batch_staging(batch_id="batch", orders=[order], products=[product], reviews=[], price_master=master)
+    assert entries[0].status is IntakeStatus.NEEDS_REVIEW
+    assert "NAV CODE" in entries[0].message
 
 
 class RecordingMemoryRepository(InMemoryHistoricalInvoiceRepository):

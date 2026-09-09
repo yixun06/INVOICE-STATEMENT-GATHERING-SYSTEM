@@ -14,6 +14,7 @@ from .product_price_master import (
     ProductPriceMasterMetadata,
     ProductPriceMasterRecord,
     _REQUIRED_HEADERS,
+    _NAV_HEADER,
     _display_text,
     _strict_decimal,
 )
@@ -314,9 +315,12 @@ def _find_tabular_listing_headers(
             if _header_text(value)
         }
         if all(expected in headers for expected in _REQUIRED_HEADERS.values()):
-            return row_number, {
+            columns = {
                 field: headers[expected] for field, expected in _REQUIRED_HEADERS.items()
             }
+            if _NAV_HEADER in headers:
+                columns["nav_code"] = headers[_NAV_HEADER]
+            return row_number, columns
         if row_number >= 50:
             break
     raise ProductMasterSourceError(
@@ -353,8 +357,9 @@ def _canonical_records_from_rows(
                 parent_sku=parent_sku,
                 product_name=_display_text(values["product_name"]),
                 variation_name=_display_text(values["variation_name"]),
-                unit_selling_price=price,
-                source_row=row_number,
+            unit_selling_price=price,
+            source_row=row_number,
+            nav_code=_display_text(values.get("nav_code")) or None,
             )
         )
     return tuple(records), candidate_rows, invalid_prices

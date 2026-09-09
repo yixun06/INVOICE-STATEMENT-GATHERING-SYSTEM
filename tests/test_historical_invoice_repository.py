@@ -22,14 +22,13 @@ def _bundle(*, imported_at: datetime | None = None) -> InvoiceBundle:
     order = CanonicalInvoiceOrder(
         platform="Shopee", order_id="000123456789", order_created_date=date(2026, 8, 7),
         income_type="Final", order_income=Decimal("352.79"), refund_amount=Decimal("-27.67"),
-        invoice_payment_signal="Released", source_filename="upload-a.pdf", source_hash="bytes-a",
+        payment_status="Released", source_pdf="upload-a.pdf", source_hash="bytes-a",
         first_imported_at=imported_at or datetime(2026, 8, 8, tzinfo=timezone.utc),
     )
     item = CanonicalInvoiceItem(
         platform="Shopee", order_id="000123456789", item_index=0, seller_sku="000SKU-01",
-        product_name="Tea", variation="Large", quantity=2, source_unit_price=Decimal("190.23"),
-        source_line_subtotal=Decimal("380.46"), actual_selling_value=Decimal("380.46"),
-        pricing_status="invoice_source", source_hash="bytes-a",
+        nav="NAV-01", product_name="Tea", variation="Large", quantity=2, unit_price=Decimal("190.23"),
+        actual_selling_unit_price=Decimal("190.23"), line_subtotal=Decimal("380.46"), source_pdf="upload-a.pdf", source_hash="bytes-a",
     )
     return InvoiceBundle(order=order, items=(item,))
 
@@ -39,7 +38,7 @@ def test_canonical_models_preserve_text_ids_and_decimal_money():
     assert isinstance(bundle.order.order_id, str) and bundle.order.order_id == "000123456789"
     assert isinstance(bundle.items[0].seller_sku, str) and bundle.items[0].seller_sku == "000SKU-01"
     assert isinstance(bundle.order.refund_amount, Decimal)
-    assert isinstance(bundle.items[0].source_line_subtotal, Decimal)
+    assert isinstance(bundle.items[0].line_subtotal, Decimal)
 
 
 def test_none_and_explicit_decimal_zero_have_distinct_fingerprints():
@@ -52,8 +51,8 @@ def test_fingerprint_ignores_filename_source_hash_and_import_timestamp_only():
     original = _bundle()
     changed_meta = replace(
         original,
-        order=replace(original.order, source_filename="C:/temp/renamed.pdf", source_hash="different-bytes", first_imported_at=datetime(2026, 8, 9, tzinfo=timezone.utc)),
-        items=(replace(original.items[0], source_hash="different-bytes"),),
+        order=replace(original.order, source_pdf="C:/temp/renamed.pdf", source_hash="different-bytes", payment_status="Pending", first_imported_at=datetime(2026, 8, 9, tzinfo=timezone.utc)),
+        items=(replace(original.items[0], source_pdf="C:/temp/renamed.pdf", source_hash="different-bytes", nav="NAV-CHANGED", unit_price=Decimal("999")),),
     )
     assert source_fact_fingerprint(original) == source_fact_fingerprint(changed_meta)
 
@@ -95,19 +94,20 @@ def test_mapper_explicitly_converts_accepted_shopee_rows_without_parser_changes(
     bundle = map_accepted_shopee_invoice(
         {"platform": "Shopee", "order_id": "000123456789", "order_created_date": "07/08/2026", "income_type": "Final", "order_income": "352.79", "refund_amount": "-27.67", "payment_status": "Released", "source_pdf": "original.pdf", "status": "Accepted"},
         [{"platform": "Shopee", "order_id": "000123456789", "seller_sku": "000SKU-01", "product_name": "Tea", "variation_name": "Large", "quantity": "2", "unit_price": "190.23", "line_subtotal": "380.46", "status": "Accepted"}],
-        source_hash="content-sha256",
+        source_hash="content-sha256", enriched_items=[{"unit_price": "12.50", "nav": "NAV-01"}],
     )
     assert bundle.order.order_created_date == date(2026, 8, 7)
     assert bundle.order.refund_amount == Decimal("-27.67")
-    assert bundle.items[0].actual_selling_value is None
-    assert bundle.items[0].pricing_status == "invoice_source"
+    assert bundle.items[0].actual_selling_unit_price == Decimal("190.23")
+    assert bundle.items[0].unit_price == Decimal("12.50")
+    assert bundle.items[0].nav == "NAV-01"
 
 
 def test_mapper_accepts_authoritative_shopee_date_with_minutes_as_a_canonical_date():
     bundle = map_accepted_shopee_invoice(
         {"platform": "Shopee", "order_id": "DATE-1", "order_created_date": "19/08/2026 14:32", "status": "Accepted"},
         [{"platform": "Shopee", "order_id": "DATE-1", "status": "Accepted", "quantity": 1}],
-        source_hash="content-sha256",
+        source_hash="content-sha256", enriched_items=[{"unit_price": "1.00", "nav": "NAV"}],
     )
     assert bundle.order.order_created_date == date(2026, 8, 19)
 
@@ -125,32 +125,31 @@ def test_mapper_preserves_explicit_zero_money_facts_without_truthiness_fallback(
         {"platform": "Shopee", "order_id": "ORDER-0", "status": "Accepted"},
         [{
             "platform": "Shopee", "order_id": "ORDER-0", "status": "Accepted",
-            "quantity": "1", "source_line_subtotal": Decimal("0.00"),
-            "line_subtotal": Decimal("99.99"), "actual_selling_value": Decimal("0.00"),
-            "reporting_actual_selling_value": Decimal("88.88"),
+            "quantity": "1", "source_line_subtotal": Decimal("0.00"), "unit_price": Decimal("0.00"),
+            "line_subtotal": Decimal("99.99"),
             "source_group_total": Decimal("0.00"), "promotion_group_total": Decimal("77.77"),
         }],
-        source_hash="content-sha256",
+        source_hash="content-sha256", enriched_items=[{"unit_price": "5.00", "nav": "NAV"}],
     )
 
     item = bundle.items[0]
-    assert item.source_line_subtotal == Decimal("0.00")
-    assert item.actual_selling_value == Decimal("0.00")
+    assert item.line_subtotal == Decimal("0.00")
+    assert item.actual_selling_unit_price == Decimal("0.00")
     assert item.source_group_total == Decimal("0.00")
 
 
-def test_mapper_keeps_actual_selling_value_missing_when_no_explicit_evidence_exists():
+def test_mapper_keeps_actual_selling_unit_price_missing_when_no_explicit_evidence_exists():
     bundle = map_accepted_shopee_invoice(
         {"platform": "Shopee", "order_id": "ORDER-NONE", "status": "Accepted"},
         [{
             "platform": "Shopee", "order_id": "ORDER-NONE", "status": "Accepted",
             "quantity": "1", "source_line_subtotal": Decimal("12.34"),
         }],
-        source_hash="content-sha256",
+        source_hash="content-sha256", enriched_items=[{"unit_price": "5.00", "nav": "NAV"}],
     )
 
-    assert bundle.items[0].source_line_subtotal == Decimal("12.34")
-    assert bundle.items[0].actual_selling_value is None
+    assert bundle.items[0].line_subtotal == Decimal("12.34")
+    assert bundle.items[0].actual_selling_unit_price is None
 
 
 def test_empty_invoice_bundle_is_rejected():

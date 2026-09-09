@@ -194,36 +194,18 @@ class InMemoryHistoricalInvoiceRepository:
 
 
 def _order_facts(order: CanonicalInvoiceOrder) -> dict[str, object]:
-    return {
-        "platform": _text(order.platform),
-        "order_id": _text(order.order_id),
-        "order_created_date": _value(order.order_created_date),
-        "income_type": _value(order.income_type),
-        "order_income": _value(order.order_income),
-        "refund_amount": _value(order.refund_amount),
-        "invoice_payment_signal": _value(order.invoice_payment_signal),
-    }
+    fields = (
+        "platform", "order_id", "order_status", "order_created_date", "delivered_date", "completed_date", "fund_transfer_date",
+        "merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst",
+        "vouchers_rebates_total", "voucher_type", "voucher_code", "voucher_funded_by", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total",
+        "order_income", "income_type", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment",
+    )
+    return {field: _value(getattr(order, field)) for field in fields}
 
 
 def _item_facts(item: CanonicalInvoiceItem) -> dict[str, object]:
-    return {
-        "platform": _text(item.platform),
-        "order_id": _text(item.order_id),
-        "item_index": item.item_index,
-        "seller_sku": _value(item.seller_sku),
-        "product_name": _value(item.product_name),
-        "variation": _value(item.variation),
-        "quantity": item.quantity,
-        "source_unit_price": _value(item.source_unit_price),
-        "source_line_subtotal": _value(item.source_line_subtotal),
-        "actual_selling_value": _value(item.actual_selling_value),
-        "pricing_status": _value(item.pricing_status),
-        "promotion_group_id": _value(item.promotion_group_id),
-        "promotion_label": _value(item.promotion_label),
-        "source_group_total": _value(item.source_group_total),
-        "allocation_method": _value(item.allocation_method),
-        "allocation_evidence": list(item.allocation_evidence),
-    }
+    fields = ("platform", "order_id", "item_index", "seller_sku", "product_name", "variation", "quantity", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total")
+    return {field: _value(getattr(item, field)) for field in fields}
 
 
 def _value(value: object) -> object:

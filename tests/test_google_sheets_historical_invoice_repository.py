@@ -60,15 +60,15 @@ def _bundle(*, order_id="000123456789", imported_at=None, items=1):
     order = CanonicalInvoiceOrder(
         platform="Shopee", order_id=order_id, order_created_date=date(2026, 8, 7),
         income_type="Final", order_income=Decimal("12.50"), refund_amount=Decimal("0.00"),
-        invoice_payment_signal="Released", source_filename="source.pdf", source_hash="source-hash",
+        payment_status="Released", source_pdf="source.pdf", source_hash="source-hash",
         first_imported_at=imported_at or datetime(2026, 8, 8, 12, 30, tzinfo=timezone.utc),
     )
     return InvoiceBundle(order=order, items=tuple(
         CanonicalInvoiceItem(
             platform="Shopee", order_id=order_id, item_index=index, seller_sku=f"000SKU-{index}",
-            product_name="Tea", variation=None, quantity=index + 1, source_unit_price=Decimal("12.50"),
-            source_line_subtotal=Decimal("12.50"), actual_selling_value=Decimal("0.00") if index == 0 else None,
-            pricing_status="invoice_source", source_hash="source-hash", allocation_evidence=("evidence", str(index)),
+            nav="NAV-1", product_name="Tea", variation=None, quantity=index + 1, unit_price=Decimal("12.50"),
+            actual_selling_unit_price=Decimal("12.50") if index == 0 else None, line_subtotal=Decimal("12.50"),
+            source_pdf="source.pdf", source_hash="source-hash",
         ) for index in range(items)
     ))
 
@@ -93,9 +93,9 @@ def test_exact_headers_and_full_bundle_round_trip_preserve_text_decimal_and_time
     assert restored.refund_amount == Decimal("0.00")
     assert restored.first_imported_at == bundle.order.first_imported_at
     assert restored_items[0].seller_sku == "000SKU-0"
-    assert restored_items[0].actual_selling_value == Decimal("0.00")
-    assert restored_items[1].actual_selling_value is None
-    assert restored_items[0].allocation_evidence == ("evidence", "0")
+    assert restored_items[0].actual_selling_unit_price == Decimal("12.50")
+    assert restored_items[1].actual_selling_unit_price is None
+    assert restored_items[0].nav == "NAV-1"
     assert len(gateway.tabs[INVOICE_ORDERS_TAB]) == 2
     assert len(gateway.tabs[INVOICE_ITEMS_TAB]) == 3
 
@@ -214,7 +214,7 @@ def test_malformed_persisted_money_or_item_identity_fails_visibly():
     gateway = FakeGateway()
     repository = _repository(gateway)
     repository.import_invoice(_bundle())
-    gateway.tabs[INVOICE_ORDERS_TAB][1][4] = "not-money"
+    gateway.tabs[INVOICE_ORDERS_TAB][1][7] = "not-money"
     repository.refresh()
     with pytest.raises(HistoricalInvoiceStorageError, match="malformed Decimal"):
         repository.list_orders()

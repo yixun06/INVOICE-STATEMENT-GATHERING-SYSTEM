@@ -28,6 +28,7 @@ from ..services.historical_invoice_intake import (
     IntakeStatus, build_current_batch_staging, classify_staging, import_new_staging,
 )
 from ..services.uat2_data_settings import configured_uat2_data_settings
+from ..services.product_master_source import ProductMasterSourceError, load_configured_product_price_master
 from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
 from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
 from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
@@ -219,6 +220,8 @@ def _render_validation_step(render_platform_orders_outcomes: Callable[[], Any]) 
     result = _current_import_result()
     _render_source_summary(result)
     _render_contract_validation(result)
+    if result.source_specific_details.get("show_platform_order_outcomes"):
+        _validate_historical_invoice_staging()
     if st.session_state.get("pending_validation_recovery_action"):
         _render_recovery_confirmation()
     if result.source_specific_details.get("show_platform_order_outcomes"):
@@ -424,24 +427,12 @@ def _render_historical_invoice_commit() -> None:
         st.session_state.pop("uat2_historical_commit_entries", None)
         st.session_state.pop("uat2_historical_commit_refresh_required", None)
         st.session_state.pop("uat2_historical_commit_signature", None)
-        st.info("Current batch changed. Check Historical Status again before committing.")
+        st.info("Current batch changed. Validate again before committing.")
     st.subheader("Historical Invoice Commit")
     st.caption(
         "Only Accepted Shopee invoices are eligible. Lazada and ZENXIN remain outside UAT2 Phase 3 persistence. "
-        "Checking historical status does not write."
+        "Historical status is calculated during Validate."
     )
-    if st.button("Check Historical Status", icon=":material/manage_search:", key="uat2_historical_commit_check"):
-        try:
-            repository = configured_uat2_data_settings().create_repository()
-            candidates = build_current_batch_staging(
-                batch_id=st.session_state.get("batch_id"), orders=st.session_state.get("orders", []),
-                products=st.session_state.get("products", []), reviews=st.session_state.get("reviews", []),
-            )
-            st.session_state.uat2_historical_commit_entries = classify_staging(candidates, repository)
-            st.session_state.uat2_historical_commit_refresh_required = False
-            st.session_state.uat2_historical_commit_signature = signature
-        except HistoricalInvoiceStorageError as error:
-            st.error(f"Historical Invoice storage is unavailable: {error}")
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
     if not entries:
         st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", disabled=True, key="uat2_historical_commit")
@@ -453,7 +444,7 @@ def _render_historical_invoice_commit() -> None:
         "Reason / Message": entry.message or "Ready for explicit commit.",
     } for entry in entries], hide_index=True)
     for entry in entries:
-        if entry.status not in {IntakeStatus.NEEDS_REVIEW, IntakeStatus.SOURCE_CONFLICT}:
+        if entry.status is IntakeStatus.NEW:
             continue
         actions = recovery_actions_for_source(
             source=entry.source_filename,
@@ -476,23 +467,44 @@ def _render_historical_invoice_commit() -> None:
     refresh_required = bool(st.session_state.get("uat2_historical_commit_refresh_required", False))
     if refresh_required:
         st.warning("A historical write was interrupted. Check Historical Status again before retrying.")
-    new_entries = [entry for entry in entries if entry.status is IntakeStatus.NEW and entry.bundle is not None]
-    if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not new_entries or refresh_required, key="uat2_historical_commit"):
+    clean_batch = all(entry.status is IntakeStatus.NEW and entry.bundle is not None for entry in entries)
+    if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not clean_batch or refresh_required, key="uat2_historical_commit"):
         try:
             repository = configured_uat2_data_settings().create_repository()
             outcome = import_new_staging(entries, repository)
             st.session_state.uat2_historical_commit_entries = outcome.entries
             actual = outcome.bulk_result.results
-            st.success(
-                f"Historical Invoice Commit Complete — Imported: {sum(item.status.value == 'NEW' for item in actual)}; "
-                f"Already Imported: {sum(item.status.value == 'ALREADY_IMPORTED' for item in actual)}; "
-                f"Source Conflict: {sum(item.status.value == 'SOURCE_CONFLICT' for item in actual)}."
-            )
+            if any(item.status.value != "NEW" for item in actual):
+                st.session_state.uat2_historical_commit_refresh_required = True
+                st.warning("Historical state changed immediately before commit. No mixed-batch write was started; validate again.")
+            else:
+                st.success(f"Historical Invoice Commit Complete — Imported: {len(actual)}.")
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True
             st.error(f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). Check Historical Status again before retrying.")
         except HistoricalInvoiceStorageError as error:
             st.error(f"Historical Invoice storage write failed: {error}")
+
+
+def _validate_historical_invoice_staging() -> None:
+    signature = _historical_commit_signature()
+    if st.session_state.get("uat2_historical_commit_signature") == signature:
+        return
+    try:
+        master, _label = load_configured_product_price_master()
+        candidates = build_current_batch_staging(
+            batch_id=st.session_state.get("batch_id"), orders=st.session_state.get("orders", []),
+            products=st.session_state.get("products", []), reviews=st.session_state.get("reviews", []), price_master=master,
+        )
+        entries = classify_staging(candidates, configured_uat2_data_settings().create_repository())
+        st.session_state.uat2_historical_commit_entries = entries
+        st.session_state.uat2_historical_commit_refresh_required = False
+        st.session_state.uat2_historical_commit_signature = signature
+        st.subheader("Historical Invoice Status")
+        counts = {status: sum(entry.status is status for entry in entries) for status in IntakeStatus}
+        st.caption(" · ".join(f"{status.value.replace('_', ' ').title()}: {counts[status]}" for status in (IntakeStatus.NEW, IntakeStatus.ALREADY_IMPORTED, IntakeStatus.SOURCE_CONFLICT, IntakeStatus.NEEDS_REVIEW)))
+    except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
+        st.error(f"Historical Invoice validation is unavailable: {error}")
 
 def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
     stage = st.session_state.get("weekly_statement_stage")

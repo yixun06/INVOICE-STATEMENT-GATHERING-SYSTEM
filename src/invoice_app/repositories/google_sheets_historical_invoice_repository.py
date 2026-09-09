@@ -37,15 +37,10 @@ GOOGLE_SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 INVOICE_ORDERS_TAB = "Invoice_Orders"
 INVOICE_ITEMS_TAB = "Invoice_Items"
 INVOICE_ORDERS_HEADERS = (
-    "platform", "order_id", "order_created_date", "income_type", "order_income",
-    "refund_amount", "invoice_payment_signal", "source_filename", "source_hash",
-    "source_fingerprint", "first_imported_at",
+    "platform", "order_id", "order_status", "order_created_date", "delivered_date", "completed_date", "fund_transfer_date", "merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_type", "voucher_code", "voucher_funded_by", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "income_type", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment", "payment_status", "payout_completed_date", "source_pdf", "source_hash", "source_fingerprint", "first_imported_at",
 )
 INVOICE_ITEMS_HEADERS = (
-    "platform", "order_id", "item_index", "seller_sku", "product_name", "variation",
-    "quantity", "source_unit_price", "source_line_subtotal", "actual_selling_value",
-    "pricing_status", "source_hash", "promotion_group_id", "promotion_label",
-    "source_group_total", "allocation_method", "allocation_evidence",
+    "platform", "order_id", "item_index", "seller_sku", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
 )
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 
@@ -380,21 +375,11 @@ def _validate_tab(tabs: Mapping[str, Sequence[Sequence[Any]]], tab: str, headers
 
 
 def _serialize_order(order: CanonicalInvoiceOrder) -> tuple[str, ...]:
-    return tuple(_serialize(value) for value in (
-        order.platform, order.order_id, order.order_created_date, order.income_type,
-        order.order_income, order.refund_amount, order.invoice_payment_signal,
-        order.source_filename, order.source_hash, order.source_fingerprint, order.first_imported_at,
-    ))
+    return tuple(_serialize(getattr(order, header)) for header in INVOICE_ORDERS_HEADERS)
 
 
 def _serialize_item(item: CanonicalInvoiceItem) -> tuple[str, ...]:
-    return tuple(_serialize(value) for value in (
-        item.platform, item.order_id, item.item_index, item.seller_sku, item.product_name,
-        item.variation, item.quantity, item.source_unit_price, item.source_line_subtotal,
-        item.actual_selling_value, item.pricing_status, item.source_hash, item.promotion_group_id,
-        item.promotion_label, item.source_group_total, item.allocation_method,
-        json.dumps(list(item.allocation_evidence), ensure_ascii=True, separators=(",", ":")),
-    ))
+    return tuple(_serialize(getattr(item, header)) for header in INVOICE_ITEMS_HEADERS)
 
 
 def _serialize(value: Any) -> str:
@@ -413,42 +398,18 @@ def _serialize(value: Any) -> str:
 
 def _deserialize_order(row: Sequence[Any], row_number: int) -> CanonicalInvoiceOrder:
     values = dict(zip(INVOICE_ORDERS_HEADERS, row))
-    return CanonicalInvoiceOrder(
-        platform=_required_text(values["platform"], "platform", INVOICE_ORDERS_TAB, row_number),
-        order_id=_required_text(values["order_id"], "order_id", INVOICE_ORDERS_TAB, row_number),
-        order_created_date=_date(values["order_created_date"], INVOICE_ORDERS_TAB, row_number),
-        income_type=_optional(values["income_type"]), order_income=_decimal(values["order_income"], INVOICE_ORDERS_TAB, row_number),
-        refund_amount=_decimal(values["refund_amount"], INVOICE_ORDERS_TAB, row_number),
-        invoice_payment_signal=_optional(values["invoice_payment_signal"]), source_filename=_optional(values["source_filename"]),
-        source_hash=_optional(values["source_hash"]), source_fingerprint=_optional(values["source_fingerprint"]),
-        first_imported_at=_datetime(values["first_imported_at"], INVOICE_ORDERS_TAB, row_number),
-    )
+    required = {"platform", "order_id"}
+    dates = {"order_created_date", "delivered_date", "completed_date", "fund_transfer_date", "payout_completed_date"}
+    money = {"merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment"}
+    parsed = {field: _required_text(values[field], field, INVOICE_ORDERS_TAB, row_number) if field in required else _date(values[field], INVOICE_ORDERS_TAB, row_number) if field in dates else _decimal(values[field], INVOICE_ORDERS_TAB, row_number) if field in money else _optional(values[field]) for field in INVOICE_ORDERS_HEADERS if field != "first_imported_at"}
+    return CanonicalInvoiceOrder(**parsed, first_imported_at=_datetime(values["first_imported_at"], INVOICE_ORDERS_TAB, row_number))
 
 
 def _deserialize_item(row: Sequence[Any], row_number: int) -> CanonicalInvoiceItem:
     values = dict(zip(INVOICE_ITEMS_HEADERS, row))
-    evidence = _optional(values["allocation_evidence"])
-    try:
-        decoded_evidence = json.loads(evidence) if evidence else []
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
-        raise HistoricalInvoiceStorageError(f"Invoice_Items row {row_number} has malformed allocation_evidence.") from error
-    if not isinstance(decoded_evidence, list):
-        raise HistoricalInvoiceStorageError(f"Invoice_Items row {row_number} allocation_evidence must be a JSON list.")
-    allocation_evidence = tuple(str(value) for value in decoded_evidence)
-    return CanonicalInvoiceItem(
-        platform=_required_text(values["platform"], "platform", INVOICE_ITEMS_TAB, row_number),
-        order_id=_required_text(values["order_id"], "order_id", INVOICE_ITEMS_TAB, row_number),
-        item_index=_integer(values["item_index"], "item_index", INVOICE_ITEMS_TAB, row_number, required=True),
-        seller_sku=_optional(values["seller_sku"]), product_name=_optional(values["product_name"]), variation=_optional(values["variation"]),
-        quantity=_integer(values["quantity"], "quantity", INVOICE_ITEMS_TAB, row_number, required=False),
-        source_unit_price=_decimal(values["source_unit_price"], INVOICE_ITEMS_TAB, row_number),
-        source_line_subtotal=_decimal(values["source_line_subtotal"], INVOICE_ITEMS_TAB, row_number),
-        actual_selling_value=_decimal(values["actual_selling_value"], INVOICE_ITEMS_TAB, row_number),
-        pricing_status=_optional(values["pricing_status"]), source_hash=_optional(values["source_hash"]),
-        promotion_group_id=_optional(values["promotion_group_id"]), promotion_label=_optional(values["promotion_label"]),
-        source_group_total=_decimal(values["source_group_total"], INVOICE_ITEMS_TAB, row_number),
-        allocation_method=_optional(values["allocation_method"]), allocation_evidence=allocation_evidence,
-    )
+    money = {"unit_price", "actual_selling_unit_price", "line_subtotal", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount"}
+    parsed = {field: _required_text(values[field], field, INVOICE_ITEMS_TAB, row_number) if field in {"platform", "order_id"} else _integer(values[field], field, INVOICE_ITEMS_TAB, row_number, required=field == "item_index") if field in {"item_index", "quantity"} else _decimal(values[field], INVOICE_ITEMS_TAB, row_number) if field in money else _optional(values[field]) for field in INVOICE_ITEMS_HEADERS}
+    return CanonicalInvoiceItem(**parsed)
 
 
 def _decimal(value: Any, tab: str, row_number: int) -> Decimal | None:

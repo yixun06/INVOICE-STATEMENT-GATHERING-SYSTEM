@@ -15,6 +15,7 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     ImportStatus,
 )
 from src.invoice_app.services.batch_service import resolve_archived_pdf_path
+from src.invoice_app.services.product_price_master import PriceLookupStatus, ProductPriceMaster
 
 
 DEFAULT_BULK_CHUNK_SIZE = 50
@@ -46,7 +47,8 @@ class InvoiceIntakeImportOutcome:
 
 
 def build_current_batch_staging(
-    *, batch_id: str | None, orders: Iterable[dict], products: Iterable[dict], reviews: Iterable[dict]
+    *, batch_id: str | None, orders: Iterable[dict], products: Iterable[dict], reviews: Iterable[dict],
+    price_master: ProductPriceMaster | None = None,
 ) -> tuple[InvoiceIntakeEntry, ...]:
     """Map existing Data Import staging without parsing a source document again."""
     all_products = tuple(products)
@@ -75,18 +77,48 @@ def build_current_batch_staging(
         if related_review:
             entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, "Source has a related Manual Review record."))
             continue
+        if price_master is None:
+            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, "Product Master is unavailable for required Unit Price and NAV CODE enrichment."))
+            continue
         candidate_products = [
             product for product in all_products
             if str(product.get("platform", "")).strip() == "Shopee"
             and str(product.get("order_id", "")).strip() == (order_id or "")
             and str(product.get("source_pdf", "")).strip() == source_pdf
         ]
+        enriched_items = []
+        enrichment_error = None
+        for product in candidate_products:
+            lookup = price_master.lookup(
+                seller_sku=product.get("seller_sku"), product_name=product.get("product_name"),
+                variation_name=product.get("variation") or product.get("variation_name"),
+            )
+            if lookup.status in {PriceLookupStatus.PRICE_NOT_FOUND, PriceLookupStatus.PRICING_CONFLICT, PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS} or lookup.unit_selling_price is None:
+                enrichment_error = lookup.reason or f"Product Master {lookup.status.value.replace('_', ' ')}."
+                break
+            if not lookup.nav_code:
+                enrichment_error = "Resolved Product Master row has blank NAV CODE."
+                break
+            enriched_items.append({"unit_price": lookup.unit_selling_price, "nav": lookup.nav_code})
+        if enrichment_error:
+            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, enrichment_error))
+            continue
         try:
-            bundle = map_accepted_shopee_invoice(order, candidate_products, source_hash=source_hash)
+            bundle = map_accepted_shopee_invoice(order, candidate_products, source_hash=source_hash, enriched_items=enriched_items)
         except (TypeError, ValueError) as error:
             entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, str(error)))
             continue
         entries.append(InvoiceIntakeEntry(staging_id, source_pdf, source_hash, bundle.order.order_id, IntakeStatus.NEW, None, bundle))
+    accepted_sources = {entry.source_filename for entry in entries}
+    for review in all_reviews:
+        if str(review.get("platform", "")).strip() != "Shopee":
+            continue
+        source_pdf = str(review.get("source_pdf", "")).strip()
+        if source_pdf in accepted_sources:
+            continue
+        order_id = str(review.get("order_id", "")).strip() or None
+        staging_id = f"review:{source_pdf}:{order_id or 'unknown'}"
+        entries.append(_review_entry(staging_id, source_pdf, "", order_id, "Manual Review source remains in the current batch."))
     return tuple(entries)
 
 
@@ -120,7 +152,10 @@ def import_new_staging(
 ) -> InvoiceIntakeImportOutcome:
     """Persist current NEW candidates only after the caller's explicit user action."""
     staged = tuple(entries)
-    candidates = tuple(entry for entry in staged if entry.status is IntakeStatus.NEW and entry.bundle is not None)
+    blocking = tuple(entry for entry in staged if entry.status is not IntakeStatus.NEW)
+    if blocking:
+        return InvoiceIntakeImportOutcome(entries=staged, bulk_result=BulkImportResult(results=(), chunk_sizes=()))
+    candidates = tuple(entry for entry in staged if entry.bundle is not None)
     result = repository.import_invoices((entry.bundle for entry in candidates), chunk_size=DEFAULT_BULK_CHUNK_SIZE)
     result_by_id = {(item.platform, item.order_id): item for item in result.results}
     return InvoiceIntakeImportOutcome(
