@@ -3,7 +3,7 @@ name: invoicegather-scope
 description: Long-term system consensus, business rules, data semantics, architecture guardrails, import/commit workflow, validation/reconciliation boundaries, UI/UX direction, and development constraints for InvoiceGather V2. Use whenever developing, debugging, reviewing requirements, architecture, parsers, validation, reconciliation, Streamlit UI, reporting, persistence, database, settlement, shipment, roles, or Excel export. Preserve stable extraction behavior, separate batch validation from pre-commit database validation, preserve source facts, and ask before locking uncertain business rules.
 ---
 
-# InvoiceGather Scope & Development Guardrails — V2.3 (UAT2)
+# InvoiceGather Scope & Development Guardrails — V2.4 (UAT2)
 
 ## 0. How to use this skill
 
@@ -36,7 +36,221 @@ Current Confirmed Requirement > Historical Intermediate Design
 
 ---
 
-# UAT2 — Authoritative Current Delivery Scope
+# UAT2 V2.4 — Authoritative Current Delivery Scope
+
+## V2.4 purpose, flow, and precedence — Confirmed
+
+V2.4 supersedes the V2.3 UAT2 delivery scope below wherever the two conflict.
+The V2.3 material is retained as historical context only; it is not authority
+for the current UAT2 implementation.
+
+InvoiceGather UAT2 now follows this operational flow:
+
+```text
+STEP 1 — Daily Invoice Import
+STEP 2 — Weekly Statement Import
+STEP 3 — Billing / Product Summary
+STEP 4 — Database-backed Live Analysis
+```
+
+The database is an operational business database, not only a minimal historical
+source archive. Invoice data is imported first. A later successfully validated
+Weekly Statement may enrich selected Invoice database fields, but original
+Invoice source values must not be silently replaced by unrelated data.
+
+Current development remains Phase 3 / STEP 1. Do not implement the future
+STEP 1 refinements or any STEP 2–4 work unless a task explicitly requests it.
+
+## STEP 1 — Daily Invoice Import — Confirmed
+
+Normal workflow:
+
+```text
+Upload PDF / ZIP
+→ Parse
+→ Manual Review handling
+→ Validate
+→ Product Master enrichment
+→ Historical Order ID check
+→ Review
+→ Commit
+→ Invoice_Orders + Invoice_Items
+```
+
+If parsing, validation, Product Master resolution, or required persistence data
+is unreliable, route the source to Manual Review and do not automatically
+commit it. Manual Review sources may be removed from the current batch. Future
+manual database-entry/correction UI is deferred.
+
+Historical duplicate checking belongs inside the normal Validate workflow.
+Do not require a normal workflow button named `Check Historical Status`.
+
+```text
+NEW              = Order ID does not exist.
+ALREADY_IMPORTED = same Order ID and materially identical Invoice source facts exist.
+SOURCE_CONFLICT  = same Order ID exists but material Invoice source facts differ.
+NEEDS_REVIEW     = source cannot safely become a persistable Invoice record.
+```
+
+Existing safe source-removal recovery may be used for overlap/problem sources.
+Immediately before Commit, silently recheck repository/database state for
+concurrency and idempotency. Retry / Refresh Historical Status is error
+recovery only.
+
+## STEP 1 — Product Master enrichment — Confirmed
+
+The existing Unit Price lookup logic remains authoritative. Do not redesign or
+simplify it. Its current lookup may use Seller SKU, Parent SKU, Product Name,
+and Variation as already implemented.
+
+Once the existing lookup resolves the Product Master row used for Unit Price:
+
+```text
+unit_price = Product Master Unit Price from that matched result
+nav        = NAV CODE from the SAME matched Product Master row
+```
+
+`NAV CODE` is the confirmed human-facing Product Master header. There must not
+be a separate NAV matching algorithm. If Product Master resolution fails, Unit
+Price is unresolved/conflicting, or the matched row has missing/blank NAV CODE,
+route the source to Manual Review and block persistence.
+
+## STEP 1 — Invoice persistence contract — Confirmed target
+
+`Invoice_Orders` should persist meaningful accepted-Shopee order-level fields:
+
+```text
+platform, order_id, order_status, order_created_date, delivered_date,
+completed_date, fund_transfer_date,
+merchandise_subtotal, product_price,
+shipping_subtotal, shipping_fee_paid_by_buyer,
+shipping_fee_charged_by_logistic_provider, shipping_fee_rebate_from_shopee,
+seller_paid_shipping_fee_sst,
+vouchers_rebates_total, voucher_type, voucher_code, voucher_funded_by,
+voucher_amount,
+commission_fee, service_fee, transaction_fee, ads_escrow_top_up_fee,
+fees_charges_total,
+order_income, income_type, final_amount, refund_amount,
+buyer_merchandise_subtotal, buyer_shipping_fee, shopee_voucher, seller_voucher,
+total_buyer_payment,
+payment_status, payout_completed_date,
+source_pdf, source_hash, source_fingerprint, first_imported_at
+```
+
+`fund_transfer_date` is the Invoice/PDF source value. `payout_completed_date`
+is blank during Invoice import and may later be populated only after successful
+Statement processing. `payment_status` is operational and may later change
+after confirmed Statement matching. Missing source values remain `None`/blank;
+explicit RM0.00 remains `0.00`. Preserve refund signs, keep `final_amount` and
+`order_income` separate, and retain Estimated / Final `income_type` semantics.
+Do not persist duplicate helper aliases when a canonical business field exists.
+
+`Invoice_Items` target fields are:
+
+```text
+platform, order_id, item_index,
+seller_sku, nav, product_name, variation, quantity,
+unit_price, actual_selling_unit_price, line_subtotal,
+promotion_group_id, promotion_label, source_group_total,
+statement_product_price, statement_refund_amount, statement_net_selling_amount,
+source_pdf, source_hash
+```
+
+`unit_price` is the matched Product Master normal/POS Unit Price snapshot;
+`nav` is `NAV CODE` from that same matched row. `actual_selling_unit_price` and
+`line_subtotal` are Shopee Invoice/PDF values. Statement item amounts are blank
+during Invoice import and may only be populated by a future successful
+Statement commit. Their future formula is:
+
+```text
+statement_net_selling_amount = statement_product_price + signed statement_refund_amount
+```
+
+The historical-persistence-only fields `actual_selling_value`, `pricing_status`,
+`allocation_method`, and `allocation_evidence` are no longer required canonical
+persisted Invoice item fields. Temporary internal reconciliation equivalents may
+remain where needed.
+
+## STEP 1 — Source fingerprint — Confirmed
+
+`source_fingerprint` represents material Invoice source facts and must remain
+stable when Product Master or Statement enrichment changes. It must not create
+a `SOURCE_CONFLICT` merely because Product Master Unit Price/NAV changes, a
+Statement is imported, `payout_completed_date` changes, operational
+`payment_status` changes, statement item amounts are populated,
+`first_imported_at` changes, or source filename/path metadata changes.
+
+Material Invoice facts include real Invoice evidence such as Order ID;
+Invoice status/date facts; fund-transfer date; Invoice financial breakdown;
+order income, income type, final amount, and signed refund amount; and Seller
+SKU, Product Name, Variation, Quantity, actual selling unit price, line
+subtotal, and promotion source metadata.
+
+## STEP 2 — Weekly Statement Import — Future phase, document only
+
+Future workflow:
+
+```text
+Upload Weekly Statement
+→ validate similar to Settlement Test Lab
+→ obtain Statement target Order IDs
+→ compare with committed Invoice database
+→ require 100% Order ID coverage
+→ commit only when required checks pass
+```
+
+After successful Statement commit, Invoice Orders may receive
+`payout_completed_date` and `payment_status`; Invoice Items may receive
+`statement_product_price`, `statement_refund_amount`, and
+`statement_net_selling_amount`. Statement source data must also be persisted
+separately. Exact Statement database schema is deferred.
+
+## STEP 3 — Billing / Product Summary — Future phase, document only
+
+Billing/Product Summary is a query and aggregation from persisted data, not a
+separate Product Summary database table by default. The user selects a Payout
+Date range plus other filters; only successfully Statement-matched/committed
+orders participate.
+
+Combine rows only when all of Seller SKU, NAV, Product Name, Variation, and
+Unit Price match. Different Variation or Unit Price is a separate row. Minimum
+output is SKU, NAV, Product Name, Variation, Total Quantity, Unit Price, Total
+Selling Price, and Total Given Discount:
+
+```text
+Total Quantity       = SUM(Invoice item quantity)
+Unit Price           = stored Product Master Unit Price snapshot
+Total Selling Price  = SUM(statement_net_selling_amount)
+Total Given Discount = SUM(Unit Price × Quantity) - Total Selling Price
+```
+
+Weekly Statement is the Total Selling Price authority; do not derive it from
+Invoice actual selling unit price. Charges Summary also comes from persisted
+data; exact charge categories are deferred.
+
+## STEP 4 — Database-backed Live Analysis — Future phase, document only
+
+Future Shopee reports become database-backed Live Analysis, querying persisted
+data rather than current upload-session data. Exact KPI, filter, and chart
+requirements are deferred. The current session-based Shopee view may later be
+reused in Data Import Validate for current-batch checks, focused on order-level
+current-batch data, Manual Review, validation status, historical status, and
+safe removal actions.
+
+## V2.4 data safety and current phase boundary — Mandatory
+
+Do not implement in the current documentation-only task or a future task
+without explicit scope: Statement persistence; Statement-to-Invoice updates;
+Billing Product Summary; Charges Summary; Live Analysis; manual database editor;
+Lazada/ZENXIN persistence expansion; a new Product Master pricing algorithm;
+or broad parser rewrites.
+
+The existing real UAT2 Google Sheet uses the older Invoice schema. Do not clear,
+reset, migrate, rewrite headers, backfill, or perform any real write. A one-time
+reset/re-import may happen only after implementation/tests pass and the user
+explicitly approves it.
+
+# UAT2 V2.3 Baseline — Superseded Historical Context
 
 ## UAT2 purpose and precedence — Confirmed
 
