@@ -163,11 +163,13 @@ class InMemoryHistoricalInvoiceRepository:
         candidates = _unique_bundles(bundles)
         _validate_chunk_size(chunk_size)
         results = self.classify_invoices(candidates)
+        if any(result.status is not ImportStatus.NEW for result in results):
+            return BulkImportResult(results=results, chunk_sizes=())
+
         for bundle, result in zip(candidates, results):
-            if result.status is ImportStatus.NEW:
-                self._bundles[_identity(bundle.order.platform, bundle.order.order_id)] = bundle.with_source_fingerprint(
-                    result.source_fingerprint
-                )
+            self._bundles[_identity(bundle.order.platform, bundle.order.order_id)] = bundle.with_source_fingerprint(
+                result.source_fingerprint
+            )
         return BulkImportResult(
             results=results,
             chunk_sizes=tuple(len(chunk) for chunk in _chunks(candidates, chunk_size)),

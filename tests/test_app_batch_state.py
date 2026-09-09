@@ -657,7 +657,13 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert {"Validate", "Result Summary", "Available recovery actions"} <= {
         element.value for element in app.subheader
     }
-    assert len(app.dataframe) == 0
+    assert len(app.dataframe) == 1
+    assert list(app.dataframe[0].value.columns) == [
+        "Source PDF",
+        "Order ID",
+        "Historical Status",
+        "Reason / Message",
+    ]
 
     navigate(app, "Shopee")
 

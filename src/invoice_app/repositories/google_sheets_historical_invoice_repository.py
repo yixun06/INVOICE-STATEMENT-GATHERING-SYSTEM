@@ -267,13 +267,12 @@ class GoogleSheetsHistoricalInvoiceRepository:
     ) -> BulkImportResult:
         candidates = _unique_bundles(bundles)
         _validate_chunk_size(chunk_size)
+        self.refresh()
         classification = self.classify_invoices(candidates)
-        new_candidates = tuple(
-            (bundle, result)
-            for bundle, result in zip(candidates, classification)
-            if result.status is ImportStatus.NEW
-        )
-        # Preflight every incoming NEW bundle before the first network write.
+        if any(result.status is not ImportStatus.NEW for result in classification):
+            return BulkImportResult(results=classification, chunk_sizes=())
+
+        # Preflight the entire all-NEW batch before the first network write.
         serialized = tuple(
             (
                 bundle.with_source_fingerprint(result.source_fingerprint),
@@ -281,7 +280,7 @@ class GoogleSheetsHistoricalInvoiceRepository:
                 _serialize_order(bundle.with_source_fingerprint(result.source_fingerprint).order),
                 tuple(_serialize_item(item) for item in bundle.with_source_fingerprint(result.source_fingerprint).items),
             )
-            for bundle, result in new_candidates
+            for bundle, result in zip(candidates, classification)
         )
         confirmed: list[ImportResult] = []
         chunks = _chunks(serialized, chunk_size)

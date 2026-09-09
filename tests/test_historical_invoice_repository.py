@@ -90,6 +90,26 @@ def test_repository_batch_lookups_and_logical_bundle_retention():
     assert [order.order_id for order in repository.list_orders(platform="Shopee")] == ["000000000002", "000123456789"]
 
 
+def test_in_memory_bulk_mixed_classification_is_all_new_or_zero_write():
+    repository = InMemoryHistoricalInvoiceRepository()
+    existing = _bundle()
+    new_bundle = replace(
+        existing,
+        order=replace(existing.order, order_id="NEW"),
+        items=(replace(existing.items[0], order_id="NEW"),),
+    )
+    repository.import_invoice(existing)
+
+    result = repository.import_invoices((existing, new_bundle))
+
+    assert [item.status for item in result.results] == [
+        ImportStatus.ALREADY_IMPORTED,
+        ImportStatus.NEW,
+    ]
+    assert result.chunk_sizes == ()
+    assert repository.get_order("Shopee", "NEW") is None
+
+
 def test_mapper_explicitly_converts_accepted_shopee_rows_without_parser_changes():
     bundle = map_accepted_shopee_invoice(
         {"platform": "Shopee", "order_id": "000123456789", "order_created_date": "07/08/2026", "income_type": "Final", "order_income": "352.79", "refund_amount": "-27.67", "payment_status": "Released", "source_pdf": "original.pdf", "status": "Accepted"},

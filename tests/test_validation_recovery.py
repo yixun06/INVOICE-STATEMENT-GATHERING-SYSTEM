@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import pytest
 from pathlib import Path
 
@@ -21,6 +22,34 @@ from src.invoice_app.services.historical_invoice_intake import IntakeStatus, Inv
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
+
+
+def _historical_signature(state):
+    rows = []
+    for bucket in (
+        "orders",
+        "products",
+        "reviews",
+        "processing_errors",
+        "duplicate_skipped",
+        "unsupported_files",
+    ):
+        for record in state.get(bucket, []):
+            if isinstance(record, dict):
+                rows.append(
+                    (
+                        bucket,
+                        tuple(
+                            sorted(
+                                (str(key), repr(value))
+                                for key, value in record.items()
+                            )
+                        ),
+                    )
+                )
+    return sha256(repr((state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
+
+
 def _state(**overrides):
     state = {
         "orders": [
@@ -184,7 +213,7 @@ def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_
     app.session_state["navigation"] = "Data Import"
     app.session_state["batch_id"] = "historical-conflict-batch"
     app.session_state["import_source_type"] = "Platform Orders"
-    app.session_state["data_import_step"] = 5
+    app.session_state["data_import_step"] = 3
     app.session_state["orders"] = [{"platform": "Shopee", "order_id": "SHP-CONFLICT", "source_pdf": "conflict.pdf", "status": "Accepted"}]
     app.session_state["products"] = []
     app.session_state["reviews"] = []
@@ -198,8 +227,26 @@ def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_
             message="Stored historical invoice has different material source facts.", bundle=None,
         ),
     )
+    app.session_state["uat2_historical_commit_signature"] = _historical_signature(
+        app.session_state.filtered_state
+    )
     app.run(timeout=20)
 
+    historical_table = next(
+        frame.value
+        for frame in app.dataframe
+        if tuple(frame.value.columns)
+        == ("Source PDF", "Order ID", "Historical Status", "Reason / Message")
+    )
+    assert historical_table.to_dict("records") == [
+        {
+            "Source PDF": "conflict.pdf",
+            "Order ID": "SHP-CONFLICT",
+            "Historical Status": "SOURCE_CONFLICT",
+            "Reason / Message": "Stored historical invoice has different material source facts.",
+        }
+    ]
+    assert "Check Historical Status" not in {button.label for button in app.button}
     next(button for button in app.button if button.label == "Remove conflict.pdf from current batch").click().run(timeout=20)
     assert app.session_state.filtered_state["orders"][0]["source_pdf"] == "conflict.pdf"
     next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
@@ -207,7 +254,69 @@ def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_
     state = app.session_state.filtered_state
     assert app.exception == []
     assert state["orders"] == []
-    assert "uat2_historical_commit_entries" not in state
+    assert state["uat2_historical_commit_entries"] == ()
+
+
+def test_review_commit_readiness_includes_historical_option_a_gate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "historical-blocked-batch"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 5
+    app.session_state["orders"] = [
+        {
+            "platform": "Shopee",
+            "order_id": "SHP-DUP",
+            "source_pdf": "duplicate.pdf",
+            "status": "Accepted",
+        }
+    ]
+    app.session_state["products"] = []
+    app.session_state["reviews"] = []
+    app.session_state["processing_errors"] = []
+    app.session_state["duplicate_skipped"] = []
+    app.session_state["unsupported_files"] = []
+    app.session_state["uat2_historical_commit_entries"] = (
+        InvoiceIntakeEntry(
+            staging_id="duplicate",
+            source_filename="duplicate.pdf",
+            source_hash="hash",
+            order_id="SHP-DUP",
+            status=IntakeStatus.ALREADY_IMPORTED,
+            message="Same material historical invoice is already imported.",
+            bundle=None,
+        ),
+    )
+    app.session_state["uat2_historical_commit_signature"] = _historical_signature(
+        app.session_state.filtered_state
+    )
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert not any("Ready to Commit" in success.value for success in app.success)
+    assert any(
+        "Return to Validate and resolve/remove all non-NEW sources before Commit."
+        in warning.value
+        for warning in app.warning
+    )
+    commit_button = next(
+        button
+        for button in app.button
+        if button.label == "Commit Accepted Shopee Invoices"
+    )
+    assert commit_button.disabled
+    assert "Check Historical Status" not in {button.label for button in app.button}
+
+
+def test_data_import_has_no_stale_check_historical_status_text():
+    source = (APP_PATH.parent / "src" / "invoice_app" / "ui" / "data_import.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Check Historical Status" not in source
 
 
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):

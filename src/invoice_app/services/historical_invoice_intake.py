@@ -158,9 +158,15 @@ def import_new_staging(
     candidates = tuple(entry for entry in staged if entry.bundle is not None)
     result = repository.import_invoices((entry.bundle for entry in candidates), chunk_size=DEFAULT_BULK_CHUNK_SIZE)
     result_by_id = {(item.platform, item.order_id): item for item in result.results}
+    mixed_fresh_classification = (
+        not result.chunk_sizes
+        and any(item.status is not ImportStatus.NEW for item in result.results)
+    )
     return InvoiceIntakeImportOutcome(
         entries=tuple(
-            _with_import_result(entry, result_by_id)
+            _with_repository_result(entry, result_by_id)
+            if mixed_fresh_classification
+            else _with_import_result(entry, result_by_id)
             for entry in staged
         ),
         bulk_result=result,

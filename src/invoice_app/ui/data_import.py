@@ -373,13 +373,24 @@ def _render_review_and_commit_step() -> None:
     result = _current_import_result()
     _render_source_summary(result)
     readiness = result.commit_readiness
+    if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
+        historical_ready = _historical_commit_ready(entries)
+        if readiness.ready and historical_ready:
+            st.success("Ready to Commit — current batch review is complete.", icon=":material/check_circle:")
+        elif not readiness.ready:
+            st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
+        else:
+            st.warning(
+                "Return to Validate and resolve/remove all non-NEW sources before Commit.",
+                icon=":material/warning:",
+            )
+        _render_historical_invoice_commit()
+        return
     if readiness.ready:
         st.success("Ready to Commit — current batch review is complete.", icon=":material/check_circle:")
     else:
         st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
-    if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
-        _render_historical_invoice_commit()
-        return
     st.caption(
         "Future database commit is disabled in this Self-Test Version. "
         "This review never writes or marks production data as committed."
@@ -438,27 +449,6 @@ def _render_historical_invoice_commit() -> None:
         st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", disabled=True, key="uat2_historical_commit")
         return
     counts = {status: sum(entry.status is status for entry in entries) for status in IntakeStatus}
-    st.dataframe([{
-        "Source PDF": entry.source_filename, "Order ID": entry.order_id or "N/A",
-        "Historical Status": entry.status.value.replace("_", " ").title(),
-        "Reason / Message": entry.message or "Ready for explicit commit.",
-    } for entry in entries], hide_index=True)
-    for entry in entries:
-        if entry.status is IntakeStatus.NEW:
-            continue
-        actions = recovery_actions_for_source(
-            source=entry.source_filename,
-            action_type=REMOVE_SOURCE,
-            remove_label="Remove source from current batch",
-            include_details=False,
-        )
-        if actions and st.button(
-            f"Remove {entry.source_filename} from current batch",
-            icon=":material/delete_outline:",
-            key=f"uat2_historical_remove_{entry.staging_id}",
-        ):
-            st.session_state.pending_validation_recovery_action = actions[0]
-            st.rerun()
     st.caption(
         f"Shopee Sources: {len(entries)} · New: {counts[IntakeStatus.NEW]} · "
         f"Already Imported: {counts[IntakeStatus.ALREADY_IMPORTED]} · Needs Review: {counts[IntakeStatus.NEEDS_REVIEW]} · "
@@ -466,8 +456,8 @@ def _render_historical_invoice_commit() -> None:
     )
     refresh_required = bool(st.session_state.get("uat2_historical_commit_refresh_required", False))
     if refresh_required:
-        st.warning("A historical write was interrupted. Check Historical Status again before retrying.")
-    clean_batch = all(entry.status is IntakeStatus.NEW and entry.bundle is not None for entry in entries)
+        st.warning("Return to Validate and revalidate historical status before retrying.")
+    clean_batch = _historical_commit_ready(entries)
     if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not clean_batch or refresh_required, key="uat2_historical_commit"):
         try:
             repository = configured_uat2_data_settings().create_repository()
@@ -481,30 +471,103 @@ def _render_historical_invoice_commit() -> None:
                 st.success(f"Historical Invoice Commit Complete — Imported: {len(actual)}.")
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True
-            st.error(f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). Check Historical Status again before retrying.")
+            st.error(
+                f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). "
+                "Return to Validate and revalidate historical status before retrying."
+            )
         except HistoricalInvoiceStorageError as error:
             st.error(f"Historical Invoice storage write failed: {error}")
 
 
 def _validate_historical_invoice_staging() -> None:
     signature = _historical_commit_signature()
-    if st.session_state.get("uat2_historical_commit_signature") == signature:
+    refresh_required = st.session_state.get(
+        "uat2_historical_commit_refresh_required", False
+    )
+    if (
+        st.session_state.get("uat2_historical_commit_signature") != signature
+        or refresh_required
+    ):
+        try:
+            master, _label = load_configured_product_price_master()
+            candidates = build_current_batch_staging(
+                batch_id=st.session_state.get("batch_id"),
+                orders=st.session_state.get("orders", []),
+                products=st.session_state.get("products", []),
+                reviews=st.session_state.get("reviews", []),
+                price_master=master,
+            )
+            entries = classify_staging(
+                candidates,
+                configured_uat2_data_settings().create_repository(),
+            )
+            st.session_state.uat2_historical_commit_entries = entries
+            st.session_state.uat2_historical_commit_refresh_required = False
+            st.session_state.uat2_historical_commit_signature = signature
+        except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
+            st.error(f"Historical Invoice validation is unavailable: {error}")
+            return
+    entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
+    _render_historical_status_details(
+        entries,
+        allow_removal=True,
+        key_prefix="validate_historical",
+    )
+
+
+def _render_historical_status_details(
+    entries: tuple[Any, ...],
+    *,
+    allow_removal: bool,
+    key_prefix: str,
+) -> None:
+    st.subheader("Historical Invoice Status")
+    if not entries:
+        st.caption("No target Shopee Invoice source is ready for historical classification.")
         return
-    try:
-        master, _label = load_configured_product_price_master()
-        candidates = build_current_batch_staging(
-            batch_id=st.session_state.get("batch_id"), orders=st.session_state.get("orders", []),
-            products=st.session_state.get("products", []), reviews=st.session_state.get("reviews", []), price_master=master,
+    st.dataframe(
+        [
+            {
+                "Source PDF": entry.source_filename,
+                "Order ID": entry.order_id or "N/A",
+                "Historical Status": entry.status.value,
+                "Reason / Message": entry.message or "Ready for Review & Commit.",
+            }
+            for entry in entries
+        ],
+        hide_index=True,
+    )
+    if not allow_removal:
+        return
+    for entry in entries:
+        if entry.status is IntakeStatus.NEW:
+            continue
+        actions = recovery_actions_for_source(
+            source=entry.source_filename,
+            action_type=REMOVE_SOURCE,
+            remove_label="Remove source from current batch",
+            include_details=False,
         )
-        entries = classify_staging(candidates, configured_uat2_data_settings().create_repository())
-        st.session_state.uat2_historical_commit_entries = entries
-        st.session_state.uat2_historical_commit_refresh_required = False
-        st.session_state.uat2_historical_commit_signature = signature
-        st.subheader("Historical Invoice Status")
-        counts = {status: sum(entry.status is status for entry in entries) for status in IntakeStatus}
-        st.caption(" · ".join(f"{status.value.replace('_', ' ').title()}: {counts[status]}" for status in (IntakeStatus.NEW, IntakeStatus.ALREADY_IMPORTED, IntakeStatus.SOURCE_CONFLICT, IntakeStatus.NEEDS_REVIEW)))
-    except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
-        st.error(f"Historical Invoice validation is unavailable: {error}")
+        if actions and st.button(
+            f"Remove {entry.source_filename} from current batch",
+            icon=":material/delete_outline:",
+            key=f"{key_prefix}_{entry.staging_id}",
+        ):
+            st.session_state.pending_validation_recovery_action = actions[0]
+            st.rerun()
+
+
+def _historical_commit_ready(entries: tuple[Any, ...]) -> bool:
+    return bool(entries) and (
+        st.session_state.get("uat2_historical_commit_signature")
+        == _historical_commit_signature()
+        and not st.session_state.get("uat2_historical_commit_refresh_required", False)
+        and all(
+            entry.status is IntakeStatus.NEW and entry.bundle is not None
+            for entry in entries
+        )
+    )
+
 
 def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
     stage = st.session_state.get("weekly_statement_stage")

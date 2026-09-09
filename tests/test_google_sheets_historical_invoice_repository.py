@@ -158,6 +158,62 @@ def test_bulk_import_uses_50_invoice_chunks_with_one_order_and_item_append_per_c
     assert len(gateway.tabs[INVOICE_ITEMS_TAB]) == 241
 
 
+def _append_external_bundle(gateway, bundle):
+    stored = bundle.with_source_fingerprint(source_fact_fingerprint(bundle))
+    gateway.tabs[INVOICE_ORDERS_TAB].append(list(_serialize_order(stored.order)))
+    gateway.tabs[INVOICE_ITEMS_TAB].extend(
+        list(_serialize_item(item)) for item in stored.items
+    )
+
+
+def test_bulk_precommit_already_imported_plus_new_is_zero_write():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    first = _bundle(order_id="A")
+    second = _bundle(order_id="B")
+    assert [result.status for result in repository.classify_invoices((first, second))] == [
+        ImportStatus.NEW,
+        ImportStatus.NEW,
+    ]
+    _append_external_bundle(gateway, first)
+
+    result = repository.import_invoices((first, second))
+
+    assert [item.status for item in result.results] == [
+        ImportStatus.ALREADY_IMPORTED,
+        ImportStatus.NEW,
+    ]
+    assert gateway.append_calls == 0
+    assert result.chunk_sizes == ()
+    assert repository.get_order("Shopee", "B") is None
+
+
+def test_bulk_precommit_source_conflict_plus_new_is_zero_write():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    first = _bundle(order_id="A")
+    second = _bundle(order_id="B")
+    assert all(
+        result.status is ImportStatus.NEW
+        for result in repository.classify_invoices((first, second))
+    )
+    conflicting = replace(
+        first,
+        order=replace(first.order, refund_amount=Decimal("-1.00")),
+    )
+    _append_external_bundle(gateway, conflicting)
+
+    result = repository.import_invoices((first, second))
+
+    assert [item.status for item in result.results] == [
+        ImportStatus.SOURCE_CONFLICT,
+        ImportStatus.NEW,
+    ]
+    assert gateway.append_calls == 0
+    assert result.chunk_sizes == ()
+    assert repository.get_order("Shopee", "B") is None
+
+
 def test_bulk_preflight_rejects_invalid_bundle_before_the_first_write():
     gateway = FakeGateway()
     repository = _repository(gateway)

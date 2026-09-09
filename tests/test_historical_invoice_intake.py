@@ -121,6 +121,23 @@ def test_import_reclassifies_a_changed_repository_result_without_silent_overwrit
     assert repository.get_order("Shopee", "EXISTING").refund_amount == Decimal("0.00")
 
 
+def test_mixed_fresh_precommit_classification_maps_back_without_imported_status():
+    repository = InMemoryHistoricalInvoiceRepository()
+    first = _bundle("A")
+    second = _bundle("B")
+    stale_entries = (_entry(first), _entry(second))
+    repository.import_invoice(first)
+
+    outcome = import_new_staging(stale_entries, repository)
+
+    assert [entry.status for entry in outcome.entries] == [
+        IntakeStatus.ALREADY_IMPORTED,
+        IntakeStatus.NEW,
+    ]
+    assert outcome.bulk_result.chunk_sizes == ()
+    assert repository.get_order("Shopee", "B") is None
+
+
 def test_option_a_blocks_every_mixed_batch_before_any_write():
     repository = RecordingMemoryRepository()
     outcome = import_new_staging((_entry(_bundle("NEW")), _entry(_bundle("REVIEW"), IntakeStatus.NEEDS_REVIEW)), repository)
