@@ -29,6 +29,9 @@ from src.invoice_app.services.application_commit_lock import (
     ApplicationCommitInProgress,
     ApplicationCommitLock,
 )
+from src.invoice_app.services.shopee_weekly_statement_service import (
+    stage_parsed_shopee_weekly_statement,
+)
 
 
 def _income(*, view_by, sequence, row_number, order_id="ORDER-1", released="10.00", product_price="10.00", refund="0.00"):
@@ -129,13 +132,41 @@ def test_final_amount_has_priority_and_difference_is_signed():
     assert comparison.reconciliation_status == "DIFFERENT"
 
 
-def test_order_income_is_fallback_and_estimated_becomes_final():
+def test_estimated_order_income_remains_estimated_only_and_is_not_relabelled():
     plan = _plan(order=_order(final_amount=None, order_income="10.00", income_type="Estimated"))
 
     assert plan.order_comparisons[0].comparison_source == "Order Income"
-    assert plan.order_comparisons[0].reconciliation_status == "MATCHED"
-    assert plan.invoice_order_updates[0].income_type == "Final"
+    assert plan.order_comparisons[0].reconciliation_status == "ESTIMATED_ONLY"
+    status_index = STATEMENT_DATA_HEADERS.index("reconciliation_status")
+    assert plan.rows[0][status_index] == "ESTIMATED_ONLY"
+    assert not hasattr(plan.invoice_order_updates[0], "income_type")
     assert plan.invoice_order_updates[0].payment_status == "RELEASED"
+
+
+def test_staging_and_persistence_share_the_same_estimated_decision():
+    statement = _statement()
+    order = _order(final_amount=None, order_income="12.00", income_type="Estimated")
+    staged = stage_parsed_shopee_weekly_statement(
+        statement,
+        existing_orders=[
+            {
+                "platform": order.platform,
+                "order_id": order.order_id,
+                "final_amount": order.final_amount,
+                "order_income": order.order_income,
+                "income_type": order.income_type,
+            }
+        ],
+    )
+    plan = _plan(statement=statement, order=order)
+
+    staged_comparison = staged.order_reconciliations[0]
+    persisted_comparison = plan.order_comparisons[0]
+    assert staged_comparison.status == "Estimated Only"
+    assert persisted_comparison.reconciliation_status == "ESTIMATED_ONLY"
+    assert staged_comparison.comparison_source == persisted_comparison.comparison_source
+    assert staged_comparison.comparison_amount == persisted_comparison.comparison_amount
+    assert staged_comparison.difference == persisted_comparison.difference
 
 
 def test_unmatched_order_blocks_commit_plan():
@@ -144,6 +175,11 @@ def test_unmatched_order_blocks_commit_plan():
             _statement(), audit=_audit(), invoice_orders=(),
             sku_matches=_matches(_statement()), validation_passed=True,
         )
+
+
+def test_existing_order_without_comparison_evidence_blocks_separately():
+    with pytest.raises(StatementCommitBlocked, match="comparison evidence"):
+        _plan(order=_order(final_amount=None, order_income=None))
 
 
 def test_single_sku_match_creates_one_invoice_item_enrichment():
@@ -191,6 +227,18 @@ def test_failed_staging_reference_is_not_a_committed_duplicate():
     )
 
     assert validate_current_statement_state(plan, state, sku_matching_is_current=True) == ()
+
+
+def test_precommit_detects_income_type_change_that_changes_estimated_semantics():
+    plan = _plan(order=_order(final_amount=None, order_income="10.00", income_type="Estimated"))
+    state = StatementCommitState(
+        orders={"ORDER-1": _order(final_amount=None, order_income="10.00", income_type="Final")},
+        committed_statements=(),
+    )
+
+    assert validate_current_statement_state(
+        plan, state, sku_matching_is_current=True
+    ) == ("COMPARISON_STATE_CHANGED:ORDER-1",)
 
 
 def test_fresh_invoice_change_causes_zero_write():

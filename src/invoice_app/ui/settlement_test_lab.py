@@ -183,19 +183,21 @@ def _render_statement_validation(stage: StagedShopeeWeeklyStatement) -> None:
 
 
 def _render_summary(summary: Any) -> None:
-    st.subheader("Session reporting merge summary")
+    st.subheader("Statement reconciliation summary")
+    st.caption("Order ID Coverage")
     first_row = st.container(horizontal=True, gap="small")
     with first_row:
-        st.metric("Total Shopee Orders", summary.total_shopee_orders, border=True)
-        st.metric("Statement Matched", summary.statement_matched, border=True)
-        st.metric("No Settlement Evidence", summary.no_settlement_evidence, border=True)
-        st.metric("Pending → Settled", summary.pending_to_released, border=True)
+        st.metric("Statement Orders", summary.statement_order_count, border=True)
+        st.metric("Covered", summary.order_id_covered, border=True)
+        st.metric("Missing", summary.unmatched_statement_orders, border=True)
+        st.metric("Missing Comparison Evidence", summary.missing_comparison_evidence, border=True)
+    st.caption("Amount Reconciliation")
     second_row = st.container(horizontal=True, gap="small")
     with second_row:
-        st.metric("Already Released → Settled", summary.already_released_to_released, border=True)
-        st.metric("Different Amount", summary.different_amount, border=True)
-        st.metric("Unmatched Statement Orders", summary.unmatched_statement_orders, border=True)
-    st.caption("Difference is informational only at the existing RM0.02 tolerance. It is not an underpayment decision.")
+        st.metric("Matched", summary.matched_amount, border=True)
+        st.metric("Different", summary.different_amount, border=True)
+        st.metric("Estimated Only", summary.estimated_only, border=True)
+    st.caption("Commit Readiness is blocked by missing Order ID coverage or comparison evidence. Different and Estimated Only remain non-blocking results.")
 
 
 def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
@@ -207,7 +209,9 @@ def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
                 "Order ID": row.order_id,
                 "Order Created Date": pd.to_datetime(row.order_created_date, errors="coerce", dayfirst=True) if row.order_created_date else None,
                 "Income Type": row.income_type,
-                "Final / Estimated Order Income": float(row.order_income) if row.order_income not in (None, "") else None,
+                "Comparison Source": row.comparison_source,
+                "Comparison Amount": float(row.comparison_amount) if row.comparison_amount is not None else None,
+                "Reconciliation Status": row.reconciliation_status,
                 "Invoice Payment Signal": row.invoice_payment_signal,
                 "Settlement Status": row.settlement_status,
                 "Payout Completed Date": pd.to_datetime(row.payout_completed_date, errors="coerce", dayfirst=True) if row.payout_completed_date else None,
@@ -226,7 +230,7 @@ def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
         column_config={
             "Order Created Date": st.column_config.DateColumn("Order Created Date", format="YYYY-MM-DD"),
             "Payout Completed Date": st.column_config.DateColumn("Payout Completed Date", format="DD/MM/YYYY"),
-            "Final / Estimated Order Income": st.column_config.NumberColumn(format="RM %.2f"),
+            "Comparison Amount": st.column_config.NumberColumn(format="RM %.2f"),
             "Released Amount": st.column_config.NumberColumn(format="RM %.2f"),
             "Invoice Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),
             "Statement Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),

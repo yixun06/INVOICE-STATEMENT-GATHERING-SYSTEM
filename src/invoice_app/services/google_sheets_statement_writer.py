@@ -218,14 +218,6 @@ class GoogleSheetsStatementWriter:
             target = snapshot.orders.get(key)
             if target is None:
                 raise StatementCommitBlocked(f"Invoice_Orders target is missing: {key!r}.")
-            if (target.order.income_type or "").casefold() not in {"estimated", "final"}:
-                raise StatementCommitBlocked(
-                    f"Invoice_Orders target has unsupported income_type for Statement finalization: {key!r}."
-                )
-            if update.income_type != "Final":
-                raise StatementCommitBlocked(
-                    f"Statement plan does not finalize income_type for Invoice_Orders target {key!r}."
-                )
             requests.extend(
                 _order_update_requests(
                     snapshot.sheet_ids[INVOICE_ORDERS_TAB], target, update
@@ -378,17 +370,7 @@ def _order_update_requests(
     sheet_id: int, target: _OrderTarget, update: InvoiceOrderStatementUpdate
 ) -> tuple[Mapping[str, Any], ...]:
     positions = {header: index for index, header in enumerate(INVOICE_ORDERS_HEADERS)}
-    requests: list[Mapping[str, Any]] = []
-    if _text(target.values[positions["income_type"]]) != _serialize(update.income_type):
-        requests.append(
-            _update_rows_request(
-                sheet_id,
-                target.row_index,
-                positions["income_type"],
-                ((_serialize(update.income_type),),),
-            )
-        )
-    requests.append(
+    requests: list[Mapping[str, Any]] = [
         _update_rows_request(
             sheet_id,
             target.row_index,
@@ -399,7 +381,7 @@ def _order_update_requests(
                 _serialize(update.difference),
             ),),
         )
-    )
+    ]
     return tuple(requests)
 
 
@@ -489,7 +471,6 @@ def _expected_target_values(
     expected: dict[tuple[str, str, str, int | None], tuple[tuple[str, str], ...]] = {}
     for update in plan.invoice_order_updates:
         expected[(INVOICE_ORDERS_TAB, "Shopee", update.order_id, None)] = (
-            ("income_type", _serialize(update.income_type)),
             ("payment_status", _serialize(update.payment_status)),
             ("payout_completed_date", _serialize(update.payout_completed_date)),
             ("difference", _serialize(update.difference)),

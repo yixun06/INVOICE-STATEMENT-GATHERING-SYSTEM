@@ -709,7 +709,10 @@ def _render_statement_review_tables() -> None:
     if review is None or review.stage.statement is None:
         return
     statement = review.stage.statement
-    st.subheader("Order review")
+    st.subheader("Order ID Coverage and Amount Reconciliation")
+    st.caption(
+        "Covered means the Statement Order ID exists in Invoice data; it does not mean the amount matched."
+    )
     st.dataframe(
         [
             {

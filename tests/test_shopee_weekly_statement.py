@@ -90,6 +90,7 @@ def test_native_sample_requires_review_when_target_orders_are_unmatched(
         "Different": 0,
         "Estimated Only": 0,
         "Unmatched Order": 505,
+        "Missing Comparison Evidence": 0,
     }
     assert Counter(item.status for item in staged.adjustment_reconciliations) == {
         "Unmatched Adjustment": 3
@@ -336,6 +337,26 @@ def test_reconciliation_uses_shopee_platform_and_order_id_identity(parsed_sample
 
     assert by_order[order_row.order_id].status == "Unmatched Order"
     assert staged.result == NEEDS_REVIEW
+
+
+def test_existing_order_without_amount_is_not_reported_as_missing_order(parsed_sample):
+    order_row = parsed_sample.order_rows[0]
+    staged = stage_parsed_shopee_weekly_statement(
+        parsed_sample,
+        existing_orders=[
+            {
+                "platform": "Shopee",
+                "order_id": order_row.order_id,
+                "income_type": "Estimated",
+                "order_income": None,
+                "final_amount": None,
+            }
+        ],
+    )
+    by_order = {item.order_id: item for item in staged.order_reconciliations}
+
+    assert by_order[order_row.order_id].status == "Missing Comparison Evidence"
+    assert any("comparison evidence" in reason for reason in staged.review_reasons)
 
 
 def _workbook_with_empty_income(source_bytes: bytes) -> bytes:

@@ -225,7 +225,9 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     requests = gateway.batch_calls[0]
     assert {request["updateCells"]["range"]["sheetId"] for request in requests} == {11, 12, 13}
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["payment_status"] == "RELEASED"
-    assert _row_values(gateway, INVOICE_ORDERS_TAB)["income_type"] == "Final"
+    assert _row_values(gateway, INVOICE_ORDERS_TAB)["income_type"] == "Estimated"
+    assert _row_values(gateway, INVOICE_ORDERS_TAB)["order_income"] == "9.00"
+    assert _row_values(gateway, INVOICE_ORDERS_TAB)["final_amount"] == "10.00"
     assert _row_values(gateway, INVOICE_ITEMS_TAB)["statement_net_selling_amount"] == "10.00"
 
 

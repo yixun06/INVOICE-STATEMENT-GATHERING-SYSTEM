@@ -15,6 +15,10 @@ from ..parsers.shopee_weekly_statement_parser import (
     parse_shopee_weekly_statement,
 )
 from .batch_service import canonical_order_identity
+from .statement_reconciliation import (
+    DISPLAY_STATUS,
+    compare_statement_order,
+)
 
 
 READY_TO_COMMIT = "Ready to Commit"
@@ -22,7 +26,11 @@ NEEDS_REVIEW = "Needs Review"
 REJECTED = "Rejected"
 MONEY_TOLERANCE = Decimal("0.02")
 ORDER_RECONCILIATION_STATUSES = (
-    "Matched", "Different", "Estimated Only", "Unmatched Order"
+    "Matched",
+    "Different",
+    "Estimated Only",
+    "Unmatched Order",
+    "Missing Comparison Evidence",
 )
 
 
@@ -150,6 +158,17 @@ def stage_parsed_shopee_weekly_statement(
             result = NEEDS_REVIEW
             review_reasons.append(
                 "Statement target Order ID coverage is incomplete: " + ", ".join(unmatched[:5])
+            )
+        missing_evidence = [
+            item.order_id
+            for item in order_reconciliations
+            if item.status == "Missing Comparison Evidence"
+        ]
+        if missing_evidence:
+            result = NEEDS_REVIEW
+            review_reasons.append(
+                "Invoice comparison evidence is missing: "
+                + ", ".join(missing_evidence[:5])
             )
 
     return StagedShopeeWeeklyStatement(
@@ -339,49 +358,23 @@ def reconcile_statement_orders(
         if row.total_released_amount is None:
             continue
         candidates = existing_by_order.get(row.order_id, [])
-        if candidates:
-            selected = candidates[0]
-            final_amount = _to_decimal(selected.get("final_amount"))
-            order_income = _to_decimal(selected.get("order_income"))
-            if final_amount is not None:
-                comparison_source = "Final Amount"
-                comparison_amount = final_amount
-                difference = row.total_released_amount - comparison_amount
-                status = (
-                    "Matched"
-                    if abs(difference) <= MONEY_TOLERANCE
-                    else "Different"
-                )
-            elif order_income is not None:
-                comparison_source = "Order Income"
-                comparison_amount = order_income
-                difference = row.total_released_amount - comparison_amount
-                status = (
-                    "Estimated Only"
-                    if str(selected.get("income_type") or "").strip().casefold() == "estimated"
-                    else "Matched"
-                    if abs(difference) <= MONEY_TOLERANCE
-                    else "Different"
-                )
-            else:
-                comparison_source = None
-                comparison_amount = None
-                difference = None
-                status = "Unmatched Order"
-        else:
-            order_income = None
-            comparison_source = None
-            comparison_amount = None
-            difference = None
-            status = "Unmatched Order"
+        selected = candidates[0] if candidates else None
+        order_income = _to_decimal(selected.get("order_income")) if selected else None
+        decision = compare_statement_order(
+            invoice_order_found=selected is not None,
+            released_amount=row.total_released_amount,
+            final_amount=_to_decimal(selected.get("final_amount")) if selected else None,
+            order_income=order_income,
+            income_type=str(selected.get("income_type") or "") if selected else None,
+        )
         reconciliations.append(OrderReconciliation(
             order_id=row.order_id,
-            status=status,
+            status=DISPLAY_STATUS[decision.reconciliation_status],
             released_amount=row.total_released_amount,
             order_income=order_income,
-            difference=difference,
-            comparison_source=comparison_source,
-            comparison_amount=comparison_amount,
+            difference=decision.difference,
+            comparison_source=decision.comparison_source,
+            comparison_amount=decision.comparison_amount,
         ))
     return tuple(reconciliations)
 

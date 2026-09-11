@@ -245,7 +245,7 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     app.run(timeout=20)
 
     assert app.exception == []
-    assert {"Order review", "SKU review"} <= {
+    assert {"Order ID Coverage and Amount Reconciliation", "SKU review"} <= {
         element.value for element in app.subheader
     }
     assert any(

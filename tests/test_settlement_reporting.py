@@ -217,7 +217,23 @@ def test_released_difference_is_informational_only():
     )
 
     assert row.difference == Decimal("-2.50")
+    assert row.comparison_source == "Order Income"
+    assert row.reconciliation_status == "DIFFERENT"
     assert row.ready_to_invoice == "Ready to Invoice"
+
+
+def test_estimated_reporting_uses_shared_estimated_only_semantics():
+    result = build_shopee_settlement_reporting(
+        [_invoice("SHP-EST", income_type="Estimated", order_income="100.00")],
+        _statement(_statement_order("SHP-EST", released_amount="90.00")),
+    )
+
+    row = result.rows[0]
+    assert row.comparison_amount == Decimal("100.00")
+    assert row.difference == Decimal("-10.00")
+    assert row.reconciliation_status == "ESTIMATED_ONLY"
+    assert result.summary.estimated_only == 1
+    assert result.summary.order_id_covered == 1
 
 
 def test_later_adjustment_does_not_reopen_settled_order():

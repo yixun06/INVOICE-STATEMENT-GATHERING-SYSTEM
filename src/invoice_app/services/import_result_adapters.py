@@ -285,10 +285,19 @@ def adapt_shopee_weekly_statement_import_result(
                     )
                 )
         reconciliation_summary = (
+            SummaryItem("Statement Orders", len(order_reconciliations)),
+            SummaryItem(
+                "Order ID Covered",
+                sum(item.status != "Unmatched Order" for item in order_reconciliations),
+            ),
+            SummaryItem("Order ID Missing", sum(item.status == "Unmatched Order" for item in order_reconciliations)),
             SummaryItem("Matched", sum(item.status == "Matched" for item in order_reconciliations)),
             SummaryItem("Different", sum(item.status == "Different" for item in order_reconciliations)),
             SummaryItem("Estimated Only", sum(item.status == "Estimated Only" for item in order_reconciliations)),
-            SummaryItem("Unmatched Orders", sum(item.status == "Unmatched Order" for item in order_reconciliations)),
+            SummaryItem(
+                "Missing Comparison Evidence",
+                sum(item.status == "Missing Comparison Evidence" for item in order_reconciliations),
+            ),
             SummaryItem("Unmatched Adjustments", sum(item.status == "Unmatched Adjustment" for item in adjustment_reconciliations)),
             SummaryItem("Shipping exceptions", len(shipping_exceptions)),
         )

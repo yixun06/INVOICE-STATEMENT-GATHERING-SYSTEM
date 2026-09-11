@@ -16,7 +16,14 @@ from ..parsers.shopee_weekly_statement_parser import (
     SettlementIncomeRow,
 )
 from .batch_service import MISSING_VALUE_PLACEHOLDER, canonical_order_identity
-from .shopee_weekly_statement_service import MONEY_TOLERANCE
+from .statement_reconciliation import (
+    DIFFERENT,
+    ESTIMATED_ONLY,
+    MATCHED,
+    MONEY_TOLERANCE,
+    MISSING_COMPARISON_EVIDENCE,
+    compare_statement_order,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,9 @@ class ShopeeSettlementReportingRow:
     refund_validation: str
     ready_to_invoice: str
     difference: Decimal | None
+    comparison_source: str | None
+    comparison_amount: Decimal | None
+    reconciliation_status: str | None
 
     @property
     def payment_transition(self) -> str | None:
@@ -53,12 +63,21 @@ class ShopeeSettlementReportingRow:
 @dataclass(frozen=True)
 class ShopeeSettlementReportingSummary:
     total_shopee_orders: int
-    statement_matched: int
+    statement_order_count: int
+    order_id_covered: int
     no_settlement_evidence: int
     pending_to_released: int
     already_released_to_released: int
     different_amount: int
+    matched_amount: int
+    estimated_only: int
+    missing_comparison_evidence: int
     unmatched_statement_orders: int
+
+    @property
+    def statement_matched(self) -> int:
+        """Compatibility alias; this is Order ID coverage, not an amount match."""
+        return self.order_id_covered
 
 
 @dataclass(frozen=True)
@@ -94,12 +113,16 @@ def build_shopee_settlement_reporting(
         invoice_refund = _to_decimal(order.get("refund_amount"))
         statement_row = decision.row
         statement_refund = _statement_refund_amount(statement_row)
-        difference = (
-            statement_row.total_released_amount - order_income
+        comparison = (
+            compare_statement_order(
+                invoice_order_found=True,
+                released_amount=statement_row.total_released_amount,
+                final_amount=_to_decimal(order.get("final_amount")),
+                order_income=order_income,
+                income_type=str(order.get("income_type") or ""),
+            )
             if statement_row is not None
-            and _is_final_income(income_type)
             and statement_row.total_released_amount is not None
-            and order_income is not None
             else None
         )
         refund_validation = _refund_validation(
@@ -130,17 +153,23 @@ def build_shopee_settlement_reporting(
                 statement_refund_amount=statement_refund,
                 refund_validation=refund_validation,
                 ready_to_invoice=ready_to_invoice,
-                difference=difference,
+                difference=comparison.difference if comparison else None,
+                comparison_source=comparison.comparison_source if comparison else None,
+                comparison_amount=comparison.comparison_amount if comparison else None,
+                reconciliation_status=comparison.reconciliation_status if comparison else None,
             )
         )
 
     result_rows = tuple(rows)
     settled_rows = tuple(row for row in result_rows if row.settlement_status == "Settled")
+    statement_order_ids = _valid_statement_order_ids(statement)
+    covered_order_ids = statement_order_ids & set(orders_by_id)
     return ShopeeSettlementReportingResult(
         rows=result_rows,
         summary=ShopeeSettlementReportingSummary(
             total_shopee_orders=len(result_rows),
-            statement_matched=len(settled_rows),
+            statement_order_count=len(statement_order_ids),
+            order_id_covered=len(covered_order_ids),
             no_settlement_evidence=sum(
                 row.settlement_status == "No Settlement Evidence" for row in result_rows
             ),
@@ -152,12 +181,19 @@ def build_shopee_settlement_reporting(
                 for row in settled_rows
             ),
             different_amount=sum(
-                row.difference is not None and abs(row.difference) > MONEY_TOLERANCE
+                row.reconciliation_status == DIFFERENT for row in settled_rows
+            ),
+            matched_amount=sum(
+                row.reconciliation_status == MATCHED for row in settled_rows
+            ),
+            estimated_only=sum(
+                row.reconciliation_status == ESTIMATED_ONLY for row in settled_rows
+            ),
+            missing_comparison_evidence=sum(
+                row.reconciliation_status == MISSING_COMPARISON_EVIDENCE
                 for row in settled_rows
             ),
-            unmatched_statement_orders=len(
-                _valid_statement_order_ids(statement) - set(orders_by_id)
-            ),
+            unmatched_statement_orders=len(statement_order_ids - set(orders_by_id)),
         ),
     )
 
@@ -276,10 +312,6 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 def _display_value(value: Any) -> Any:
     return MISSING_VALUE_PLACEHOLDER if value is None or str(value).strip() == "" else value
-
-
-def _is_final_income(income_type: Any) -> bool:
-    return str(income_type).strip().casefold() == "final"
 
 
 def _normalized_status(value: Any) -> str:

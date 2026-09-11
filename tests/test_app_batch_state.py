@@ -1016,7 +1016,10 @@ def test_weekly_statement_reconciliation_uses_existing_staged_counts(tmp_path, m
         ("Matched", "0"),
         ("Different", "1"),
         ("Estimated Only", "0"),
-        ("Unmatched Orders", "0"),
+        ("Statement Orders", "1"),
+        ("Order ID Covered", "1"),
+        ("Order ID Missing", "0"),
+        ("Missing Comparison Evidence", "0"),
         ("Unmatched Adjustments", "1"),
         ("Shipping exceptions", "0"),
     } <= metrics

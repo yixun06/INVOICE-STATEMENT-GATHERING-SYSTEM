@@ -254,6 +254,13 @@ Persist only Statement data relevant to Invoice reconciliation, Invoice
 enrichment, future Billing/Product Summary, and necessary auditability. The
 exact approved `Statement_Data` column list is locked below.
 
+The parser and validator currently retain a wider settlement-component
+breakdown (including commission, AMS, Ads, shipping, voucher, and rebate
+effects) than the approved 40-column persistence schema stores. Do not silently
+discard the design concern: a separate schema-impact decision is still required
+before Billing depends on those components. This semantics correction does not
+add columns or perform another UAT2 schema migration.
+
 Statement `file_hash` identifies the uploaded Statement file. Invoice
 `source_fingerprint` identifies material normalized Invoice source facts. They
 are separate concepts and must not be combined.
@@ -312,7 +319,10 @@ is the stable row identity.
 Committed rows use `validation_status = PASSED` and
 `commit_status = COMMITTED`. `comparison_source` is human-readable:
 `Final Amount` or `Order Income`. Committed ORDER-row
-`reconciliation_status` values are `MATCHED` or `DIFFERENT`.
+`reconciliation_status` values may be `MATCHED`, `DIFFERENT`, or
+`ESTIMATED_ONLY`. A blocked Statement writes no rows, so `UNMATCHED_ORDER` and
+`MISSING_COMPARISON_EVIDENCE` remain staging/readiness outcomes rather than
+committed `Statement_Data` values.
 
 `match_method` is business-readable and uses the actual applicable method:
 `Product Master SKU`, `Product Master Parent SKU`, `Product Name`,
@@ -388,10 +398,10 @@ recovery. Never retry automatically or claim database rollback semantics.
 
 After a successful Statement commit, update the matched Invoice Order with its
 committed `payout_completed_date`, `payment_status = RELEASED`, and signed
-`difference`. If its existing `income_type` is `Estimated`, update it to
-`Final`; an existing `Final` remains `Final`. This income-type update is not
-controlled by `comparison_source`, which only records whether `final_amount`
-or `order_income` was the reconciliation comparison amount.
+`difference`. Do not overwrite `order_income` or `final_amount`, and do not
+convert an existing `income_type = Estimated` to `Final`. These Invoice fields
+remain the source snapshot; `comparison_source` records whether `final_amount`
+or `order_income` supplied the expected amount.
 
 For exactly one deterministically matched Statement SKU row, update the
 existing Invoice Item fields:
@@ -496,25 +506,32 @@ MATCHED
 DIFFERENT
 ESTIMATED_ONLY
 UNMATCHED_ORDER
+MISSING_COMPARISON_EVIDENCE
 ```
 
-- `MATCHED`: the InvoiceGather order exists and the released amount matches the
-  Invoice `final_amount` within RM0.02.
-- `DIFFERENT`: the order exists but the absolute difference exceeds RM0.02.
-- `ESTIMATED_ONLY`: the order exists but Invoice `final_amount` is absent, so
-  reconciliation uses Invoice `order_income`. Preserve the signed difference.
-  This outcome is allowed for commit; after a successful Statement commit,
-  update that Invoice order's `income_type` to `Final`.
+- `MATCHED`: `final_amount`, or non-Estimated `order_income` fallback, matches
+  the released amount within RM0.02.
+- `DIFFERENT`: the same formal comparison source differs beyond RM0.02.
+- `ESTIMATED_ONLY`: `final_amount` is absent and an explicitly Estimated
+  `order_income` supplies the expected amount. Always preserve the signed
+  difference, but never collapse this result into `MATCHED` or `DIFFERENT`.
 - `UNMATCHED_ORDER`: the Statement Order ID currently has no matching
   InvoiceGather order.
+- `MISSING_COMPARISON_EVIDENCE`: the Invoice order exists, but both
+  `final_amount` and `order_income` are absent.
 
 `MATCHED`, `DIFFERENT`, and `ESTIMATED_ONLY` are allowed reconciliation results.
 `DIFFERENT` is not a commit blocker. Its signed difference is evidence only and
 must not by itself be labelled as confirmed underpayment.
 
-`UNMATCHED_ORDER` is commit-blocking. If even one Statement target Order ID is
-missing from the committed Invoice database, block the whole Statement batch
-commit. Do not partially commit the matched subset.
+`UNMATCHED_ORDER` and `MISSING_COMPARISON_EVIDENCE` are commit-blocking. If even
+one Statement target Order ID is missing, or one covered Invoice lacks both
+comparison amounts, block the whole Statement batch commit. Do not partially
+commit the matched subset.
+
+Present `BLOCKED` as Commit Readiness, not as another persisted reconciliation
+status. Report Order ID Coverage separately from Amount Reconciliation; a
+covered Order ID does not prove that its amount matched.
 
 ### Payment status terminology — Confirmed / Locked
 
@@ -2308,21 +2325,24 @@ Matched
 Different
 Estimated Only
 Unmatched Order
+Missing Comparison Evidence
 ```
 
-These are **non-blocking reconciliation outcomes**, not statement corruption.
+These are reconciliation outcomes, not Statement internal-validation results.
+`Different` and `Estimated Only` are non-blocking; missing Order coverage or
+comparison evidence blocks Commit Readiness for the whole batch.
 
 ### Matched
 
-When a corresponding Shopee order has Final Order Income and:
+When `final_amount`, or a non-Estimated `order_income` fallback, exists and:
 
 ```text
-abs(Shopee Released Amount - Final Order Income) <= RM0.02
+abs(Shopee Released Amount - comparison_amount) <= RM0.02
 ```
 
 ### Different
 
-When a corresponding Shopee order has Final Order Income but the Released Amount differs beyond tolerance.
+When the same formal comparison source exists but the Released Amount differs beyond tolerance.
 
 `Different` does not block settlement commit.
 
@@ -2341,15 +2361,17 @@ If only Estimated Order Income exists:
 - a numerical comparison may be informational;
 - do not treat it as a final settlement mismatch;
 - do not accuse the platform of underpayment based on estimate vs settlement.
+- keep the status `Estimated Only` regardless of the RM0.02 tolerance;
+- calculate and display the signed difference; and
+- do not rename the Invoice income type to Final after Statement commit.
 
 ### Unmatched Order
 
 If the statement contains an Order ID not currently found in InvoiceGather / production Orders:
 
-- preserve the settlement record;
 - mark it Unmatched;
-- do not reject the statement;
-- future historical Order import may allow reconciliation later.
+- block the whole Statement commit with zero write; and
+- allow a later historical Order import and fresh review to resolve coverage.
 
 This is important because historical data may be imported in a different order from settlement data.
 
@@ -2379,16 +2401,19 @@ none commit
 
 Do not design a production workflow where 500 rows are committed while 5 failed rows from the same internally valid statement remain outside the transaction.
 
-However, these reconciliation statuses do not block atomic commit if internal validation passes:
+These reconciliation statuses do not block atomic commit if internal validation passes:
 
 ```text
 Matched
 Different
 Estimated Only
-Unmatched Order
 Unmatched Adjustment
 Operational Shipping Discrepancy
 ```
+
+`Unmatched Order` and `Missing Comparison Evidence` do block the whole
+Statement commit. They are presented under Commit Readiness, not persisted as
+an extra `BLOCKED` reconciliation enum.
 
 
 

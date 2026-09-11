@@ -30,9 +30,11 @@ from src.invoice_app.services.application_commit_lock import (
     ApplicationCommitLock,
 )
 from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
-
-
-MONEY_TOLERANCE = Decimal("0.02")
+from src.invoice_app.services.statement_reconciliation import (
+    MISSING_COMPARISON_EVIDENCE,
+    UNMATCHED_ORDER,
+    compare_statement_order,
+)
 
 
 class StatementCommitBlocked(RuntimeError):
@@ -63,7 +65,6 @@ class StatementOrderComparison:
     difference: Decimal | None
     reconciliation_status: str
     payout_completed_date: date | None
-    resulting_income_type: str | None
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,6 @@ class InvoiceOrderStatementUpdate:
     order_id: str
     payout_completed_date: date | None
     payment_status: str
-    income_type: str | None
     difference: Decimal
 
 
@@ -140,11 +140,25 @@ def prepare_statement_commit_plan(
 
     orders_by_id = {order.order_id: order for order in invoice_orders if order.platform == "Shopee"}
     comparisons = tuple(_compare_order(row, orders_by_id.get(row.order_id)) for row in statement.order_rows)
-    missing = [comparison.order_id for comparison in comparisons if comparison.comparison_amount is None]
-    if missing:
+    unmatched = [
+        comparison.order_id
+        for comparison in comparisons
+        if comparison.reconciliation_status == UNMATCHED_ORDER
+    ]
+    if unmatched:
         raise StatementCommitBlocked(
-            "Statement target Order ID coverage or comparison evidence is incomplete: "
-            + ", ".join(missing[:5])
+            "Statement target Order ID coverage is incomplete: "
+            + ", ".join(unmatched[:5])
+        )
+    missing_evidence = [
+        comparison.order_id
+        for comparison in comparisons
+        if comparison.reconciliation_status == MISSING_COMPARISON_EVIDENCE
+    ]
+    if missing_evidence:
+        raise StatementCommitBlocked(
+            "Invoice comparison evidence is missing: "
+            + ", ".join(missing_evidence[:5])
         )
 
     match_by_source_row = {match.statement_source_row: match for match in sku_matches.matches}
@@ -198,7 +212,6 @@ def prepare_statement_commit_plan(
             order_id=comparison.order_id,
             payout_completed_date=comparison.payout_completed_date,
             payment_status="RELEASED",
-            income_type=comparison.resulting_income_type,
             difference=comparison.difference,
         )
         for comparison in comparisons
@@ -249,6 +262,8 @@ def validate_current_statement_state(
         if (
             current.comparison_source != comparison.comparison_source
             or current.comparison_amount != comparison.comparison_amount
+            or current.difference != comparison.difference
+            or current.reconciliation_status != comparison.reconciliation_status
         ):
             reasons.append(f"COMPARISON_STATE_CHANGED:{comparison.order_id}")
     if not sku_matching_is_current:
@@ -285,24 +300,25 @@ def _compare_order(
     row: SettlementIncomeRow,
     order: CanonicalInvoiceOrder | None,
 ) -> StatementOrderComparison:
-    if order is None or row.total_released_amount is None:
-        return StatementOrderComparison(row.order_id, None, None, None, "", row.payout_completed_date, None)
-    if order.final_amount is not None:
-        source, amount = "Final Amount", order.final_amount
-    elif order.order_income is not None:
-        source, amount = "Order Income", order.order_income
-    else:
-        return StatementOrderComparison(row.order_id, None, None, None, "", row.payout_completed_date, None)
-    difference = row.total_released_amount - amount
-    income_type = (order.income_type or "").casefold()
+    if row.total_released_amount is None:
+        return StatementOrderComparison(
+            row.order_id, None, None, None, MISSING_COMPARISON_EVIDENCE,
+            row.payout_completed_date,
+        )
+    decision = compare_statement_order(
+        invoice_order_found=order is not None,
+        released_amount=row.total_released_amount,
+        final_amount=order.final_amount if order else None,
+        order_income=order.order_income if order else None,
+        income_type=order.income_type if order else None,
+    )
     return StatementOrderComparison(
         order_id=row.order_id,
-        comparison_source=source,
-        comparison_amount=amount,
-        difference=difference,
-        reconciliation_status="MATCHED" if abs(difference) <= MONEY_TOLERANCE else "DIFFERENT",
+        comparison_source=decision.comparison_source,
+        comparison_amount=decision.comparison_amount,
+        difference=decision.difference,
+        reconciliation_status=decision.reconciliation_status,
         payout_completed_date=row.payout_completed_date,
-        resulting_income_type="Final" if income_type in {"estimated", "final"} else order.income_type,
     )
 
 
