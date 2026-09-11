@@ -412,17 +412,41 @@ def test_zenxin_preview_invoice_date_is_typed_without_lazada_format_coercion(tmp
     assert order_table["Invoice Date"].dtype.kind == "M"
     assert order_table["Invoice Date"].iloc[0].strftime("%d/%m/%Y") == "31/03/2026"
 
-def test_data_import_order_level_is_compact_and_omits_dashboard_debug_columns(tmp_path, monkeypatch):
+def test_data_import_validation_restores_current_batch_dashboard_and_filterable_order_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
     app.session_state["orders"] = [
-        {"platform": "Shopee", "order_id": "SHP-1", "payment_status": "Pending"},
-        {"platform": "Lazada", "order_id": "LZD-1"},
-        {"platform": "ZENXIN", "order_id": "ZNX-1"},
+        {
+            "platform": "Shopee",
+            "order_id": "SHP-1",
+            "payment_status": "Pending",
+            "order_income": "10.00",
+            "final_amount": "8.00",
+        },
+        {"platform": "Lazada", "order_id": "LZD-1", "order_income": "5.50", "final_amount": "N/A"},
+        {"platform": "ZENXIN", "order_id": "ZNX-1", "order_income": "N/A", "final_amount": "2.00"},
     ]
-    app.session_state["products"] = []
-    app.session_state["reviews"] = []
+    app.session_state["products"] = [
+        {
+            "platform": "Shopee",
+            "order_id": "SHP-1",
+            "product_name": "Shopee product",
+            "seller_sku": "SHP-SKU",
+            "quantity": 2,
+        },
+        {
+            "platform": "Lazada",
+            "order_id": "LZD-1",
+            "product_name": "Lazada product",
+            "seller_sku": "LZD-SKU",
+            "quantity": 3,
+        },
+    ]
+    app.session_state["reviews"] = [
+        {"platform": "Shopee", "order_id": "SHP-REVIEW", "status": "Manual Review"},
+        {"platform": "Shopee", "order_id": "SHP-DUP", "status": "Duplicate Skipped"},
+    ]
     app.session_state["batch_id"] = "batch-default-columns"
     app.session_state["pdf_count"] = 3
     app.session_state["navigation"] = "Data Import"
@@ -437,7 +461,27 @@ def test_data_import_order_level_is_compact_and_omits_dashboard_debug_columns(tm
         if "Order ID" in dataframe.value.columns
     )
     assert current_order_table["Order ID"].tolist() == ["SHP-1", "LZD-1", "ZNX-1"]
-    assert {"Payment Status", "Refund Amount"}.isdisjoint(current_order_table.columns)
+    assert {"Payment Status", "Refund Amount"} <= set(current_order_table.columns)
+    assert {"Current Batch Overview", "Search and Filters"} <= {
+        element.value for element in app.subheader
+    }
+    assert {
+        ("Orders", "3"),
+        ("Products", "2"),
+        ("Quantity", "5"),
+        ("Order Income", "RM 15.50"),
+        ("Final Amount", "RM 10.00"),
+        ("Manual Review", "1"),
+    } <= {(metric.label, metric.value) for metric in app.metric}
+
+    next(element for element in app.text_input if element.label == "Product or SKU").set_value("LZD-SKU").run(timeout=20)
+
+    filtered_order_table = next(
+        dataframe.value
+        for dataframe in app.dataframe
+        if "Order ID" in dataframe.value.columns
+    )
+    assert filtered_order_table["Order ID"].tolist() == ["LZD-1"]
 
 
 def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path, monkeypatch):

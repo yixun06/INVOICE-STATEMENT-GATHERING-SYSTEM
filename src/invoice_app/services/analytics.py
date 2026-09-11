@@ -40,6 +40,20 @@ def compute_platform_dashboard(
     }
 
 
+def compute_current_batch_validation_dashboard(
+    orders: list[dict[str, Any]],
+    products: list[dict[str, Any]],
+) -> dict[str, str | int]:
+    """Return the accepted-current-batch metrics shown during validation."""
+    return {
+        "orders": len(orders),
+        "products": len(products),
+        "quantity": sum(parse_quantity(row.get("quantity")) for row in products),
+        "order_income": _money(_sum_present_money(orders, "order_income")),
+        "final_amount": _money(_sum_present_money(orders, "final_amount")),
+    }
+
+
 def compute_platform_kpis(
     platform_orders: list[dict[str, Any]],
     platform_products: list[dict[str, Any]],
@@ -62,6 +76,17 @@ def _sum_money(rows: list[dict[str, Any]], field: str) -> Decimal:
     for row in rows:
         value = str(row.get(field, "")).strip()
         if value == "":
+            continue
+        total += parse_decimal(value)
+    return total
+
+
+def _sum_present_money(rows: list[dict[str, Any]], field: str) -> Decimal:
+    """Sum populated source values without presenting a missing value as zero."""
+    total = Decimal("0")
+    for row in rows:
+        value = row.get(field)
+        if value is None or str(value).strip().casefold() in {"", "n/a", "none", "null"}:
             continue
         total += parse_decimal(value)
     return total

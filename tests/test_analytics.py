@@ -1,4 +1,8 @@
-from src.invoice_app.services.analytics import compute_overall_dashboard, compute_platform_dashboard
+from src.invoice_app.services.analytics import (
+    compute_current_batch_validation_dashboard,
+    compute_overall_dashboard,
+    compute_platform_dashboard,
+)
 from src.invoice_app.services.all_products import build_all_product_rows
 
 
@@ -33,6 +37,25 @@ def test_platform_dashboard_includes_only_requested_metrics():
         "products": 1,
         "quantity": 2,
         "income": "24.53",
+    }
+
+
+def test_current_batch_validation_dashboard_keeps_order_income_and_final_amount_separate():
+    dashboard = compute_current_batch_validation_dashboard(
+        orders=[
+            {"platform": "Shopee", "order_income": "24.53", "final_amount": "20.00"},
+            {"platform": "Shopee", "order_income": "N/A", "final_amount": "12.27"},
+            {"platform": "Lazada", "order_income": "8.20", "final_amount": None},
+        ],
+        products=[{"quantity": 2}, {"quantity": "3"}],
+    )
+
+    assert dashboard == {
+        "orders": 3,
+        "products": 2,
+        "quantity": 5,
+        "order_income": "32.73",
+        "final_amount": "32.27",
     }
 
 

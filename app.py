@@ -21,6 +21,7 @@ from src.invoice_app.services.product_master_source import (
 )
 from src.invoice_app.utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from src.invoice_app.services.analytics import (
+    compute_current_batch_validation_dashboard,
     compute_overall_dashboard,
     compute_platform_dashboard,
     compute_platform_kpis,
@@ -853,8 +854,9 @@ def show_current_batch_outcomes() -> None:
 
 
 def show_current_batch_validation_data() -> None:
-    """Render the concise, current-batch-only operational data for Validate."""
+    """Render the accepted current-batch dashboard and its filterable order table."""
     orders = st.session_state.get("orders", [])
+    products = st.session_state.get("products", [])
     reviews = st.session_state.get("reviews", [])
     order_columns = [
         "platform",
@@ -865,9 +867,32 @@ def show_current_batch_validation_data() -> None:
         "final_amount",
         "source_pdf",
     ]
+    available_order_columns = list(
+        dict.fromkeys(
+            column
+            for platform_name in PLATFORMS
+            for column in PLATFORM_ORDER_FIELDS[platform_name]
+        )
+    )
+    product_filter_columns = ["platform", "order_id", "product_name", "seller_sku"]
+    dashboard = compute_current_batch_validation_dashboard(orders, products)
+    manual_review_count = sum(is_manual_review_record(review) for review in reviews)
+
+    show_table_section_heading(
+        "Current Batch Overview",
+        "Accepted orders only. Missing Order Income or Final Amount values are excluded from the respective total.",
+    )
+    with st.container(horizontal=True, gap="xsmall"):
+        st.metric("Orders", int(dashboard["orders"]), border=True)
+        st.metric("Products", int(dashboard["products"]), border=True)
+        st.metric("Quantity", int(dashboard["quantity"]), border=True)
+        st.metric("Order Income", f"RM {dashboard['order_income']}", border=True)
+        st.metric("Final Amount", f"RM {dashboard['final_amount']}", border=True)
+        show_manual_review_metric(manual_review_count, "data-import-current-batch")
+
     show_table_section_heading(
         "Current Batch — Order Level Data",
-        "Accepted orders from the currently uploaded batch.",
+        "Filter accepted orders by Order ID, Product or SKU, and Platform. The table toolbar can reveal every available order field.",
     )
     if orders:
         display_orders = [
@@ -875,15 +900,33 @@ def show_current_batch_validation_data() -> None:
             for platform_name in PLATFORMS
             for order in _platform_order_display_rows(
                 platform_name,
-                [item for item in orders if item.get("platform") == platform_name],
+                [
+                    item
+                    for item in orders
+                    if canonical_platform_label(item.get("platform")) == platform_name
+                ],
             )
         ]
-        order_frame = frame_with_columns(display_orders, order_columns, MISSING_VALUE_PLACEHOLDER)
-        show_data_table(
+        order_frame = frame_with_columns(
+            display_orders,
+            available_order_columns,
+            MISSING_VALUE_PLACEHOLDER,
+        )
+        product_frame = frame_with_columns(products, product_filter_columns, MISSING_VALUE_PLACEHOLDER)
+        filtered_order_frame, _ = apply_platform_filters(
+            "All",
             order_frame,
+            product_frame,
+            key_prefix="data_import_current_batch",
+        )
+        if filtered_order_frame.empty:
+            st.caption("No orders match the current filters.")
+            return
+        show_data_table(
+            filtered_order_frame,
             order_columns,
             key="data_import_current_batch_order_level_table",
-            available_columns=order_columns,
+            available_columns=available_order_columns,
             height=320,
         )
     else:
@@ -1052,7 +1095,10 @@ def apply_platform_filters(
     platform_name: str,
     order_df: pd.DataFrame,
     product_df: pd.DataFrame,
+    *,
+    key_prefix: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    widget_scope = key_prefix or platform_name
     st.subheader("Search and Filters")
     if platform_name == "All":
         filter_col1, filter_col2, platform_col = st.columns([2, 2, 1], gap="small")
@@ -1064,20 +1110,20 @@ def apply_platform_filters(
         "Order ID",
         value="",
         placeholder="Search order",
-        key=f"{platform_name}_order_filter",
+        key=f"{widget_scope}_order_filter",
     ).strip()
     product_filter = filter_col2.text_input(
         "Product or SKU",
         value="",
         placeholder="Search product or SKU",
-        key=f"{platform_name}_product_filter",
+        key=f"{widget_scope}_product_filter",
     ).strip()
     platform_filter = "All"
     if platform_col is not None:
         platform_filter = platform_col.selectbox(
             "Platform",
             ["All", *PLATFORMS],
-            key=f"{platform_name}_platform_filter",
+            key=f"{widget_scope}_platform_filter",
         )
 
     if order_filter:
