@@ -2807,6 +2807,12 @@ remain authoritative Product Master-derived values. Non-resolvable source or
 Product Master issues remain NEEDS_REVIEW. A corrected record re-enters the
 normal Validate → Reconcile → Review & Commit workflow without a special writer.
 
+Missing parsed Income alone is not proof that a source PDF is incomplete.
+Income extraction-missing and proven source-incomplete are distinct Manual
+Review states: only an extraction-missing Income value may be corrected after
+the operator confirms it is visible in the original source. A source proven
+incomplete remains non-resolvable and must be replaced with the complete PDF.
+
 ## 16.2 Validation Recovery UX — Confirmed principle, actions partly TODO
 
 A validation failure must not be a dead-end error message when a safe, well-defined correction can be performed inside the current workflow.

@@ -7,7 +7,7 @@ from .base_parser import BaseParser
 from .shopee_extractor import SHOPEE_ORDER_STATUSES, extract_shopee_data
 from .shopee_mapper import map_shopee_records, map_shopee_review_payloads
 from .shopee_product_parser import parse_positioned_products
-from .shopee_review_policy import find_shopee_review_issue
+from .shopee_review_policy import find_shopee_review_issue, source_incomplete_evidence
 
 
 class ShopeeParser(BaseParser):
@@ -29,7 +29,13 @@ class ShopeeParser(BaseParser):
         batch_id: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         positioned_items = parse_positioned_products(document)
-        return self._parse(document.text, source_pdf, batch_id, positioned_items)
+        return self._parse(
+            document.text,
+            source_pdf,
+            batch_id,
+            positioned_items,
+            source_incomplete_evidence=source_incomplete_evidence(document),
+        )
 
     def _parse(
         self,
@@ -37,9 +43,14 @@ class ShopeeParser(BaseParser):
         source_pdf: str,
         batch_id: str,
         positioned_items: list[dict[str, Any]],
+        *,
+        source_incomplete_evidence: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         extracted = extract_shopee_data(text, source_pdf, positioned_items)
-        review_issue = find_shopee_review_issue(extracted)
+        review_issue = find_shopee_review_issue(
+            extracted,
+            source_incomplete_evidence=source_incomplete_evidence,
+        )
         if review_issue:
             order_payload, product_payloads = map_shopee_review_payloads(extracted, batch_id)
             review = self.create_review(

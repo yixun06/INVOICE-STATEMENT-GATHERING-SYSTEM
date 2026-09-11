@@ -18,6 +18,10 @@ from src.invoice_app.services.workflow_navigation import (
     request_navigation,
 )
 from src.invoice_app.services.historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
+from src.invoice_app.review_reason_codes import (
+    INCOME_EXTRACTION_MISSING,
+    INCOME_SOURCE_INCOMPLETE,
+)
 
 
 
@@ -341,12 +345,16 @@ def test_non_resolvable_manual_review_details_render_without_changing_readiness(
     app.session_state["reviews"] = [{
         "platform": "Shopee", "order_id": "SHP-INCOMPLETE", "source_pdf": "incomplete.pdf",
         "status": "Manual Review",
-        "reason": "Income Completion Anchor Missing: Source Document Appears Incomplete.",
+        "reason_code": INCOME_SOURCE_INCOMPLETE,
+        "reason": "Income Completion Anchor Missing: Source Document Is Incomplete.",
     }]
     app.run(timeout=20)
 
     assert app.exception == []
     assert "Apply & Revalidate" not in {button.label for button in app.button}
+    assert not any(
+        "Income Completion Anchor Missing" in warning.value for warning in app.warning
+    )
     assert not adapt_platform_orders_import_result(
         batch_id="incomplete-source-batch", orders=[], products=[],
         reviews=app.session_state.filtered_state["reviews"], processing_errors=[],
@@ -357,6 +365,41 @@ def test_non_resolvable_manual_review_details_render_without_changing_readiness(
     assert app.exception == []
     assert "Details" in {caption.value for caption in app.caption}
     assert app.session_state.filtered_state["reviews"][0]["status"] == "Manual Review"
+
+
+def test_source_supported_income_manual_review_renders_confirmation_form(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "income-extraction-batch"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
+    app.session_state["orders"] = []
+    app.session_state["products"] = []
+    app.session_state["processing_errors"] = []
+    app.session_state["duplicate_skipped"] = []
+    app.session_state["unsupported_files"] = []
+    app.session_state["reviews"] = [{
+        "platform": "Shopee",
+        "order_id": "SHP-INCOME",
+        "source_pdf": "income.pdf",
+        "status": "Manual Review",
+        "reason_code": INCOME_EXTRACTION_MISSING,
+        "reason": "Income Completion Anchor Missing: Order Income was not extracted.",
+        "order_payload": {"order_income": "N/A"},
+    }]
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Apply & Revalidate" in {button.label for button in app.button}
+    assert {
+        "I verified these values are visible in the original Invoice source"
+    } <= {checkbox.label for checkbox in app.checkbox}
+    assert {"Order Income", "Income Type"} <= {
+        widget.label for widget in (*app.text_input, *app.selectbox)
+    }
 
 
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):

@@ -273,23 +273,39 @@ def _render_validation_step(
 def _render_contract_validation(result: ImportResult) -> None:
     validation = result.validation
     _render_recovery_notice()
-    if not validation.blocking_issues and not validation.warnings:
+    visible_warnings = tuple(
+        issue for issue in validation.warnings if issue.layer != "manual_review"
+    )
+    if not validation.blocking_issues and not visible_warnings:
         if result.session_state.applied_to_current_session:
-            st.success("No validation issues in the current batch.", icon=":material/check_circle:")
+            if not validation.warnings:
+                st.success("No validation issues in the current batch.", icon=":material/check_circle:")
         else:
             st.info(result.source_summary.empty_message or "No import result is staged yet.", icon=":material/info:")
     for index, issue in enumerate(validation.blocking_issues):
         _render_validation_issue(issue, index=index, is_blocking=True)
-    for index, issue in enumerate(validation.warnings, start=len(validation.blocking_issues)):
+    for index, issue in enumerate(visible_warnings, start=len(validation.blocking_issues)):
         _render_validation_issue(issue, index=index, is_blocking=False)
+    for index, issue in enumerate(
+        (issue for issue in validation.warnings if issue.layer == "manual_review"),
+        start=len(validation.blocking_issues) + len(visible_warnings),
+    ):
+        _render_validation_issue(issue, index=index, is_blocking=False, show_message=False)
 
 
-def _render_validation_issue(issue: ValidationIssue, *, index: int, is_blocking: bool) -> None:
-    message = f"{'Needs attention' if is_blocking else 'Warning'} — {issue.reason}"
-    if is_blocking:
-        st.error(message, icon=":material/error:")
-    else:
-        st.warning(message, icon=":material/warning:")
+def _render_validation_issue(
+    issue: ValidationIssue,
+    *,
+    index: int,
+    is_blocking: bool,
+    show_message: bool = True,
+) -> None:
+    if show_message:
+        message = f"{'Needs attention' if is_blocking else 'Warning'} — {issue.reason}"
+        if is_blocking:
+            st.error(message, icon=":material/error:")
+        else:
+            st.warning(message, icon=":material/warning:")
     if issue.affected_item:
         st.caption(f"Affected file or order: {issue.affected_item}")
     if not issue.recovery_actions:
@@ -374,7 +390,7 @@ def _render_manual_review_resolution() -> None:
     for review in reviews:
         plan = resolution_plan(review)
         with st.container(border=True):
-            st.write(f"**{review.get('order_id') or 'Unknown order'}** — {review.get('reason') or 'Manual Review required.'}")
+            st.write(f"**{review.get('order_id') or 'Unknown order'}**")
             st.caption(f"Source: {review.get('source_pdf') or 'Unavailable'}")
             if plan is None:
                 st.info("This issue needs source evidence or Product Master resolution and cannot be force-resolved.")
@@ -432,12 +448,16 @@ def _render_missing_product_form(key: str) -> None:
 def _render_income_form(key: str, review: dict[str, Any]) -> None:
     payload = review.get("order_payload") or {}
     with st.form(f"income_resolution_{key}", border=False):
-        st.caption(f"Parser value: {payload.get('order_income') or 'Missing'}")
+        st.caption(f"Parser value: {payload.get('order_income') or 'Missing'}. Only enter values visible in the original Invoice source.")
+        source_confirmed = st.checkbox(
+            "I verified these values are visible in the original Invoice source",
+            key=f"mr_income_confirm_{key}",
+        )
         income = st.text_input("Order Income", key=f"mr_income_{key}")
         income_type = st.selectbox("Income Type", ("Estimated", "Final"), key=f"mr_income_type_{key}")
-        final_amount = st.text_input("Final Amount (only when shown in source)", key=f"mr_final_{key}")
+        final_amount = st.text_input("Final Amount (optional — only when visible in source)", key=f"mr_final_{key}")
         if st.form_submit_button("Apply & Revalidate", type="primary"):
-            _apply_manual_resolution(key, {"order_income": income, "income_type": income_type, "final_amount": final_amount})
+            _apply_manual_resolution(key, {"source_confirmed": source_confirmed, "order_income": income, "income_type": income_type, "final_amount": final_amount})
 
 def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")

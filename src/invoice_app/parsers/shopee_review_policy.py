@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+from typing import TYPE_CHECKING
 
 from .shopee_extractor import ShopeeExtractedData
 from .shopee_financial_parser import missing_income_detail_fields
@@ -15,10 +17,21 @@ from .validation import (
 )
 from ..review_reason_codes import (
     INCOMPLETE_PROMOTION_EVIDENCE,
-    INCOME_COMPLETION_ANCHOR_MISSING,
+    INCOME_DETAILS_REQUIRED_FIELD_MISSING,
+    INCOME_EXTRACTION_MISSING,
+    INCOME_SOURCE_INCOMPLETE,
     NO_VALID_PRODUCTS,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
     PRODUCT_COUNT_MISMATCH,
+)
+
+if TYPE_CHECKING:
+    from ..pdf_document import PdfDocument
+
+
+_SOURCE_PAGE_TOTAL = re.compile(
+    r"\bpage\s*(\d+)\s*(?:of|/)\s*(\d+)\b|^\s*(\d+)\s*/\s*(\d+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 @dataclass(frozen=True)
@@ -28,7 +41,11 @@ class ShopeeReviewIssue:
     reason_code: str | None = None
 
 
-def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | None:
+def find_shopee_review_issue(
+    data: ShopeeExtractedData,
+    *,
+    source_incomplete_evidence: str | None = None,
+) -> ShopeeReviewIssue | None:
     if data.is_courier_only:
         return ShopeeReviewIssue(
             order_id="N/A",
@@ -82,22 +99,34 @@ def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | N
     missing_income_fields = missing_income_detail_fields(data.normalized_text, data.income)
     if missing_income_fields:
         if "Estimated Order Income or Order Income" in missing_income_fields:
-            reason = "Income Completion Anchor Missing: Source Document Appears Incomplete."
+            if source_incomplete_evidence:
+                return ShopeeReviewIssue(
+                    order_id=data.order_id,
+                    reason=(
+                        "Income Completion Anchor Missing: Source Document Is Incomplete. "
+                        f"{source_incomplete_evidence} Please re-upload the complete order details PDF. "
+                        f"Missing: {', '.join(missing_income_fields)}."
+                    ),
+                    reason_code=INCOME_SOURCE_INCOMPLETE,
+                )
+            return ShopeeReviewIssue(
+                order_id=data.order_id,
+                reason=(
+                    "Income Completion Anchor Missing: Order Income was not extracted. "
+                    "Verify values visible in the original Invoice source before correcting them. "
+                    f"Missing: {', '.join(missing_income_fields)}."
+                ),
+                reason_code=INCOME_EXTRACTION_MISSING,
+            )
         else:
-            reason = "Source Document Appears Incomplete: full Income Details are not visible."
-        return ShopeeReviewIssue(
-            order_id=data.order_id,
-            reason=(
-                f"{reason} "
-                "Please re-upload the complete order details PDF. "
-                f"Missing: {', '.join(missing_income_fields)}."
-            ),
-            reason_code=(
-                INCOME_COMPLETION_ANCHOR_MISSING
-                if "Estimated Order Income or Order Income" in missing_income_fields
-                else None
-            ),
-        )
+            return ShopeeReviewIssue(
+                order_id=data.order_id,
+                reason=(
+                    "Income Details require source review before validation. "
+                    f"Missing: {', '.join(missing_income_fields)}."
+                ),
+                reason_code=INCOME_DETAILS_REQUIRED_FIELD_MISSING,
+            )
 
     product_amount_error = validate_shopee_product_amounts(
         product_items,
@@ -118,4 +147,24 @@ def find_shopee_review_issue(data: ShopeeExtractedData) -> ShopeeReviewIssue | N
     if financial_error:
         return ShopeeReviewIssue(order_id=data.order_id, reason=financial_error)
 
+    return None
+
+
+def source_incomplete_evidence(document: PdfDocument | None) -> str | None:
+    """Return explicit PDF pagination evidence only when pages are definitely absent."""
+    if document is None:
+        return None
+    physical_page_count = len(document.pages)
+    for page in document.pages:
+        for match in _SOURCE_PAGE_TOTAL.finditer(page.text):
+            current_page, total_pages = (
+                (match.group(1), match.group(2))
+                if match.group(1) is not None
+                else (match.group(3), match.group(4))
+            )
+            if int(total_pages) > physical_page_count:
+                return (
+                    f"Source pagination shows page {int(current_page)} of {int(total_pages)}, "
+                    f"but this PDF contains only {physical_page_count} page(s)."
+                )
     return None

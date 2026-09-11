@@ -3,14 +3,23 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import re
 from typing import Any
 
 from .batch_service import apply_batch_rules, is_manual_review_record
 from .product_price_master import PriceLookupStatus, ProductPriceMaster
-from ..parsers.validation import count_product_anchor_items, validate_product_items
-from ..utils.normalize import parse_quantity
+from ..parsers.shopee_mapper import resolve_shopee_payment_status
+from ..parsers.validation import (
+    count_product_anchor_items,
+    validate_product_items,
+    validate_shopee_financial_reconciliation,
+)
+from ..review_reason_codes import (
+    INCOME_COMPLETION_ANCHOR_MISSING,
+    INCOME_EXTRACTION_MISSING,
+)
 
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
 MISSING_INCOME = "MISSING_INCOME_INFORMATION"
@@ -38,9 +47,7 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
     if code == PRODUCT_COUNT_MISMATCH or reason.startswith("Product Count Mismatch:"):
         match = _EXPECTED_COUNT.search(reason)
         return ResolutionPlan(review_key(review), PRODUCT_COUNT_MISMATCH, int(match.group(1)) if match else None)
-    if "source document appears incomplete" not in reason.casefold() and (
-        "missing income information" in reason.casefold() or "order income" in reason.casefold()
-    ):
+    if code in {INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING}:
         return ResolutionPlan(review_key(review), MISSING_INCOME)
     return None
 
@@ -67,17 +74,32 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if plan.expected_products is not None and extracted != plan.expected_products:
             return ResolutionOutcome(False, f"Expected Products: {plan.expected_products}; Extracted Products: {extracted}.")
     else:
-        income = str(values.get("order_income") or "").strip()
+        if values.get("source_confirmed") is not True:
+            return ResolutionOutcome(
+                False,
+                "Confirm that these values are visible in the original Invoice source before applying them.",
+            )
+        income = _source_money(values.get("order_income"))
         income_type = str(values.get("income_type") or "").strip()
-        if not income or income_type not in {"Estimated", "Final"}:
+        final_amount = _source_money(values.get("final_amount"), optional=True)
+        if income is None or income_type not in {"Estimated", "Final"} or final_amount is None:
             return ResolutionOutcome(False, "Order Income and Income Type are required from the original Invoice source.")
         order["order_income"] = income
-        order["estimated_order_income"] = income
         order["income_type"] = income_type
-        if str(values.get("final_amount") or "").strip():
-            order["final_amount"] = str(values["final_amount"]).strip()
-        order["net_income"] = order.get("final_amount") or income
+        order["estimated_order_income"] = income if income_type == "Estimated" else "N/A"
+        if final_amount:
+            order["final_amount"] = final_amount
+        order["payment_status"] = resolve_shopee_payment_status(
+            order.get("fund_transfer_date"), income_type
+        )
+        order["net_income"] = final_amount or income
         order["net_amount"] = order["net_income"]
+        financial_error = validate_shopee_financial_reconciliation(
+            order,
+            order.get("refund_amount"),
+        )
+        if financial_error:
+            return ResolutionOutcome(False, financial_error)
     lookup_error = _validate_master(products, price_master)
     if lookup_error:
         return ResolutionOutcome(False, lookup_error)
@@ -105,3 +127,13 @@ def _validate_master(products: list[dict[str, Any]], master: ProductPriceMaster)
         if not lookup.nav_code:
             return "Resolved Product Master row has blank NAV CODE."
     return None
+
+
+def _source_money(value: Any, *, optional: bool = False) -> str | None:
+    text = str(value or "").replace(",", "").replace("RM", "").strip()
+    if not text:
+        return "" if optional else None
+    try:
+        return str(Decimal(text).quantize(Decimal("0.01")))
+    except InvalidOperation:
+        return None

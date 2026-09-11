@@ -7,11 +7,20 @@ from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract
 from src.invoice_app.parsers.shopee_financial_parser import parse_buyer_payment, parse_income_details
 from src.invoice_app.parsers.shopee_mapper import map_shopee_records, map_shopee_review_payloads
 from src.invoice_app.parsers.shopee_parser import ShopeeParser
-from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
+from src.invoice_app.parsers.shopee_review_policy import (
+    find_shopee_review_issue,
+    source_incomplete_evidence,
+)
 from src.invoice_app.parsers.validation import (
     extract_expected_product_count,
     validate_shopee_financial_reconciliation,
     validate_shopee_product_amounts,
+)
+from src.invoice_app.pdf_document import PdfDocument, PdfPage
+from src.invoice_app.review_reason_codes import (
+    INCOME_DETAILS_REQUIRED_FIELD_MISSING,
+    INCOME_EXTRACTION_MISSING,
+    INCOME_SOURCE_INCOMPLETE,
 )
 from src.invoice_app.services.batch_service import apply_batch_rules
 
@@ -340,7 +349,7 @@ def test_shopee_product_amount_tolerance_accepts_two_cents():
     assert find_shopee_review_issue(extracted) is None
 
 
-def test_shopee_missing_income_anchor_has_clear_manual_review_reason():
+def test_shopee_missing_income_anchor_is_extraction_missing_without_incomplete_source_evidence():
     text = VALID_SHOPEE_TEXT.replace("Estimated Order Income RM22.00", "")
     extracted = extract_shopee_data(text, "missing-income-anchor.pdf")
 
@@ -349,7 +358,37 @@ def test_shopee_missing_income_anchor_has_clear_manual_review_reason():
     assert extracted.income["order_income"] == "N/A"
     assert issue is not None
     assert issue.reason.startswith("Income Completion Anchor Missing:")
-    assert issue.reason_code == "INCOME_COMPLETION_ANCHOR_MISSING"
+    assert "Source Document Is Incomplete" not in issue.reason
+    assert issue.reason_code == INCOME_EXTRACTION_MISSING
+
+
+def test_shopee_page_total_gap_is_deterministic_source_incomplete_evidence():
+    text = VALID_SHOPEE_TEXT.replace("Estimated Order Income RM22.00", "")
+    document = PdfDocument(
+        text=f"{text}\nPage 1 of 2",
+        pages=(
+            PdfPage(
+                number=1,
+                width=100,
+                height=100,
+                text=f"{text}\nPage 1 of 2",
+                words=(),
+            ),
+        ),
+    )
+
+    evidence = source_incomplete_evidence(document)
+    orders, products, reviews = ShopeeParser().parse_document(
+        document,
+        "missing-page.pdf",
+        "batch-incomplete",
+    )
+
+    assert evidence == "Source pagination shows page 1 of 2, but this PDF contains only 1 page(s)."
+    assert orders == []
+    assert products == []
+    assert reviews[0]["reason_code"] == INCOME_SOURCE_INCOMPLETE
+    assert "re-upload" in reviews[0]["reason"]
 
 
 def test_shopee_missing_ads_escrow_fee_stays_missing_but_is_not_incomplete():
@@ -369,8 +408,9 @@ def test_shopee_na_required_financial_value_is_not_treated_as_zero():
     assert validate_shopee_financial_reconciliation(extracted.income) is None
     issue = find_shopee_review_issue(extracted)
     assert issue is not None
-    assert issue.reason.startswith("Source Document Appears Incomplete:")
+    assert issue.reason.startswith("Income Details require source review")
     assert "Product Price" in issue.reason
+    assert issue.reason_code == INCOME_DETAILS_REQUIRED_FIELD_MISSING
 
 
 def test_shopee_mapping_layer_applies_current_record_contract():

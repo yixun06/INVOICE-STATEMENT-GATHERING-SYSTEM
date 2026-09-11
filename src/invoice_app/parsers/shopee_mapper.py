@@ -37,24 +37,10 @@ def map_shopee_review_payloads(
     data: ShopeeExtractedData,
     batch_id: str,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """Package already-extracted source values without deriving missing amounts."""
-    delivery_fee = _financial_value(data.income, "shipping_fee_paid_by_buyer")
-    income_type = _financial_value(data.income, "income_type")
-    order_payload = None
-    if data.order_id:
-        order_payload = {
-            "batch_id": batch_id,
-            "platform": SHOPEE_PLATFORM,
-            "order_id": data.order_id,
-            "delivery_fee": delivery_fee,
-            "shipping_fee_paid_by_buyer": delivery_fee,
-            "fund_transfer_date": data.fund_transfer_date,
-            "refund_amount": _source_money(data.refund_amount),
-            "income_type": income_type,
-            "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
-            "source_pdf": data.source_pdf,
-            "status": "Manual Review",
-        }
+    """Package extracted order facts so a safe correction can revalidate them."""
+    order_payload = map_shopee_order(data, batch_id) if data.order_id else None
+    if order_payload is not None:
+        order_payload["status"] = "Manual Review"
     return order_payload, map_shopee_products(
         data,
         batch_id,

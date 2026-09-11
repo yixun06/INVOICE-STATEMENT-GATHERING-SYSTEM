@@ -193,7 +193,8 @@ def test_shopee_truncated_income_details_goes_to_manual_review():
     assert reviews[0]["order_id"] == "SHP123"
     assert reviews[0]["reason"].startswith("Income Completion Anchor Missing:")
     assert "Estimated Order Income or Order Income" in reviews[0]["reason"]
-    assert "re-upload" in reviews[0]["reason"]
+    assert "Source Document Is Incomplete" not in reviews[0]["reason"]
+    assert reviews[0]["reason_code"] == "INCOME_EXTRACTION_MISSING"
     assert reviews[0]["order_payload"]["delivery_fee"] == "N/A"
     assert reviews[0]["order_payload"]["status"] == "Manual Review"
     assert len(reviews[0]["product_payloads"]) == 1
