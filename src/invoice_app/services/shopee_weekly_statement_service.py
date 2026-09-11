@@ -37,6 +37,7 @@ class StatementReference:
     file_hash: str
     statement_period_from: date
     statement_period_to: date
+    commit_status: str = "COMMITTED"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,8 @@ class OrderReconciliation:
     released_amount: Decimal
     order_income: Decimal | None
     difference: Decimal | None
+    comparison_source: str | None = None
+    comparison_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -122,10 +125,16 @@ def stage_parsed_shopee_weekly_statement(
     duplicate_status = None
     review_reasons: list[str] = []
     references = tuple(existing_statements)
-    if any(_reference_value(item, "file_hash") == statement.file_hash for item in references):
-        duplicate_status = "Exact Duplicate"
-    elif any(_same_period(statement, item) for item in references):
-        duplicate_status = "Same Period Different File"
+    committed_references = tuple(
+        item for item in references
+        if _reference_value(item, "commit_status") in (None, "COMMITTED")
+    )
+    if any(_reference_value(item, "file_hash") == statement.file_hash for item in committed_references):
+        duplicate_status = "ALREADY_IMPORTED"
+        result = NEEDS_REVIEW
+        review_reasons.append("This Statement file hash is already committed.")
+    elif any(_same_period(statement, item) for item in committed_references):
+        duplicate_status = "POSSIBLE_REVISION"
         result = NEEDS_REVIEW
         review_reasons.append(
             "A different file already exists for the same Payout Completed Date period."
@@ -136,6 +145,12 @@ def stage_parsed_shopee_weekly_statement(
     if not validation_issues:
         order_reconciliations = reconcile_statement_orders(statement, orders)
         adjustment_reconciliations = reconcile_statement_adjustments(statement, orders)
+        unmatched = [item.order_id for item in order_reconciliations if item.status == "Unmatched Order"]
+        if unmatched:
+            result = NEEDS_REVIEW
+            review_reasons.append(
+                "Statement target Order ID coverage is incomplete: " + ", ".join(unmatched[:5])
+            )
 
     return StagedShopeeWeeklyStatement(
         result=result,
@@ -324,35 +339,39 @@ def reconcile_statement_orders(
         if row.total_released_amount is None:
             continue
         candidates = existing_by_order.get(row.order_id, [])
-        final_candidates = [
-            item for item in candidates
-            if str(item.get("income_type") or "").strip().casefold() == "final"
-        ]
-        if final_candidates:
-            order_income = _to_decimal(final_candidates[0].get("order_income"))
-            difference = (
-                row.total_released_amount - order_income
-                if order_income is not None else None
-            )
-            status = (
-                "Matched"
-                if difference is not None and abs(difference) <= MONEY_TOLERANCE
-                else "Different"
-            )
-        elif candidates:
-            estimated_candidates = [
-                item for item in candidates
-                if str(item.get("income_type") or "").strip().casefold() == "estimated"
-            ]
-            selected = estimated_candidates[0] if estimated_candidates else candidates[0]
+        if candidates:
+            selected = candidates[0]
+            final_amount = _to_decimal(selected.get("final_amount"))
             order_income = _to_decimal(selected.get("order_income"))
-            difference = (
-                row.total_released_amount - order_income
-                if order_income is not None else None
-            )
-            status = "Estimated Only"
+            if final_amount is not None:
+                comparison_source = "Final Amount"
+                comparison_amount = final_amount
+                difference = row.total_released_amount - comparison_amount
+                status = (
+                    "Matched"
+                    if abs(difference) <= MONEY_TOLERANCE
+                    else "Different"
+                )
+            elif order_income is not None:
+                comparison_source = "Order Income"
+                comparison_amount = order_income
+                difference = row.total_released_amount - comparison_amount
+                status = (
+                    "Estimated Only"
+                    if str(selected.get("income_type") or "").strip().casefold() == "estimated"
+                    else "Matched"
+                    if abs(difference) <= MONEY_TOLERANCE
+                    else "Different"
+                )
+            else:
+                comparison_source = None
+                comparison_amount = None
+                difference = None
+                status = "Unmatched Order"
         else:
             order_income = None
+            comparison_source = None
+            comparison_amount = None
             difference = None
             status = "Unmatched Order"
         reconciliations.append(OrderReconciliation(
@@ -361,6 +380,8 @@ def reconcile_statement_orders(
             released_amount=row.total_released_amount,
             order_income=order_income,
             difference=difference,
+            comparison_source=comparison_source,
+            comparison_amount=comparison_amount,
         ))
     return tuple(reconciliations)
 

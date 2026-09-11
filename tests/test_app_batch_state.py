@@ -909,9 +909,13 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
     assert app.exception == []
     assert "Data Import" in {title.value for title in app.title}
     assert "Step 1 of 5 — Select Source" in {element.text for element in app.get("progress")}
-    source_type = next(radio for radio in app.radio if radio.label == "Data type")
-    assert source_type.options == ["Platform Orders", "Shopee Weekly Statement"]
-    source_type.set_value("Shopee Weekly Statement").run(timeout=20)
+    source_type = next(
+        control
+        for control in app.get("button_group")
+        if control.label == "Import workflow"
+    )
+    assert source_type.options == ["Invoice Import", "Statement Import"]
+    source_type.set_value("Statement Import").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
 
     assert app.exception == []
@@ -936,7 +940,10 @@ def test_data_import_prevents_second_source_for_an_active_batch(tmp_path, monkey
 
     assert app.exception == []
     assert "Continue current batch" in {element.value for element in app.subheader}
-    assert not any(radio.label == "Data type" for radio in app.radio)
+    assert not any(
+        control.label == "Import workflow"
+        for control in app.get("button_group")
+    )
     assert {"Continue", "Discard current batch"} <= {
         button.label for button in app.button
     }

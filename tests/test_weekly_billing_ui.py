@@ -39,9 +39,10 @@ def test_weekly_billing_is_the_single_uat2_sidebar_page_and_existing_pages_remai
     assert tuple(tab.label for tab in app.tabs) == WEEKLY_BILLING_TABS
     labels = {button.label for button in app.button}
     assert {
-        "Data Import", "Dashboard", "Settlement Test Lab", WEEKLY_BILLING_PAGE,
+        "Data Import", "Dashboard", WEEKLY_BILLING_PAGE,
         "Go to Data Import",
     } <= labels
+    assert "Settlement Test Lab" not in labels
     assert app.session_state.filtered_state["batch_id"] == "active-batch"
     assert app.session_state.filtered_state["orders"] == [
         {"platform": "Shopee", "order_id": "SHP-1", "status": "Accepted"}

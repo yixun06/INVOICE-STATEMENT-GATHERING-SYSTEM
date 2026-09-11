@@ -49,6 +49,7 @@ class CanonicalInvoiceOrder:
     total_buyer_payment: Decimal | None = None
     payment_status: str | None = None
     payout_completed_date: date | None = None
+    difference: Decimal | None = None
     source_pdf: str | None = None
     source_hash: str | None = None
     source_fingerprint: str | None = None

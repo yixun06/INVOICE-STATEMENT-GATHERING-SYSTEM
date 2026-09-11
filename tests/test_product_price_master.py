@@ -148,6 +148,15 @@ def test_sku_is_preserved_as_string_when_loaded(tmp_path):
     assert result.unit_selling_price == Decimal("9.90")
 
 
+def test_product_id_is_preserved_for_statement_family_filtering(tmp_path):
+    path = tmp_path / "synthetic_product_id.xlsx"
+    _write_listing(path, seller_sku="SKU-1", price="9.90")
+
+    master = load_shopee_product_price_master(path)
+
+    assert master.records[0].product_id == "SYNTHETIC-PRODUCT"
+
+
 def test_loader_ignores_malformed_price_safely(tmp_path):
     path = tmp_path / "synthetic_malformed_price.xlsx"
     _write_listing(path, seller_sku="SKU-1", price="not a price")

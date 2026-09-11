@@ -40,6 +40,7 @@ class ProductPriceMasterRecord:
     unit_selling_price: Decimal
     source_row: int
     nav_code: str | None = None
+    product_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ _REQUIRED_HEADERS = {
     "unit_selling_price": "price",
 }
 _NAV_HEADER = "nav code"
+_PRODUCT_ID_HEADER = "product id"
 _STRICT_PRICE = re.compile(
     r"^(?:RM\s*)?(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)$",
     re.IGNORECASE,
@@ -136,6 +138,7 @@ class ProductPriceMaster:
                         unit_selling_price=price,
                         source_row=row_number,
                         nav_code=_optional_nav(values.get("nav_code")),
+                        product_id=_display_text(values.get("product_id")) or None,
                     )
                 )
 
@@ -179,9 +182,10 @@ class ProductPriceMaster:
                     parent_sku=parent_sku,
                     product_name=_display_text(row.get("product_name")),
                     variation_name=_display_text(row.get("variation_name")),
-                        unit_selling_price=price,
-                        source_row=source_row,
-                        nav_code=_optional_nav(row.get("nav_code")),
+                    unit_selling_price=price,
+                    source_row=source_row,
+                    nav_code=_optional_nav(row.get("nav_code")),
+                    product_id=_display_text(row.get("product_id")) or None,
                 )
             )
         return cls(
@@ -473,6 +477,8 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
             }
             if _NAV_HEADER in headers:
                 columns["nav_code"] = headers[_NAV_HEADER]
+            if _PRODUCT_ID_HEADER in headers:
+                columns["product_id"] = headers[_PRODUCT_ID_HEADER]
             return row_number, columns
         if row_number >= 50:
             break

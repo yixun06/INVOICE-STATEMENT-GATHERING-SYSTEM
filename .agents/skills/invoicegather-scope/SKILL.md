@@ -133,7 +133,7 @@ fees_charges_total,
 order_income, income_type, final_amount, refund_amount,
 buyer_merchandise_subtotal, buyer_shipping_fee, shopee_voucher, seller_voucher,
 total_buyer_payment,
-payment_status, payout_completed_date,
+payment_status, payout_completed_date, difference,
 source_pdf, source_hash, source_fingerprint, first_imported_at
 ```
 
@@ -186,24 +186,544 @@ order income, income type, final amount, and signed refund amount; and Seller
 SKU, Product Name, Variation, Quantity, actual selling unit price, line
 subtotal, and promotion source metadata.
 
-## STEP 2 — Weekly Statement Import — Future phase, document only
+## STEP 2 — Shopee Weekly Statement Locked Scope v1 — Confirmed / Locked
 
-Future workflow:
+This section records the locked target scope for the future Statement
+implementation. It does not authorize implementation in the current
+documentation task. Where it conflicts with older Statement reconciliation
+wording retained later in this file, this section is authoritative.
+
+The following correction is authoritative over earlier drafts of this locked
+scope:
+
+1. Statement commit requires 100% Statement target Order ID coverage in the
+   committed Invoice database. Even one `UNMATCHED_ORDER` blocks the whole
+   Statement batch commit.
+2. Do not omit the amount comparison merely because Invoice `final_amount` is
+   missing. Use Invoice `order_income` as the confirmed fallback described
+   below and retain the `ESTIMATED_ONLY` outcome.
+3. Use the single `Statement_Data` persistence tab defined below instead of
+   the older multi-tab Statement persistence direction.
+4. Required Statement SKU matching is part of whole-batch readiness. The older
+   direction that product-level settlement ambiguity must not block the
+   order-level Statement commit is superseded.
+
+### Statement source — Confirmed / Locked
+
+- Current Statement scope is Shopee only.
+- Input is the native Shopee XLSX export.
+- Users must not be required to repair or Save As the workbook first.
+- If worksheet dimension metadata is wrong, the parser must eventually inspect
+  actual populated cells using the established deterministic compatibility
+  approach.
+- The original uploaded Statement file must never be modified.
+- A Shopee Statement PDF parser is out of scope.
+
+### Statement import batch and audit boundary — Confirmed / Locked
+
+One uploaded Shopee Weekly Statement XLSX represents one Settlement / Statement
+Import Batch. Preserve source and audit metadata equivalent to:
 
 ```text
-Upload Weekly Statement
-→ validate similar to Settlement Test Lab
-→ obtain Statement target Order IDs
-→ compare with committed Invoice database
-→ require 100% Order ID coverage
-→ commit only when required checks pass
+Platform
+Statement Period From
+Statement Period To
+Original Filename
+File Hash
+Uploaded At
+Uploaded By
+Statement Order Count
+Statement SKU Count
+Total Released Amount
+Adjustment Total
+Validation Status
+Commit Status
 ```
 
-After successful Statement commit, Invoice Orders may receive
-`payout_completed_date` and `payment_status`; Invoice Items may receive
-`statement_product_price`, `statement_refund_amount`, and
-`statement_net_selling_amount`. Statement source data must also be persisted
-separately. Exact Statement database schema is deferred.
+Persist future Statement records in one Google Sheets tab named
+`Statement_Data`. Do not split Statement persistence across multiple tabs.
+Each persisted row uses one of these record types:
+
+```text
+ORDER
+SKU
+ADJUSTMENT
+```
+
+Persist only Statement data relevant to Invoice reconciliation, Invoice
+enrichment, future Billing/Product Summary, and necessary auditability. The
+exact approved `Statement_Data` column list is locked below.
+
+Statement `file_hash` identifies the uploaded Statement file. Invoice
+`source_fingerprint` identifies material normalized Invoice source facts. They
+are separate concepts and must not be combined.
+
+### Statement_Data v1 schema — Approved / Locked
+
+`Statement_Data` has one exact 40-column order. It stores only successfully
+committed rows; failed, `NEEDS_REVIEW`, and otherwise uncommitted staging rows
+never enter this tab. Every committed `ORDER`, `SKU`, and `ADJUSTMENT` source
+row is preserved separately. `statement_batch_id + record_type + sequence_no`
+is the stable row identity.
+
+```text
+ 1. statement_batch_id
+ 2. record_type
+ 3. sequence_no
+ 4. platform
+ 5. statement_source_filename
+ 6. statement_file_hash
+ 7. statement_period_from
+ 8. statement_period_to
+ 9. statement_uploaded_at
+10. statement_uploaded_by
+11. statement_order_count
+12. statement_sku_count
+13. statement_summary_total_released
+14. statement_adjustment_control_total
+15. validation_status
+16. commit_status
+17. statement_source_row_number
+18. committed_at
+19. order_id
+20. linked_order_id
+21. order_creation_date
+22. payout_completed_date
+23. release_channel
+24. order_type
+25. total_released_amount
+26. statement_product_id
+27. statement_product_name
+28. statement_product_price
+29. statement_refund_amount
+30. statement_net_selling_amount
+31. adjustment_complete_date
+32. adjustment_type
+33. adjustment_reason
+34. adjustment_amount
+35. comparison_source
+36. comparison_amount
+37. difference
+38. reconciliation_status
+39. matched_item_index
+40. match_method
+```
+
+Committed rows use `validation_status = PASSED` and
+`commit_status = COMMITTED`. `comparison_source` is human-readable:
+`Final Amount` or `Order Income`. Committed ORDER-row
+`reconciliation_status` values are `MATCHED` or `DIFFERENT`.
+
+`match_method` is business-readable and uses the actual applicable method:
+`Product Master SKU`, `Product Master Parent SKU`, `Product Name`,
+`Product Name + Price`, or `Verified Name Repair`.
+
+### UAT2 Statement schema migration contract — Approved / Locked
+
+The real UAT2 Google Sheet was migrated externally and now has the exact target
+40-column `Invoice_Orders`, unchanged 19-column `Invoice_Items`, and exact
+40-column `Statement_Data` schemas. The one-time migrator remains available for
+already-completed-state recognition only. Do not execute it, add
+`Statement_Data` again, or insert `difference` again.
+
+The legacy `Invoice_Orders` header is the exact approved Invoice header before
+`difference`; the target is the exact current canonical 40-column header with
+nullable signed `difference` at zero-based index `35` / column `AJ`, after
+`payout_completed_date` and before `source_pdf`. Blank `difference` means not
+yet Statement-enriched and never means zero. It is excluded from
+`source_fingerprint`.
+
+The one-time migration must recognize only these exact states:
+
+```text
+legacy 39-column Invoice_Orders + exact Invoice_Items + Statement_Data absent
+→ eligible for migration
+
+target 40-column Invoice_Orders + exact Invoice_Items + exact 40-column Statement_Data
+→ already migrated; do not repeat a write
+
+any other/mixed header or Statement_Data state
+→ fail closed; zero write
+```
+
+Under the shared single-active-commit lock, migration must freshly read schema
+metadata/headers, preflight the exact legacy state, build one
+`spreadsheets.batchUpdate`, and freshly verify the exact target state. Its
+single batch must: add `Statement_Data` using an explicitly unused sheet ID;
+write its approved `A1:AN1` header; insert one `Invoice_Orders` column at
+zero-based index `35`; and write `difference` at `AJ1`. It must not clear,
+reset, recreate, or rewrite existing Invoice rows or change `Invoice_Items`.
+
+If the API/network result is uncertain, reread the final deterministic schema.
+If it confirms the target schema, report completion; otherwise stop and do not
+blindly repeat the migration.
+
+### Concrete Google Sheets Statement writer — Approved / Locked
+
+The concrete Statement writer must fresh-read `Invoice_Orders`,
+`Invoice_Items`, and committed `Statement_Data` history inside the existing
+shared application commit lock. Resolve every Order target uniquely by exact
+`(Platform, Order ID)` and every Item target by exact
+`(Platform, Order ID, item_index)`. Missing or duplicate persisted targets,
+unexpected headers, or an unbuildable request are zero-write failures.
+
+Determine the `Statement_Data` append start after the last populated row in
+that fresh snapshot. Preserve every approved ORDER, SKU, and ADJUSTMENT row.
+Submit one `spreadsheets.batchUpdate` containing the complete Statement append,
+Invoice Order enrichment, and only eligible Invoice Item enrichment. Repeated
+Statement SKU rows that resolve to one Item remain separate Statement rows and
+produce no Item enrichment update.
+
+Committed `Statement_Data` is historical duplicate authority. The same
+committed file hash is `ALREADY_IMPORTED`; the same committed period with a
+different file is `POSSIBLE_REVISION`; both are zero write.
+
+After a successful or uncertain API response, freshly read back deterministic
+Statement row identities and expected Invoice enrichments. All expected
+changes present means success; none means safely not applied and requires a
+fresh commit attempt; mixed or unverifiable state requires manual integrity
+recovery. Never retry automatically or claim database rollback semantics.
+
+### Confirmed Statement enrichment rules
+
+After a successful Statement commit, update the matched Invoice Order with its
+committed `payout_completed_date`, `payment_status = RELEASED`, and signed
+`difference`. If its existing `income_type` is `Estimated`, update it to
+`Final`; an existing `Final` remains `Final`. This income-type update is not
+controlled by `comparison_source`, which only records whether `final_amount`
+or `order_income` was the reconciliation comparison amount.
+
+For exactly one deterministically matched Statement SKU row, update the
+existing Invoice Item fields:
+
+```text
+statement_product_price
+statement_refund_amount
+statement_net_selling_amount = statement_product_price + signed statement_refund_amount
+```
+
+If multiple committed Statement SKU rows deterministically match the same
+Invoice Item, preserve every `Statement_Data` row but do not sum, first/last
+select, overwrite, or otherwise enrich those three Invoice Item fields until
+aggregation semantics are separately approved. Duplicate consumption alone is
+not `NEEDS_REVIEW`.
+
+### Fixed Statement workflow — Confirmed / Locked
+
+```text
+Upload XLSX
+→ Parse into staging
+→ Internal Statement Validation
+→ Order Reconciliation
+→ Admin Review
+→ Ready to Commit
+→ Atomic Commit
+```
+
+Internal Statement integrity validation and Invoice reconciliation are
+separate concerns.
+
+### Internal Statement validation — Confirmed / Locked
+
+Internal Statement validation is commit-blocking. It covers the integrity of
+the Statement itself, including applicable controls for:
+
+- required sheets and required columns;
+- a valid Statement period;
+- Summary Total Released against Order View released totals;
+- order-level component totals;
+- SKU totals against Order View totals;
+- service-fee controls;
+- adjustment controls; and
+- conflicting duplicate authoritative Order View records.
+
+Financial comparison tolerance is RM0.02. If internal Statement integrity
+fails, the outcome is `VALIDATION_FAILED` and the Statement batch must not
+commit. Do not add validation formulas without a separately confirmed rule.
+
+### Reconciliation identity and comparison amount — Confirmed / Locked
+
+Primary reconciliation identity is `(Platform, Order ID)`; in the current
+scope this is `(Shopee, Order ID)`. The Statement supplies the released amount.
+
+Choose the Invoice comparison amount in this order:
+
+```text
+Invoice final_amount exists
+→ comparison_amount = final_amount
+
+Invoice final_amount is empty
+→ comparison_amount = order_income
+```
+
+The user plans to backfill missing `final_amount` values later. Once available,
+`final_amount` automatically takes priority. Do not use the removed Shopee PDF
+`released_amount` field as a fallback. It remains removed from Invoice parser
+and Invoice export scope; Statement released amount is separate Statement
+reconciliation evidence.
+
+Normal Shopee Invoice parsing/validation must not allow both `final_amount` and
+`order_income` to be blank on a persistable Invoice. This task does not
+authorize redesigning that parser/validation. Future Statement processing must
+nevertheless fail closed against corrupted or legacy persisted data: if both
+values are blank, do not invent an amount and do not compare the Statement
+released amount to itself. Block the whole Statement commit and require review.
+
+### Difference and core reconciliation results — Confirmed / Locked
+
+```text
+difference = Statement released amount - comparison_amount
+```
+
+Preserve the sign:
+
+```text
+abs(difference) <= RM0.02 → MATCHED
+abs(difference) >  RM0.02 → DIFFERENT
+```
+
+The signed `difference` must eventually be persisted in both:
+
+```text
+Statement_Data
+Invoice_Orders
+```
+
+Locked core outcomes are:
+
+```text
+MATCHED
+DIFFERENT
+ESTIMATED_ONLY
+UNMATCHED_ORDER
+```
+
+- `MATCHED`: the InvoiceGather order exists and the released amount matches the
+  Invoice `final_amount` within RM0.02.
+- `DIFFERENT`: the order exists but the absolute difference exceeds RM0.02.
+- `ESTIMATED_ONLY`: the order exists but Invoice `final_amount` is absent, so
+  reconciliation uses Invoice `order_income`. Preserve the signed difference.
+  This outcome is allowed for commit; after a successful Statement commit,
+  update that Invoice order's `income_type` to `Final`.
+- `UNMATCHED_ORDER`: the Statement Order ID currently has no matching
+  InvoiceGather order.
+
+`MATCHED`, `DIFFERENT`, and `ESTIMATED_ONLY` are allowed reconciliation results.
+`DIFFERENT` is not a commit blocker. Its signed difference is evidence only and
+must not by itself be labelled as confirmed underpayment.
+
+`UNMATCHED_ORDER` is commit-blocking. If even one Statement target Order ID is
+missing from the committed Invoice database, block the whole Statement batch
+commit. Do not partially commit the matched subset.
+
+### Payment status terminology — Confirmed / Locked
+
+Successful Statement evidence uses:
+
+```text
+payment_status = RELEASED
+```
+
+Use `RELEASED`, not `PAID`. It means Shopee has released the payout according
+to Statement evidence. It does not prove bank receipt or bank reconciliation.
+A released payout may still have `reconciliation_status = DIFFERENT` and a
+positive or negative difference. `DIFFERENT` must not change `RELEASED` into
+`UNPAID`.
+
+### Adjustments — Confirmed / Locked
+
+Preserve Statement adjustment records. If an adjustment cannot currently be
+matched to an Invoice/order, preserve its evidence, flag the reconciliation
+issue, and do not discard it or block the whole Statement commit solely for
+being unmatched.
+
+### Historical duplicate and revision policy — Confirmed / Locked
+
+Historical duplicate checks apply only to committed Statement batches:
+
+```text
+same committed Statement file hash
+→ ALREADY_IMPORTED
+→ cannot commit again
+
+same committed Statement period but different file
+→ POSSIBLE_REVISION
+→ block automatic commit
+→ require later explicit revision/replacement handling
+```
+
+A Statement that existed only in staging, validation, or failed review and was
+never committed is not a historical committed duplicate. The user may correct
+the XLSX and upload it again normally. Automatic replacement/versioning remains
+unresolved and must not be invented.
+
+### Atomic Statement commit — Confirmed / Locked
+
+One Statement Import Batch commits all source records or none. Partial
+successful-row commit is not permitted.
+
+The following reconciliation results are not commit blockers by themselves:
+
+```text
+DIFFERENT
+ESTIMATED_ONLY
+unmatched adjustment
+```
+
+Commit-blocking categories include internal Statement validation failure,
+database integrity failure, any `UNMATCHED_ORDER`, `ALREADY_IMPORTED`, and
+`POSSIBLE_REVISION`.
+
+Immediately before commit, freshly reload authoritative persisted state and
+recheck at minimum that:
+
+- 100% Statement target Order ID coverage still holds;
+- no committed duplicate/revision conflict appeared;
+- Invoice comparison source values used during reconciliation have not changed;
+  and
+- the reviewed batch remains valid against current persisted state.
+
+If relevant state changed after Review, perform zero writes, require fresh
+Reconcile / Review, and do not reuse stale review results for persistence. This
+fail-closed behavior is locked and must run inside the shared application
+commit lock defined below.
+
+Revised Statement replacement/versioning behavior remains deferred; do not
+invent automatic overwrite or supersession.
+
+### Google Sheets UAT2 single active commit — Confirmed / Locked
+
+The current UAT deployment is one InvoiceGather application instance with one
+shared-memory process. Google Sheets remains the persistence target, and
+InvoiceGather is the only supported formal writer. Multiple users/sessions may
+Upload, Parse, Validate, Reconcile, and Review concurrently because those
+operations do not mutate authoritative storage. At most one authoritative
+Commit may run at a time.
+
+Every authoritative InvoiceGather commit/write path must acquire the shared
+application commit lock before fresh preflight. A Statement commit must:
+
+```text
+acquire shared application commit lock
+→ freshly reload authoritative persisted state
+→ revalidate
+→ build the complete write plan
+→ perform the Statement_Data + Invoice_Orders + Invoice_Items write
+→ resolve the final write outcome
+→ release the lock
+```
+
+A second Commit must be rejected/disabled without writing, with a clear message
+such as `Another commit is currently in progress. Please try again shortly.`
+The lock must remain held from before the fresh reload until preflight failure,
+successful write, or write-error outcome handling has completed. Direct Sheet
+edits during an app commit are outside the supported concurrency model.
+
+Concurrency exclusion and cross-tab write atomicity are separate requirements:
+the process-local lock serializes supported commits in this one application
+instance, while one `spreadsheets.batchUpdate` must independently cover the
+approved Statement_Data inserts, Invoice_Orders updates, and Invoice_Items
+updates. Preserve deterministic `statement_batch_id` / stable-row-identity
+readback for uncertain network/API outcomes; do not claim database rollback
+semantics.
+
+This process-local lock is intentionally insufficient for multi-instance,
+multi-worker-without-shared-memory, or multiple-independent-process deployment.
+If UAT is ever deployed that way, replace it with a genuine distributed
+lock/lease or a transactional database such as PostgreSQL. Do not introduce
+that future mechanism in the current single-instance deployment.
+
+### Statement SKU to Invoice Item matching — Confirmed / Locked direction
+
+Statement product enrichment requires deterministic matching. Statement
+`Product ID` must not be the primary join key because `Invoice_Items` currently
+has no Product ID field. Do not add Product ID to `Invoice_Items` merely to
+solve this matching problem without separate approval.
+
+Product Name comparison may use normalized exact equality only. Allowed
+normalization is limited to leading/trailing whitespace trimming, repeated
+internal whitespace collapse, case-insensitive comparison, and deterministic
+Unicode/text normalization. Do not use fuzzy similarity, contains matching,
+closest-match selection, AI/LLM guessing, first-row fallback, or min/max
+heuristics.
+
+Use this matching hierarchy:
+
+1. Exact Order ID scopes candidate `Invoice_Items`.
+2. Within that Order ID, normalized exact Product Name narrows candidates.
+3. If exactly one safe candidate remains, matching may proceed subject to
+   consistency validation.
+4. If multiple items still share that normalized Product Name, use
+   deterministic financial/quantity evidence only after the relevant Statement
+   amount semantics are proven from multiple real samples. Potential Invoice
+   evidence includes `line_subtotal`, `quantity`,
+   `actual_selling_unit_price`, and
+   `quantity × actual_selling_unit_price`; do not yet assume which Statement
+   field equals which Invoice field.
+5. Match only when exactly one Invoice Item can be proven.
+
+### Repeated Statement SKU rows — Confirmed / Locked
+
+Multiple Statement SKU rows may resolve to the same `Invoice_Item`. Duplicate
+`(Order ID, Invoice item_index)` consumption is not by itself an error and
+must not automatically become `NEEDS_REVIEW`.
+
+Each Statement SKU row must still independently satisfy the deterministic
+matching contract above. Do not introduce automatic aggregation or merging
+semantics for repeated rows. Repeated Statement rows are a valid observed
+real-data pattern, but their exact settlement semantics remain unresolved.
+
+If any required Statement SKU row cannot be safely and uniquely matched, mark
+the batch `NEEDS_REVIEW` and block the whole Statement commit. Do not partially
+enrich a matched subset while silently skipping ambiguous rows. If the prior
+version was never committed, the user may correct the source XLSX product data
+and re-upload it under the historical duplicate policy above.
+
+### Invoice source fingerprint boundary — Confirmed / Locked
+
+Preserve the existing Invoice `source_fingerprint` contract. It is calculated
+from Invoice source business facts and must not include later enrichment or
+reconciliation values such as:
+
+- `payment_status`;
+- Statement released amount;
+- the former derived/persistence-only `actual_selling_value`;
+- Product Master lookup output;
+- pricing status; or
+- promotion allocation results.
+
+A Statement import or Product Master update must not make an unchanged Invoice
+look like a changed source Invoice. The Shopee Invoice source
+`actual_selling_unit_price` remains a material Invoice fact under the existing
+fingerprint rule; it is distinct from the excluded derived
+`actual_selling_value`.
+
+After a successful future Statement commit, Invoice Orders may receive
+`payout_completed_date` and operational `payment_status`; Invoice Items may
+receive `statement_product_price`, `statement_refund_amount`, and
+`statement_net_selling_amount`. Original Invoice source facts remain
+auditable and must not be silently replaced. Statement source data must also be
+persisted separately.
+
+### Deferred / Out of current Statement scope
+
+The following are explicitly deferred or out of scope:
+
+- bank reconciliation and actual bank receipt confirmation;
+- a `PAID` / `UNPAID` / `PARTIAL` bank-payment model;
+- automatic confirmed-short-payment conclusions;
+- the final Potential Underpayment formula;
+- the exact Statement SKU amount-to-Invoice financial disambiguation rule,
+  pending real-sample evidence;
+- automatic revised-Statement replacement/versioning behavior;
+- Shopee Statement PDF parsing;
+- Lazada Statement and ZENXIN Statement support;
+- Product Master matching changes; and
+- promotion pricing/allocation changes.
+
+The system may preserve difference and reconciliation evidence, but it must not
+automatically conclude that Shopee underpaid a particular amount until a later
+business rule is explicitly designed and locked.
 
 ## STEP 3 — Billing / Product Summary — Future phase, document only
 
@@ -245,26 +765,25 @@ Billing Product Summary; Charges Summary; Live Analysis; manual database editor;
 Lazada/ZENXIN persistence expansion; a new Product Master pricing algorithm;
 or broad parser rewrites.
 
-The existing real UAT2 Google Sheet uses the older Invoice schema. Do not clear,
-reset, migrate, rewrite headers, backfill, or perform any real write. A one-time
-reset/re-import may happen only after implementation/tests pass and the user
-explicitly approves it.
+The existing real UAT2 Google Sheet uses the approved target Statement-capable
+schema. Do not clear, reset, rerun migration, rewrite headers, backfill, or
+perform any real write without separate explicit authorization.
 
 # UAT2 V2.3 Baseline — Superseded Historical Context
 
-## UAT2 purpose and precedence — Confirmed
+## UAT2 purpose and precedence — Superseded historical context
 
 UAT2 delivers **Statement-Driven Weekly Billing + Historical Invoice Source
 Tracking + Invoice ↔ Statement Verification**. One Shopee Weekly Statement
 period produces one consolidated billing dataset for the company's external
 invoicing/accounting software.
 
-This section is authoritative for UAT2. Preserve all non-conflicting guidance
-in the later sections, especially stable parser contracts, Product Master
-lookup, promotion pricing, safe Product Summary grouping, Weekly Statement
-parsing, Adjustment Complete Date period ownership, Git/data safety, and
-stop-and-ask behaviour. Where an older rule conflicts, this UAT2 section
-explicitly supersedes it.
+This section records the earlier UAT2 baseline. Preserve its non-conflicting
+guidance, especially stable parser contracts, Product Master lookup, promotion
+pricing, safe Product Summary grouping, Weekly Statement parsing, Adjustment
+Complete Date period ownership, Git/data safety, and stop-and-ask behaviour.
+The authoritative V2.4 section above, including the Shopee Weekly Statement
+Locked Scope v1, governs wherever the two conflict.
 
 UAT2 is limited to **Shopee Weekly Billing**. Lazada and ZENXIN parsers and
 weekly-billing behaviour are unchanged unless a later task explicitly expands
@@ -2223,6 +2742,43 @@ The Data Import workflow should clearly show progress/current state so an Admin 
 - what action is expected next.
 
 Exact visual styling/progress-component choice belongs to the UI task, not this long-term skill.
+
+### Current Data Import workflow split — Confirmed / Locked
+
+Keep one `Data Import` area with two clearly separated modes; do not create a
+standalone heavyweight Statement management page:
+
+```text
+Invoice Import
+→ PDF / ZIP upload
+→ Parse / Manual Review
+→ Validate current batch and historical Order IDs
+→ remove only unwanted current-batch candidates
+→ Review & Commit Invoice_Orders + Invoice_Items
+
+Statement Import
+→ Weekly Statement XLSX upload
+→ Parse
+→ Validate / Reconcile
+→ compact Order and SKU review
+→ guarded whole-batch Commit to Statement_Data + Invoice_Orders + eligible Invoice_Items
+```
+
+Statement Import reuses the existing parser/service, reconciliation, Product
+Matching Contract v1, persistence plan, concrete Google writer, and Single
+Active Commit boundary. The UI must not reproduce business rules, write Google
+Sheets directly, or treat Streamlit session state as authoritative.
+
+Statement readiness requires 100% target Order ID coverage and every required
+SKU row to match deterministically. `UNMATCHED_ORDER` and SKU `NEEDS_REVIEW`
+block the whole commit; `DIFFERENT` remains visible and non-blocking. A stale
+precommit result performs zero writes and returns the batch to fresh
+validation/review.
+
+Keep Statement presentation compact and import-focused: batch facts,
+validation/readiness status, Order reconciliation rows, and SKU matching rows.
+Billing remains a future committed-data query and Live Analysis remains a
+future database-backed report; neither belongs in Statement Import.
 
 ## 16.2 Validation Recovery UX — Confirmed principle, actions partly TODO
 

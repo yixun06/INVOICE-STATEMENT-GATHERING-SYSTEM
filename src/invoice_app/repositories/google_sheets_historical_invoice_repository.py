@@ -31,17 +31,23 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     _validate_chunk_size,
     source_fact_fingerprint,
 )
+from src.invoice_app.services.application_commit_lock import (
+    APPLICATION_COMMIT_LOCK,
+    ApplicationCommitLock,
+)
+from src.invoice_app.services.uat2_persistence_schema import (
+    INVOICE_ITEMS_HEADERS,
+    INVOICE_ITEMS_TAB,
+    INVOICE_ORDERS_HEADERS,
+    INVOICE_ORDERS_TAB,
+)
+from src.invoice_app.services.uat2_statement_schema_migration import (
+    SheetSchema,
+    SpreadsheetSchemaSnapshot,
+)
 
 
 GOOGLE_SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-INVOICE_ORDERS_TAB = "Invoice_Orders"
-INVOICE_ITEMS_TAB = "Invoice_Items"
-INVOICE_ORDERS_HEADERS = (
-    "platform", "order_id", "order_status", "order_created_date", "delivered_date", "completed_date", "fund_transfer_date", "merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_type", "voucher_code", "voucher_funded_by", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "income_type", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment", "payment_status", "payout_completed_date", "source_pdf", "source_hash", "source_fingerprint", "first_imported_at",
-)
-INVOICE_ITEMS_HEADERS = (
-    "platform", "order_id", "item_index", "seller_sku", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
-)
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -62,6 +68,20 @@ class GoogleSheetsHistoricalInvoiceGateway(Protocol):
         order_values: Sequence[Sequence[str]],
         item_values: Sequence[Sequence[str]],
     ) -> None: ...
+
+    def read_schema(self, spreadsheet_id: str) -> SpreadsheetSchemaSnapshot: ...
+
+    def apply_schema_migration(
+        self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
+    def batch_update(
+        self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
+    def read_sheet_ids(
+        self, spreadsheet_id: str, tabs: Sequence[str]
+    ) -> Mapping[str, int]: ...
 
 
 GoogleServiceAccountInfo = Mapping[str, Any]
@@ -117,26 +137,123 @@ class GoogleApiHistoricalInvoiceGateway:
         except Exception as error:
             raise HistoricalInvoiceStorageError("UAT2 Google Sheets bundle write failed; no overwrite was attempted.") from error
 
+    def read_schema(self, spreadsheet_id: str) -> SpreadsheetSchemaSnapshot:
+        """Freshly read sheet IDs and only row-one headers needed by migration."""
+        try:
+            response = self._service_client().spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets(properties(sheetId,title))",
+            ).execute()
+            properties = tuple(
+                sheet.get("properties")
+                for sheet in response.get("sheets") or ()
+                if isinstance(sheet, Mapping) and isinstance(sheet.get("properties"), Mapping)
+            )
+            titles = tuple(
+                value.get("title")
+                for value in properties
+                if isinstance(value.get("title"), str) and isinstance(value.get("sheetId"), int)
+            )
+            header_rows = self._read_header_rows(spreadsheet_id, titles)
+            return SpreadsheetSchemaSnapshot(
+                tabs={
+                    value["title"]: SheetSchema(
+                        sheet_id=value["sheetId"],
+                        headers=tuple(_text(cell) for cell in header_rows.get(value["title"], ())),
+                    )
+                    for value in properties
+                    if isinstance(value.get("title"), str) and isinstance(value.get("sheetId"), int)
+                }
+            )
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError("UAT2 Google Sheets schema read failed; no migration was attempted.") from error
+
+    def apply_schema_migration(
+        self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Submit the caller's prebuilt one-time schema migration batch exactly once."""
+        try:
+            self._service_client().spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": list(requests)}
+            ).execute()
+            self._sheet_ids_by_spreadsheet.pop(spreadsheet_id, None)
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "UAT2 Google Sheets schema migration request failed; verify the final schema before any retry."
+            ) from error
+
+    def batch_update(
+        self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Submit one preflighted authoritative business-write batch."""
+        try:
+            self._service_client().spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": list(requests)}
+            ).execute()
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "UAT2 Google Sheets business write failed; the outcome must be verified before any retry."
+            ) from error
+
+    def read_sheet_ids(
+        self, spreadsheet_id: str, tabs: Sequence[str]
+    ) -> Mapping[str, int]:
+        """Freshly resolve every requested tab to its immutable numeric sheet ID."""
+        try:
+            response = self._service_client().spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets(properties(sheetId,title))",
+            ).execute()
+            ids = {
+                properties.get("title"): properties.get("sheetId")
+                for sheet in response.get("sheets") or ()
+                if isinstance(sheet, Mapping)
+                and isinstance((properties := sheet.get("properties")), Mapping)
+            }
+            missing = [tab for tab in tabs if not isinstance(ids.get(tab), int)]
+            if missing:
+                raise HistoricalInvoiceStorageError(
+                    "UAT2 spreadsheet required tab is missing: " + ", ".join(missing)
+                )
+            return {tab: ids[tab] for tab in tabs}  # type: ignore[misc]
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "UAT2 Google Sheets sheet-ID read failed; no write was attempted."
+            ) from error
+
     def _sheet_ids(self, spreadsheet_id: str) -> Mapping[str, int]:
         cached = self._sheet_ids_by_spreadsheet.get(spreadsheet_id)
         if cached is not None:
             return cached
-        response = self._service_client().spreadsheets().get(
-            spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))"
+        resolved = self.read_sheet_ids(
+            spreadsheet_id, (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB)
+        )
+        self._sheet_ids_by_spreadsheet[spreadsheet_id] = resolved
+        return resolved
+
+    def _read_header_rows(
+        self, spreadsheet_id: str, titles: Sequence[str]
+    ) -> Mapping[str, Sequence[Any]]:
+        if not titles:
+            return {}
+        response = self._service_client().spreadsheets().values().batchGet(
+            spreadsheetId=spreadsheet_id,
+            ranges=[f"{title}!1:1" for title in titles],
+            valueRenderOption="FORMATTED_VALUE",
         ).execute()
-        sheets = response.get("sheets")
-        ids = {
-            properties.get("title"): properties.get("sheetId")
-            for sheet in sheets or ()
-            if isinstance(sheet, Mapping)
-            and isinstance((properties := sheet.get("properties")), Mapping)
-        }
-        missing = [tab for tab in (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB) if not isinstance(ids.get(tab), int)]
-        if missing:
-            raise HistoricalInvoiceStorageError("UAT2 spreadsheet required tab is missing: " + ", ".join(missing))
-        resolved = {tab: ids[tab] for tab in (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB)}
-        self._sheet_ids_by_spreadsheet[spreadsheet_id] = resolved  # type: ignore[assignment]
-        return resolved  # type: ignore[return-value]
+        value_ranges = response.get("valueRanges")
+        if not isinstance(value_ranges, list) or len(value_ranges) != len(titles):
+            raise HistoricalInvoiceStorageError("UAT2 Google Sheets schema response is missing header rows.")
+        headers: dict[str, Sequence[Any]] = {}
+        for title, value_range in zip(titles, value_ranges):
+            values = value_range.get("values") if isinstance(value_range, Mapping) else None
+            first_row = values[0] if isinstance(values, list) and values else ()
+            headers[title] = first_row if isinstance(first_row, list) else ()
+        return headers
 
     def _service_client(self) -> Any:
         if self._service is not None:
@@ -175,6 +292,7 @@ class GoogleSheetsHistoricalInvoiceRepository:
         spreadsheet_id: str,
         gateway: GoogleSheetsHistoricalInvoiceGateway,
         cache_ttl_seconds: float = 45.0,
+        commit_lock: ApplicationCommitLock = APPLICATION_COMMIT_LOCK,
     ) -> None:
         if not spreadsheet_id.strip():
             raise HistoricalInvoiceStorageError("UAT2 Google Sheets spreadsheet ID is missing.")
@@ -183,6 +301,7 @@ class GoogleSheetsHistoricalInvoiceRepository:
         self._spreadsheet_id = spreadsheet_id.strip()
         self._gateway = gateway
         self._cache_ttl_seconds = cache_ttl_seconds
+        self._commit_lock = commit_lock
         self._snapshot_cache: _Snapshot | None = None
 
     def refresh(self) -> None:
@@ -224,6 +343,11 @@ class GoogleSheetsHistoricalInvoiceRepository:
         return tuple(sorted(orders, key=lambda value: (value.platform, value.order_id)))
 
     def import_invoice(self, bundle: InvoiceBundle) -> ImportResult:
+        with self._commit_lock.acquire():
+            return self._import_invoice_under_commit_lock(bundle)
+
+    def _import_invoice_under_commit_lock(self, bundle: InvoiceBundle) -> ImportResult:
+        self.refresh()
         fingerprint = source_fact_fingerprint(bundle)
         identity = _identity(bundle.order.platform, bundle.order.order_id)
         existing = self._snapshot().bundles.get(identity)
@@ -264,6 +388,12 @@ class GoogleSheetsHistoricalInvoiceRepository:
 
     def import_invoices(
         self, bundles: Iterable[InvoiceBundle], *, chunk_size: int = 50
+    ) -> BulkImportResult:
+        with self._commit_lock.acquire():
+            return self._import_invoices_under_commit_lock(bundles, chunk_size=chunk_size)
+
+    def _import_invoices_under_commit_lock(
+        self, bundles: Iterable[InvoiceBundle], *, chunk_size: int
     ) -> BulkImportResult:
         candidates = _unique_bundles(bundles)
         _validate_chunk_size(chunk_size)
@@ -399,7 +529,7 @@ def _deserialize_order(row: Sequence[Any], row_number: int) -> CanonicalInvoiceO
     values = dict(zip(INVOICE_ORDERS_HEADERS, row))
     required = {"platform", "order_id"}
     dates = {"order_created_date", "delivered_date", "completed_date", "fund_transfer_date", "payout_completed_date"}
-    money = {"merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment"}
+    money = {"merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment", "difference"}
     parsed = {field: _required_text(values[field], field, INVOICE_ORDERS_TAB, row_number) if field in required else _date(values[field], INVOICE_ORDERS_TAB, row_number) if field in dates else _decimal(values[field], INVOICE_ORDERS_TAB, row_number) if field in money else _optional(values[field]) for field in INVOICE_ORDERS_HEADERS if field != "first_imported_at"}
     return CanonicalInvoiceOrder(**parsed, first_imported_at=_datetime(values["first_imported_at"], INVOICE_ORDERS_TAB, row_number))
 

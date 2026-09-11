@@ -25,6 +25,10 @@ from .import_result_contract import (
     ValidationResult,
 )
 from .shopee_weekly_statement_service import StagedShopeeWeeklyStatement
+from .shopee_statement_item_matching import (
+    StatementItemMatchBatch,
+    StatementItemMatchStatus,
+)
 
 
 PLATFORM_ORDERS = "Platform Orders"
@@ -170,6 +174,7 @@ def adapt_shopee_weekly_statement_import_result(
     stage: StagedShopeeWeeklyStatement | None,
     *,
     batch_id: str | None,
+    sku_matches: StatementItemMatchBatch | None = None,
 ) -> ImportResult:
     """Project weekly-statement staging output without changing its semantics."""
 
@@ -235,6 +240,25 @@ def adapt_shopee_weekly_statement_import_result(
                     status="Open",
                 )
             )
+    if sku_matches is not None:
+        for match in sku_matches.matches:
+            if match.status is StatementItemMatchStatus.NEEDS_REVIEW:
+                validation_blockers.append(
+                    ValidationIssue(
+                        layer="statement_sku_matching",
+                        severity="error",
+                        blocking=True,
+                        reason=match.reason,
+                        affected_item=f"{match.order_id} / source row {match.statement_source_row}",
+                        evidence={
+                            "order_id": match.order_id,
+                            "product_id": match.product_id,
+                            "product_name": match.product_name,
+                            "status": match.status.value,
+                        },
+                        suggested_action="Review the exact Product Master and Invoice item identity before committing.",
+                    )
+                )
     reconciliation_exceptions: list[ReconciliationException] = []
     reconciliation_summary: tuple[SummaryItem, ...] = ()
     reconciliation_available = bool(stage and statement)
@@ -268,12 +292,33 @@ def adapt_shopee_weekly_statement_import_result(
             SummaryItem("Unmatched Adjustments", sum(item.status == "Unmatched Adjustment" for item in adjustment_reconciliations)),
             SummaryItem("Shipping exceptions", len(shipping_exceptions)),
         )
+        if sku_matches is not None:
+            reconciliation_summary += (
+                SummaryItem(
+                    "SKU Matched",
+                    sum(
+                        match.status is StatementItemMatchStatus.MATCHED
+                        for match in sku_matches.matches
+                    ),
+                ),
+                SummaryItem(
+                    "SKU Needs Review",
+                    sum(
+                        match.status is StatementItemMatchStatus.NEEDS_REVIEW
+                        for match in sku_matches.matches
+                    ),
+                ),
+            )
 
     readiness_reasons: list[str] = []
     if not stage:
         readiness_reasons.append("No staged weekly statement is available.")
     elif not stage.eligible_for_future_atomic_commit:
         readiness_reasons.append("The staged statement is not eligible for future atomic commit.")
+    if stage and stage.statement is not None and sku_matches is None:
+        readiness_reasons.append("Statement SKU matching has not been evaluated.")
+    elif sku_matches is not None and not sku_matches.eligible_for_commit:
+        readiness_reasons.append("One or more Statement SKU rows need review.")
     if validation_blockers:
         readiness_reasons.append("Blocking statement validation issues remain.")
     ready = not readiness_reasons
@@ -283,6 +328,7 @@ def adapt_shopee_weekly_statement_import_result(
         "order_reconciliations": tuple(stage.order_reconciliations) if stage else (),
         "adjustment_reconciliations": tuple(stage.adjustment_reconciliations) if stage else (),
         "shipping_fee_discrepancies": tuple(statement.shipping_fee_discrepancies) if statement else (),
+        "sku_matches": sku_matches,
     }
     summary_items = (
         SummaryItem("Statement Period", (f"{statement.statement_period_from:%d/%m/%Y} – {statement.statement_period_to:%d/%m/%Y}" if statement is not None else "—")),
@@ -312,6 +358,7 @@ def adapt_shopee_weekly_statement_import_result(
             ready=ready,
             status="Ready to Commit" if ready else "Not Ready",
             reasons=tuple(dict.fromkeys(readiness_reasons)),
+            database_commit_available=ready,
         ),
         session_state=SessionState(
             applied_to_current_session=bool(stage and batch_id),

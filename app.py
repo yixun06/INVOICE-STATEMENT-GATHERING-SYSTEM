@@ -78,8 +78,6 @@ from src.invoice_app.ui.data_import import (
     reset_data_import_state,
 )
 from src.invoice_app.ui.settlement_test_lab import (
-    SETTLEMENT_TEST_LAB_PAGE,
-    render_settlement_test_lab,
     reset_settlement_test_lab_state,
 )
 from src.invoice_app.ui.weekly_billing import (
@@ -191,7 +189,7 @@ DATE_COLUMNS = {
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 REPORT_NAVIGATION_PAGES = ["Dashboard", "Cross Platform Summary", *PLATFORMS]
 UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE]
-DEVELOPMENT_NAVIGATION_PAGES = [SETTLEMENT_TEST_LAB_PAGE]
+DEVELOPMENT_NAVIGATION_PAGES: list[str] = []
 NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
     WEEKLY_BILLING_PAGE: "calendar_month",
@@ -200,7 +198,6 @@ NAVIGATION_ICONS = {
     "Shopee": "storefront",
     "Lazada": "shopping_bag",
     "ZENXIN": "language",
-    SETTLEMENT_TEST_LAB_PAGE: "science",
 }
 PAGE_CONTROL_WIDGET_SUFFIXES = (
     "_order_filter",
@@ -481,6 +478,7 @@ def show_login() -> None:
             if submitted:
                 if authenticate(username, password):
                     st.session_state.authenticated = True
+                    st.session_state.authenticated_username = username.strip()
                     st.rerun()
                 else:
                     st.error("Invalid username or password.", icon=":material/error:")
@@ -726,7 +724,6 @@ def show_sidebar(pdf_count: int) -> str:
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
         render_navigation_section("UAT2", UAT2_NAVIGATION_PAGES)
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
-        render_navigation_section("DEVELOPMENT / TESTING", DEVELOPMENT_NAVIGATION_PAGES)
 
         st.html('<p class="sidebar-section-label">Product Master</p>')
         refresh_message = st.session_state.pop("product_master_refresh_message", None)
@@ -768,6 +765,7 @@ def show_sidebar(pdf_count: int) -> str:
 
         if st.button("Logout", icon=":material/logout:", width="stretch"):
             st.session_state.authenticated = False
+            st.session_state.pop("authenticated_username", None)
             reset_batch()
             st.rerun()
 
@@ -1757,8 +1755,6 @@ if selected_page == DATA_IMPORT_PAGE:
         render_platform_orders_outcomes=show_current_batch_outcomes,
         discard_current_batch=request_batch_discard_confirmation,
     )
-elif selected_page == SETTLEMENT_TEST_LAB_PAGE:
-    render_settlement_test_lab()
 elif selected_page == WEEKLY_BILLING_PAGE:
     render_weekly_billing()
 elif selected_page == "Dashboard":

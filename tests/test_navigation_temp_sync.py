@@ -33,7 +33,7 @@ def _active_platform_batch() -> list[dict[str, object]]:
     ]
 
 
-def test_self_test_navigation_preserves_current_batch_and_syncs_accepted_orders(tmp_path, monkeypatch):
+def test_navigation_preserves_current_invoice_batch_without_a_second_statement_entry(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -57,7 +57,6 @@ def test_self_test_navigation_preserves_current_batch_and_syncs_accepted_orders(
     expected_navigation = {
         "Data Import",
         *REPORT_PAGES,
-        "Settlement Test Lab",
     }
     labels = {button.label for button in app.button}
     assert expected_navigation <= labels
@@ -74,15 +73,10 @@ def test_self_test_navigation_preserves_current_batch_and_syncs_accepted_orders(
         assert restored["orders"] == _active_platform_batch()
         assert restored["reviews"][0]["status"] == "Manual Review"
 
-    next(button for button in app.button if button.label == "Sync Accepted Orders to Test Session").click().run(timeout=20)
-    synced = app.session_state.filtered_state["settlement_test_lab_accepted_orders"]
-    assert synced == _active_platform_batch()
-    assert all(order["status"] == "Accepted" for order in synced)
-
-    _navigate(app, "Settlement Test Lab")
-    assert "Settlement Test Lab" in {title.value for title in app.title}
-    assert "← Back to Data Import" in {button.label for button in app.button}
-    next(button for button in app.button if button.label == "← Back to Data Import").click().run(timeout=20)
+    assert "Settlement Test Lab" not in labels
+    assert "Sync Accepted Orders to Test Session" not in {
+        button.label for button in app.button
+    }
     restored = app.session_state.filtered_state
     assert restored["navigation"] == "Data Import"
     assert restored["batch_id"] == "active-platform-batch"

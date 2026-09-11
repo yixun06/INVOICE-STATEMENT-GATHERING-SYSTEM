@@ -27,6 +27,7 @@ from ..services.validation_recovery import (
 from ..services.historical_invoice_intake import (
     IntakeStatus, build_current_batch_staging, classify_staging, import_new_staging,
 )
+from ..services.application_commit_lock import ApplicationCommitInProgress
 from ..services.uat2_data_settings import configured_uat2_data_settings
 from ..services.product_master_source import ProductMasterSourceError, load_configured_product_price_master
 from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
@@ -34,9 +35,18 @@ from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkIm
 from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
 from ..services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
-    stage_shopee_weekly_statement,
 )
-from .settlement_test_lab import sync_accepted_orders_to_test_session
+from ..services.shopee_statement_import import (
+    StatementImportReview,
+    commit_statement_review,
+    refresh_statement_review,
+    review_statement_upload,
+)
+from ..services.shopee_statement_persistence import (
+    StatementCommitBlocked,
+    StatementWriteIntegrityError,
+)
+from ..services.shopee_statement_item_matching import business_match_method
 
 
 
@@ -55,6 +65,7 @@ _WORKFLOW_KEYS = (
     "data_import_step",
     "import_source_type",
     "weekly_statement_stage",
+    "weekly_statement_review",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
     "uat2_historical_commit_entries",
@@ -151,11 +162,16 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
         return
     with st.container(border=True):
         st.subheader("Select source")
-        source_type = st.radio(
-            "Data type",
-            (PLATFORM_ORDERS, SHOPEE_WEEKLY_STATEMENT),
+        source_label = st.segmented_control(
+            "Import workflow",
+            ("Invoice Import", "Statement Import"),
             key="weekly_statement_selected_source",
-            horizontal=True,
+            default="Invoice Import",
+        )
+        source_type = (
+            PLATFORM_ORDERS
+            if source_label == "Invoice Import"
+            else SHOPEE_WEEKLY_STATEMENT
         )
         st.caption(
             "PDF or ZIP order documents for Shopee, Lazada, and ZENXIN."
@@ -202,17 +218,28 @@ def _render_weekly_statement_upload() -> None:
         st.rerun()
     if stage_clicked and uploaded_file is not None:
         st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
-        begin_workflow_activity(st.session_state, "Checking statement")
+        begin_workflow_activity(st.session_state, "Validating")
         try:
-            st.session_state.weekly_statement_stage = stage_shopee_weekly_statement(
+            settings = configured_uat2_data_settings()
+            master, _label = load_configured_product_price_master()
+            review = review_statement_upload(
                 uploaded_file,
                 source_filename=uploaded_file.name,
-                existing_orders=st.session_state.get("orders", []),
+                batch_id=st.session_state.batch_id,
+                uploaded_by=str(st.session_state.get("authenticated_username") or "Admin"),
+                repository=settings.create_repository(),
+                writer=settings.create_statement_writer(),
+                product_master=master,
             )
+            st.session_state.weekly_statement_review = review
+            st.session_state.weekly_statement_stage = review.stage
+        except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+            st.error(f"Statement validation is unavailable: {error}")
         finally:
             end_workflow_activity(st.session_state)
-        _set_step(3)
-        st.rerun()
+        if _weekly_review() is not None:
+            _set_step(3)
+            st.rerun()
 
 
 def _render_validation_step(render_platform_orders_outcomes: Callable[[], Any]) -> None:
@@ -226,30 +253,10 @@ def _render_validation_step(render_platform_orders_outcomes: Callable[[], Any]) 
         _render_recovery_confirmation()
     if result.source_specific_details.get("show_platform_order_outcomes"):
         render_platform_orders_outcomes()
-        _render_test_session_sync()
+    else:
+        _render_statement_review_tables()
     _render_recovery_area()
     _render_next_step("Continue to reconcile", 4)
-
-
-def _render_test_session_sync() -> None:
-    accepted_count = sum(
-        1
-        for order in st.session_state.get("orders", [])
-        if str(order.get("status") or "").strip() == "Accepted"
-    )
-    st.subheader("Temporary Settlement Test Session")
-    st.caption(
-        "TEMP_TEST_ONLY — copy Accepted Platform Orders into the isolated Settlement Test Lab. "
-        "Manual Review records are excluded and original source data is unchanged."
-    )
-    if st.button(
-        "Sync Accepted Orders to Test Session",
-        icon=":material/sync:",
-        disabled=accepted_count == 0,
-        key="sync_accepted_orders_to_test_session",
-    ):
-        synced_count = sync_accepted_orders_to_test_session(st.session_state.get("orders", []))
-        st.success(f"Synced {synced_count} Accepted order(s) to Settlement Test Lab.", icon=":material/check_circle:")
 
 
 def _render_contract_validation(result: ImportResult) -> None:
@@ -352,6 +359,8 @@ def _render_reconciliation_step() -> None:
     _render_summary_items(reconciliation.summary)
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        _render_statement_review_tables()
     _render_next_step("Continue to review & commit", 5)
 
 
@@ -387,20 +396,12 @@ def _render_review_and_commit_step() -> None:
             )
         _render_historical_invoice_commit()
         return
+    _render_statement_review_tables()
     if readiness.ready:
         st.success("Ready to Commit — current batch review is complete.", icon=":material/check_circle:")
     else:
         st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
-    st.caption(
-        "Future database commit is disabled in this Self-Test Version. "
-        "This review never writes or marks production data as committed."
-    )
-    st.button(
-        "Future Database Commit",
-        icon=":material/lock:",
-        disabled=True,
-        key="future_database_commit_disabled",
-    )
+    _render_statement_commit(readiness.ready)
 
 
 def _render_source_summary(result: ImportResult) -> None:
@@ -420,7 +421,12 @@ def _render_summary_items(items: tuple[Any, ...]) -> None:
 def _current_import_result() -> ImportResult:
     batch_id = st.session_state.get("batch_id")
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
-        return adapt_shopee_weekly_statement_import_result(_weekly_stage(), batch_id=batch_id)
+        review = _weekly_review()
+        return adapt_shopee_weekly_statement_import_result(
+            _weekly_stage(),
+            batch_id=batch_id,
+            sku_matches=review.sku_matches if review is not None else None,
+        )
     return adapt_platform_orders_import_result(
         batch_id=batch_id,
         orders=st.session_state.get("orders", []),
@@ -475,6 +481,8 @@ def _render_historical_invoice_commit() -> None:
                 f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). "
                 "Return to Validate and revalidate historical status before retrying."
             )
+        except ApplicationCommitInProgress as error:
+            st.warning(str(error))
         except HistoricalInvoiceStorageError as error:
             st.error(f"Historical Invoice storage write failed: {error}")
 
@@ -572,6 +580,129 @@ def _historical_commit_ready(entries: tuple[Any, ...]) -> bool:
 def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
     stage = st.session_state.get("weekly_statement_stage")
     return stage if isinstance(stage, StagedShopeeWeeklyStatement) else None
+
+
+def _weekly_review() -> StatementImportReview | None:
+    review = st.session_state.get("weekly_statement_review")
+    return review if isinstance(review, StatementImportReview) else None
+
+
+def _render_statement_review_tables() -> None:
+    review = _weekly_review()
+    if review is None or review.stage.statement is None:
+        return
+    statement = review.stage.statement
+    st.subheader("Order review")
+    st.dataframe(
+        [
+            {
+                "Order ID": item.order_id,
+                "Released Amount": item.released_amount,
+                "Comparison Source": item.comparison_source,
+                "Comparison Amount": item.comparison_amount,
+                "Difference": item.difference,
+                "Status": item.status,
+            }
+            for item in review.stage.order_reconciliations
+        ],
+        hide_index=True,
+    )
+    sku_by_row = {row.source_row_number: row for row in statement.sku_rows}
+    st.subheader("SKU review")
+    st.dataframe(
+        [
+            {
+                "Order ID": match.order_id,
+                "Product ID": match.product_id,
+                "Product Name": match.product_name,
+                "Product Price": (
+                    sku_by_row[match.statement_source_row].financial_components.get("Product Price")
+                    if match.statement_source_row in sku_by_row
+                    else None
+                ),
+                "Refund": (
+                    sku_by_row[match.statement_source_row].financial_components.get("Refund Amount")
+                    if match.statement_source_row in sku_by_row
+                    else None
+                ),
+                "Matched Item": match.invoice_item_index,
+                "Match Method": business_match_method(match.match_method),
+                "Status": match.status.value,
+            }
+            for match in review.sku_matches.matches
+        ],
+        hide_index=True,
+    )
+
+
+def _render_statement_commit(ready: bool) -> None:
+    review = _weekly_review()
+    if review is None:
+        st.button("Commit Statement", disabled=True, key="statement_commit")
+        return
+    with st.container(horizontal=True):
+        refresh_clicked = st.button(
+            "Refresh validation",
+            icon=":material/refresh:",
+            key="statement_refresh_validation",
+        )
+        commit_clicked = st.button(
+            "Commit Statement",
+            type="primary",
+            icon=":material/upload:",
+            disabled=not ready or not review.ready,
+            key="statement_commit",
+        )
+    if refresh_clicked:
+        if _refresh_statement_review(review):
+            st.rerun()
+    if not commit_clicked:
+        return
+    settings = configured_uat2_data_settings()
+    try:
+        attempt = commit_statement_review(
+            review,
+            repository=settings.create_repository(),
+            writer=settings.create_statement_writer(),
+            load_product_master=lambda: load_configured_product_price_master()[0],
+        )
+    except ApplicationCommitInProgress as error:
+        st.warning(str(error))
+        return
+    except StatementWriteIntegrityError as error:
+        st.error(f"Statement write requires manual integrity recovery: {error}")
+        return
+    except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+        st.error(f"Statement commit failed before a safe write could be confirmed: {error}")
+        return
+    if attempt.committed:
+        st.success("Statement Commit Complete.", icon=":material/check_circle:")
+        return
+    st.warning(
+        "Statement state changed or the write was not applied. No new commit was confirmed; validation has been refreshed."
+    )
+    if not _refresh_statement_review(review):
+        return
+    _set_step(3)
+    st.rerun()
+
+
+def _refresh_statement_review(review: StatementImportReview) -> bool:
+    try:
+        settings = configured_uat2_data_settings()
+        master, _label = load_configured_product_price_master()
+        refreshed = refresh_statement_review(
+            review,
+            repository=settings.create_repository(),
+            writer=settings.create_statement_writer(),
+            product_master=master,
+        )
+    except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+        st.error(f"Statement validation refresh failed: {error}")
+        return False
+    st.session_state.weekly_statement_review = refreshed
+    st.session_state.weekly_statement_stage = refreshed.stage
+    return True
 
 
 def _historical_commit_signature() -> str:

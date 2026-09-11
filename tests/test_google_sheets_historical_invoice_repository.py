@@ -26,6 +26,10 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
 from src.invoice_app.repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError, ImportStatus
 from src.invoice_app.repositories.historical_invoice_repository import source_fact_fingerprint
 from src.invoice_app.services.product_master_source import GOOGLE_SHEETS_READONLY_SCOPE
+from src.invoice_app.services.application_commit_lock import (
+    ApplicationCommitInProgress,
+    ApplicationCommitLock,
+)
 from src.invoice_app.services.uat2_data_settings import (
     DEFAULT_UAT2_DATA_SPREADSHEET_ID,
     UAT2DataSettings,
@@ -73,9 +77,10 @@ def _bundle(*, order_id="000123456789", imported_at=None, items=1):
     ))
 
 
-def _repository(gateway, *, ttl=45):
+def _repository(gateway, *, ttl=45, commit_lock=None):
     return GoogleSheetsHistoricalInvoiceRepository(
-        spreadsheet_id="synthetic-sheet", gateway=gateway, cache_ttl_seconds=ttl
+        spreadsheet_id="synthetic-sheet", gateway=gateway, cache_ttl_seconds=ttl,
+        **({"commit_lock": commit_lock} if commit_lock is not None else {}),
     )
 
 
@@ -214,6 +219,30 @@ def test_bulk_precommit_source_conflict_plus_new_is_zero_write():
     assert repository.get_order("Shopee", "B") is None
 
 
+def test_google_repository_holds_shared_lock_for_fresh_preflight_and_batch_write():
+    lock = ApplicationCommitLock()
+
+    class LockCheckingGateway(FakeGateway):
+        def _assert_lock_held(self):
+            with pytest.raises(ApplicationCommitInProgress):
+                with lock.acquire():
+                    pass
+
+        def read_tabs(self, *args):
+            self._assert_lock_held()
+            return super().read_tabs(*args)
+
+        def append_bundles(self, *args):
+            self._assert_lock_held()
+            return super().append_bundles(*args)
+
+    gateway = LockCheckingGateway()
+    result = _repository(gateway, commit_lock=lock).import_invoices((_bundle(),))
+
+    assert result.chunk_sizes == (1,)
+    assert gateway.append_calls == 1
+
+
 def test_bulk_preflight_rejects_invalid_bundle_before_the_first_write():
     gateway = FakeGateway()
     repository = _repository(gateway)
@@ -255,7 +284,7 @@ def test_successful_write_invalidates_cache_and_refresh_observes_external_rows()
     assert gateway.read_calls == 1
     repository.import_invoice(_bundle())
     assert repository.get_order("Shopee", "000123456789") is not None
-    assert gateway.read_calls == 2
+    assert gateway.read_calls == 3  # fresh preflight reload, then post-write refresh/read
 
     external = _bundle(order_id="EXTERNAL-000")
     stored = external.with_source_fingerprint(source_fact_fingerprint(external))

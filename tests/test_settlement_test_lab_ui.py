@@ -62,7 +62,7 @@ def _ready_statement_stage() -> StagedShopeeWeeklyStatement:
     )
 
 
-def test_settlement_test_lab_remains_available_for_the_self_test_session(tmp_path, monkeypatch):
+def test_standalone_settlement_test_lab_is_not_a_product_navigation_destination(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -82,16 +82,7 @@ def test_settlement_test_lab_remains_available_for_the_self_test_session(tmp_pat
     app.run(timeout=20)
 
     assert app.exception == []
-    assert "Settlement Test Lab" in {title.value for title in app.title}
-    assert {"Settlement Test Lab", "← Back to Data Import", "Validate test statement"} <= {
-        button.label for button in app.button
-    }
-    metrics = {(metric.label, metric.value) for metric in app.metric}
-    assert {
-        ("Synced Accepted Shopee Orders", "1"),
-        ("Total Shopee Orders", "1"),
-        ("Statement Matched", "1"),
-    } <= metrics
-    captions = {caption.value for caption in app.caption}
-    assert any("TEMP_TEST_ONLY" in caption for caption in captions)
+    assert "Data Import" in {title.value for title in app.title}
+    assert app.session_state.filtered_state["navigation"] == "Data Import"
+    assert "Settlement Test Lab" not in {button.label for button in app.button}
 

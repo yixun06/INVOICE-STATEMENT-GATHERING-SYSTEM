@@ -76,14 +76,14 @@ def test_native_shopee_export_dimension_fallback_and_contract(parsed_sample):
     assert parsed_sample.file_hash == sha256(SAMPLE.read_bytes()).hexdigest()
 
 
-def test_native_sample_is_ready_and_unmatched_reconciliation_is_non_blocking(
+def test_native_sample_requires_review_when_target_orders_are_unmatched(
     parsed_sample,
 ):
     staged = stage_parsed_shopee_weekly_statement(parsed_sample)
 
-    assert staged.result == READY_TO_COMMIT
+    assert staged.result == NEEDS_REVIEW
     assert staged.validation_issues == ()
-    assert staged.eligible_for_future_atomic_commit is True
+    assert staged.eligible_for_future_atomic_commit is False
     assert staged.whole_statement_atomic is True
     assert staged.reconciliation_counts == {
         "Matched": 0,
@@ -144,7 +144,7 @@ def test_adjustment_period_uses_complete_date_not_historical_payout_date(parsed_
     )
 
     assert "adjustment_complete_date_outside_statement_period" not in _validation_codes(statement)
-    assert stage_parsed_shopee_weekly_statement(statement).result == READY_TO_COMMIT
+    assert stage_parsed_shopee_weekly_statement(statement).result == NEEDS_REVIEW
     assert statement.adjustments[0].payout_completed_date == date(2026, 7, 27)
 
 
@@ -280,7 +280,7 @@ def test_reconciliation_uses_final_estimated_and_unmatched_rules(parsed_sample):
     assert by_order[second.order_id].status == "Different"
     assert by_order[third.order_id].status == "Estimated Only"
     assert by_order[fourth.order_id].status == "Unmatched Order"
-    assert staged.result == READY_TO_COMMIT
+    assert staged.result == NEEDS_REVIEW
 
 
 def test_reconciliation_uses_rm002_tolerance_without_blocking_ready_state(
@@ -312,7 +312,7 @@ def test_reconciliation_uses_rm002_tolerance_without_blocking_ready_state(
     assert by_order[within_tolerance.order_id].status == "Matched"
     assert by_order[beyond_tolerance.order_id].difference == Decimal("0.03")
     assert by_order[beyond_tolerance.order_id].status == "Different"
-    assert staged.result == READY_TO_COMMIT
+    assert staged.result == NEEDS_REVIEW
     assert staged.validation_issues == ()
     assert "Underpayment" not in {
         item.status for item in staged.order_reconciliations
@@ -335,7 +335,7 @@ def test_reconciliation_uses_shopee_platform_and_order_id_identity(parsed_sample
     by_order = {item.order_id: item for item in staged.order_reconciliations}
 
     assert by_order[order_row.order_id].status == "Unmatched Order"
-    assert staged.result == READY_TO_COMMIT
+    assert staged.result == NEEDS_REVIEW
 
 
 def _workbook_with_empty_income(source_bytes: bytes) -> bytes:
@@ -387,8 +387,8 @@ def test_duplicate_gates_do_not_create_a_second_import(parsed_sample):
         parsed_sample, existing_statements=[exact]
     )
 
-    assert exact_result.result == READY_TO_COMMIT
-    assert exact_result.duplicate_status == "Exact Duplicate"
+    assert exact_result.result == NEEDS_REVIEW
+    assert exact_result.duplicate_status == "ALREADY_IMPORTED"
     assert exact_result.eligible_for_future_atomic_commit is False
 
     revised = replace(exact, file_hash="different-file-hash")
@@ -397,7 +397,7 @@ def test_duplicate_gates_do_not_create_a_second_import(parsed_sample):
     )
 
     assert revised_result.result == NEEDS_REVIEW
-    assert revised_result.duplicate_status == "Same Period Different File"
+    assert revised_result.duplicate_status == "POSSIBLE_REVISION"
     assert revised_result.eligible_for_future_atomic_commit is False
 
 
@@ -417,4 +417,4 @@ def test_adjustment_linking_is_non_blocking(parsed_sample):
     counts = Counter(item.status for item in staged.adjustment_reconciliations)
 
     assert counts == {"Matched": 1, "Unmatched Adjustment": 2}
-    assert staged.result == READY_TO_COMMIT
+    assert staged.result == NEEDS_REVIEW
