@@ -9,13 +9,10 @@ import re
 from typing import Any
 
 from .batch_service import apply_batch_rules, is_manual_review_record
-from .product_price_master import PriceLookupStatus, ProductPriceMaster
+from .product_price_master import ProductPriceMaster
+from .shopee_invoice_revalidation import revalidate_shopee_invoice
 from ..parsers.shopee_mapper import resolve_shopee_payment_status
-from ..parsers.validation import (
-    count_product_anchor_items,
-    validate_product_items,
-    validate_shopee_financial_reconciliation,
-)
+from ..parsers.validation import validate_product_items
 from ..review_reason_codes import (
     INCOME_COMPLETION_ANCHOR_MISSING,
     INCOME_EXTRACTION_MISSING,
@@ -24,7 +21,6 @@ from ..review_reason_codes import (
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
 MISSING_INCOME = "MISSING_INCOME_INFORMATION"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
-_MATCHED = {PriceLookupStatus.MATCHED_BY_SKU, PriceLookupStatus.MATCHED, PriceLookupStatus.MATCHED_BY_ALIAS, PriceLookupStatus.MATCHED_BY_NAME_VARIATION, PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION, PriceLookupStatus.MATCHED_BY_PARENT_SKU, PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION}
 
 @dataclass(frozen=True)
 class ResolutionPlan:
@@ -70,9 +66,6 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if errors:
             return ResolutionOutcome(False, " ".join(errors))
         products.append(added)
-        extracted = count_product_anchor_items(products, require_sku=True)
-        if plan.expected_products is not None and extracted != plan.expected_products:
-            return ResolutionOutcome(False, f"Expected Products: {plan.expected_products}; Extracted Products: {extracted}.")
     else:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(
@@ -87,22 +80,23 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         order["order_income"] = income
         order["income_type"] = income_type
         order["estimated_order_income"] = income if income_type == "Estimated" else "N/A"
-        if final_amount:
+        if final_amount != "":
             order["final_amount"] = final_amount
         order["payment_status"] = resolve_shopee_payment_status(
             order.get("fund_transfer_date"), income_type
         )
         order["net_income"] = final_amount or income
         order["net_amount"] = order["net_income"]
-        financial_error = validate_shopee_financial_reconciliation(
-            order,
-            order.get("refund_amount"),
-        )
-        if financial_error:
-            return ResolutionOutcome(False, financial_error)
-    lookup_error = _validate_master(products, price_master)
-    if lookup_error:
-        return ResolutionOutcome(False, lookup_error)
+    revalidated = revalidate_shopee_invoice(
+        order,
+        products,
+        price_master=price_master,
+        expected_product_count=plan.expected_products,
+    )
+    if revalidated.error:
+        return ResolutionOutcome(False, revalidated.error)
+    order["invoice_financial_layout"] = revalidated.invoice_financial_layout
+    products = [dict(product) for product in revalidated.products]
     remaining = [item for i, item in enumerate(reviews) if i != index]
     order["status"] = "Accepted"
     for product in products:
@@ -118,16 +112,6 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
 def _missing_product(order: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
     subtotal = str(values.get("line_subtotal") or "").strip()
     return {"batch_id": order.get("batch_id", ""), "source_pdf": order.get("source_pdf", ""), "platform": order.get("platform", "Shopee"), "order_id": order.get("order_id", ""), "seller_sku": str(values.get("seller_sku") or "").strip(), "product_name": str(values.get("product_name") or "").strip(), "variation": str(values.get("variation") or "").strip(), "quantity": values.get("quantity"), "unit_price": str(values.get("actual_selling_unit_price") or "").strip(), "line_total": subtotal, "line_subtotal": subtotal, "source_line_subtotal": subtotal}
-
-def _validate_master(products: list[dict[str, Any]], master: ProductPriceMaster) -> str | None:
-    for product in products:
-        lookup = master.lookup(seller_sku=product.get("seller_sku"), product_name=product.get("product_name"), variation_name=product.get("variation") or product.get("variation_name"))
-        if lookup.status not in _MATCHED or lookup.unit_selling_price is None:
-            return lookup.reason or "Product Master pricing remains unresolved."
-        if not lookup.nav_code:
-            return "Resolved Product Master row has blank NAV CODE."
-    return None
-
 
 def _source_money(value: Any, *, optional: bool = False) -> str | None:
     text = str(value or "").replace(",", "").replace("RM", "").strip()

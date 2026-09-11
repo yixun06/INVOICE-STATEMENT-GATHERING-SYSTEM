@@ -9,7 +9,9 @@ from typing import Any
 from ..utils.normalize import normalize_whitespace
 from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
+    classify_invoice_financial_layout,
     extract_refund_amount,
+    income_label_presence,
     parse_buyer_payment,
     parse_income_details,
     parse_voucher_detail,
@@ -44,6 +46,8 @@ class ShopeeExtractedData:
     delivered_date: str
     completed_date: str
     fund_transfer_date: str
+    invoice_financial_layout: str
+    income_label_presence: frozenset[str]
     product_items: tuple[dict[str, Any], ...]
     refund_amount: Decimal | None
     income: dict[str, str]
@@ -59,12 +63,13 @@ def extract_shopee_data(
     normalized_text = normalize_pdf_text(text)
     order_id = extract_order_id(normalized_text, source_pdf)
     income = parse_income_details(normalized_text)
+    label_presence = income_label_presence(normalized_text)
     product_items = reconcile_product_candidates(
         positioned_items or [],
         parse_text_products(normalized_text),
     )
 
-    product_items = resolve_promotion_group_totals(product_items, income.get("merchandise_subtotal"))
+    product_items = resolve_promotion_group_totals(product_items, income.get("product_price"))
     return ShopeeExtractedData(
         source_pdf=source_pdf,
         normalized_text=normalized_text,
@@ -81,6 +86,11 @@ def extract_shopee_data(
         delivered_date=extract_delivered_date(normalized_text),
         completed_date=extract_completed_date(normalized_text),
         fund_transfer_date=extract_fund_transfer_date(normalized_text),
+        invoice_financial_layout=classify_invoice_financial_layout(
+            normalized_text,
+            label_presence=label_presence,
+        ),
+        income_label_presence=label_presence,
         product_items=tuple(product_items),
         refund_amount=extract_refund_amount(normalized_text),
         income=income,

@@ -8,6 +8,7 @@ from .shopee_financial_parser import (
     MISSING_FINANCIAL_VALUE,
     calculate_platform_fees,
     is_missing_financial_value,
+    invoice_financial_layout_signals,
 )
 
 
@@ -70,12 +71,20 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "delivered_date": data.delivered_date,
         "completed_date": data.completed_date,
         "fund_transfer_date": data.fund_transfer_date,
+        "invoice_financial_layout": data.invoice_financial_layout,
+        "_income_details_present": "Income Details" in data.normalized_text,
+        "_income_label_presence": tuple(sorted(data.income_label_presence)),
+        "_financial_layout_signals": tuple(sorted(invoice_financial_layout_signals(
+            data.normalized_text,
+            label_presence=data.income_label_presence,
+        ))),
         "source_pdf": data.source_pdf,
         "gross_sales": _financial_value(income, "merchandise_subtotal"),
         "delivery_fee": _financial_value(income, "shipping_fee_paid_by_buyer"),
         "commission_fee": _financial_value(income, "commission_fee"),
         "service_fee": _financial_value(income, "service_fee"),
         "transaction_fee": _financial_value(income, "transaction_fee"),
+        "ams_commission_fee": _financial_value(income, "ams_commission_fee"),
         "voucher": _financial_value(income, "vouchers_rebates_total"),
         "platform_fees": calculate_platform_fees(income),
         "ads_fee": _financial_value(income, "ads_escrow_top_up_fee"),
@@ -93,6 +102,8 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
             income, "shipping_fee_rebate_from_shopee"
         ),
         "seller_paid_shipping_fee_sst": _financial_value(income, "seller_paid_shipping_fee_sst"),
+        "reverse_shipping_fee": _financial_value(income, "reverse_shipping_fee"),
+        "reverse_shipping_fee_sst": _financial_value(income, "reverse_shipping_fee_sst"),
         "vouchers_rebates_total": _financial_value(income, "vouchers_rebates_total"),
         "voucher_type": _financial_value(voucher, "voucher_type"),
         "voucher_code": _financial_value(voucher, "voucher_code"),

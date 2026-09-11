@@ -4,7 +4,12 @@ from decimal import Decimal
 import pytest
 
 from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract_shopee_data
-from src.invoice_app.parsers.shopee_financial_parser import parse_buyer_payment, parse_income_details
+from src.invoice_app.parsers.shopee_financial_parser import (
+    RETURN_REFUND,
+    UNKNOWN_OR_MIXED,
+    parse_buyer_payment,
+    parse_income_details,
+)
 from src.invoice_app.parsers.shopee_mapper import map_shopee_records, map_shopee_review_payloads
 from src.invoice_app.parsers.shopee_parser import ShopeeParser
 from src.invoice_app.parsers.shopee_review_policy import (
@@ -109,12 +114,19 @@ def refund_order_data(
         vouchers_rebates_total="-9.27",
         fees_charges_total="-84.14",
         order_income=order_income,
+        income_type="Final",
+        shipping_fee_charged_by_logistic_provider="-9.00",
+        seller_paid_shipping_fee_sst="-0.54",
+        commission_fee="-30.00",
+        service_fee="-30.00",
+        transaction_fee="-24.14",
     )
     return replace(
         extracted,
         product_items=(gross_product,),
         refund_amount=refund_amount,
         income=income,
+        invoice_financial_layout=RETURN_REFUND,
     )
 
 
@@ -179,7 +191,8 @@ def test_shopee_return_refund_product_text_does_not_infer_refund_amount():
 
     assert extracted.refund_amount is None
     assert order["refund_amount"] == "N/A"
-    assert find_shopee_review_issue(extracted) is None
+    assert extracted.invoice_financial_layout == UNKNOWN_OR_MIXED
+    assert find_shopee_review_issue(extracted).reason_code == "FINANCIAL_LAYOUT_UNRESOLVED"
 
 
 def test_shopee_order_id_date_prefix_fills_only_a_missing_explicit_created_date():
@@ -243,6 +256,7 @@ def test_shopee_refund_financial_reconciliation_starts_from_net_merchandise_subt
     assert validate_shopee_financial_reconciliation(
         extracted.income,
         extracted.refund_amount,
+        layout=RETURN_REFUND,
     ) is None
     assert find_shopee_review_issue(extracted) is None
 

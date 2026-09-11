@@ -121,14 +121,15 @@ route the source to Manual Review and block persistence.
 
 ```text
 platform, order_id, order_status, order_created_date, delivered_date,
-completed_date, fund_transfer_date,
+completed_date, fund_transfer_date, invoice_financial_layout,
 merchandise_subtotal, product_price,
 shipping_subtotal, shipping_fee_paid_by_buyer,
 shipping_fee_charged_by_logistic_provider, shipping_fee_rebate_from_shopee,
-seller_paid_shipping_fee_sst,
+seller_paid_shipping_fee_sst, reverse_shipping_fee, reverse_shipping_fee_sst,
 vouchers_rebates_total, voucher_type, voucher_code, voucher_funded_by,
 voucher_amount,
-commission_fee, service_fee, transaction_fee, ads_escrow_top_up_fee,
+commission_fee, service_fee, transaction_fee, ams_commission_fee,
+ads_escrow_top_up_fee,
 fees_charges_total,
 order_income, income_type, final_amount, refund_amount,
 buyer_merchandise_subtotal, buyer_shipping_fee, shopee_voucher, seller_voucher,
@@ -149,9 +150,10 @@ Do not persist duplicate helper aliases when a canonical business field exists.
 
 ```text
 platform, order_id, item_index,
-seller_sku, nav, product_name, variation, quantity,
+seller_sku, sku_missing_in_source, nav, product_name, variation, quantity,
 unit_price, actual_selling_unit_price, line_subtotal,
-promotion_group_id, promotion_label, source_group_total,
+promotion_group_id, promotion_label, promotion_advertised_amount,
+promotion_discount_percent, source_group_total,
 statement_product_price, statement_refund_amount, statement_net_selling_amount,
 source_pdf, source_hash
 ```
@@ -185,6 +187,44 @@ Invoice status/date facts; fund-transfer date; Invoice financial breakdown;
 order income, income type, final amount, and signed refund amount; and Seller
 SKU, Product Name, Variation, Quantity, actual selling unit price, line
 subtotal, and promotion source metadata.
+
+### Invoice financial layout and source completeness — Phase A / Locked
+
+Confirmed Shopee Invoice layouts are `NORMAL_ORDER` and `RETURN_REFUND`.
+`UNKNOWN_OR_MIXED` is staging/Manual Review only and cannot become Accepted.
+A Return/Refund classification requires at least two independent reliable
+source signals among explicit Refund Amount, a product-area Return/Refund
+marker, Reverse Shipping Fee, and Reverse Shipping Fee SST. A single signal is
+not sufficient.
+
+Required Income fields are layout-specific. Normal orders retain the established
+core fields, including Fees & Charges, Commission, Service, and Transaction.
+Confirmed Return/Refund orders require Merchandise Subtotal, Product Price,
+Refund Amount, the established shipping core, and final Order Income, but may
+legitimately omit those four normal fee fields.
+
+Optional never means ignored. A visible supported label must parse and be
+preserved; an absent label remains `None`, while explicit zero remains zero.
+Invoice AMS Commission Fee, Reverse Shipping Fee, and Reverse Shipping Fee SST
+are separate signed source facts. Do not merge reverse shipping into normal
+shipping fields.
+
+When Seller SKU is genuinely absent from the source, keep it blank and set
+`sku_missing_in_source=True`; exact Product Name + Variation Product Master
+matching may still resolve Unit Price and NAV. Never use this flag when a SKU is
+visible but extraction failed, and never guess or backfill a Seller SKU.
+
+Persist `promotion_advertised_amount` and `promotion_discount_percent` as
+Invoice source evidence. The Phase A Invoice schemas are exactly 44 Order
+columns and 22 Item columns. The new material source fields participate in
+`source_fingerprint`, except `invoice_financial_layout`, which is deliberately
+excluded because it is a derived parser classification.
+
+Every source-fact Manual Review correction must pass one complete revalidation
+chain: product count and structure, promotion evidence/allocation, product and
+financial totals, layout classification/requirements, Product Master/NAV, and
+current-batch rules. Phase B multi-product drafts, promotion-group selection,
+and Promotion Subtotal correction remain deferred.
 
 ## STEP 2 — Shopee Weekly Statement Locked Scope v1 — Confirmed / Locked
 
@@ -364,8 +404,8 @@ and an optional `Discrepancy reason` text-evidence record.
 
 ### UAT2 Statement schema migration contract — Approved / Locked
 
-The real UAT2 Google Sheet has the exact target 40-column `Invoice_Orders`,
-unchanged 19-column `Invoice_Items`, and exact 40-column `Statement_Data`
+The pre-Phase-A live UAT2 Google Sheet has the exact Statement-approved
+40-column `Invoice_Orders`, 19-column `Invoice_Items`, and exact 40-column `Statement_Data`
 schemas. A narrow one-time migration may add only the empty
 `Statement_Financial_Components` ledger tab after exact-header and empty-data
 preflight. It must not add `Statement_Data` again or insert `difference` again.

@@ -17,7 +17,8 @@ def _master():
 
 
 def _review():
-    return {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "status": "Manual Review", "reason_code": PRODUCT_COUNT_MISMATCH, "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.", "order_payload": {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "order_income": "30.00", "income_type": "Estimated"}, "product_payloads": [{"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "seller_sku": "SKU-1", "product_name": "First", "quantity": 1, "line_total": "10.00", "line_subtotal": "10.00", "source_line_subtotal": "10.00"}]}
+    order = {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "invoice_financial_layout": "NORMAL_ORDER", "merchandise_subtotal": "30.00", "product_price": "30.00", "shipping_subtotal": "0.00", "shipping_fee_paid_by_buyer": "0.00", "shipping_fee_charged_by_logistic_provider": "0.00", "seller_paid_shipping_fee_sst": "0.00", "fees_charges_total": "0.00", "commission_fee": "0.00", "service_fee": "0.00", "transaction_fee": "0.00", "order_income": "30.00", "income_type": "Estimated"}
+    return {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "status": "Manual Review", "reason_code": PRODUCT_COUNT_MISMATCH, "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.", "order_payload": order, "product_payloads": [{"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "seller_sku": "SKU-1", "product_name": "First", "quantity": 1, "unit_price": "10.00", "line_total": "10.00", "line_subtotal": "10.00", "source_line_subtotal": "10.00"}]}
 
 
 def _income_review():
@@ -35,10 +36,17 @@ def _income_review():
             "source_hash": "original-source-hash",
             "platform": "Shopee",
             "order_id": "SHP-INCOME",
+            "invoice_financial_layout": "NORMAL_ORDER",
             "merchandise_subtotal": "25.00",
             "product_price": "25.00",
             "shipping_subtotal": "0.00",
+            "shipping_fee_paid_by_buyer": "0.00",
+            "shipping_fee_charged_by_logistic_provider": "0.00",
+            "seller_paid_shipping_fee_sst": "0.00",
             "fees_charges_total": "-3.00",
+            "commission_fee": "-1.00",
+            "service_fee": "-1.00",
+            "transaction_fee": "-1.00",
             "vouchers_rebates_total": "N/A",
             "refund_amount": "N/A",
             "order_income": "N/A",

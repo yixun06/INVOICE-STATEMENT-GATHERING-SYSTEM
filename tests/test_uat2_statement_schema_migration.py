@@ -28,6 +28,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
     LEGACY_INVOICE_ORDERS_HEADERS,
+    PRE_FINANCIAL_INVOICE_ITEMS_HEADERS,
+    PRE_FINANCIAL_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
@@ -54,7 +56,7 @@ class InMemorySchemaGateway:
     ) -> None:
         self.schema = {
             INVOICE_ORDERS_TAB: SheetSchema(11, LEGACY_INVOICE_ORDERS_HEADERS),
-            INVOICE_ITEMS_TAB: SheetSchema(12, INVOICE_ITEMS_HEADERS),
+            INVOICE_ITEMS_TAB: SheetSchema(12, PRE_FINANCIAL_INVOICE_ITEMS_HEADERS),
         }
         if include_statement_data:
             self.schema[STATEMENT_DATA_TAB] = SheetSchema(13, STATEMENT_DATA_HEADERS)
@@ -67,7 +69,7 @@ class InMemorySchemaGateway:
                 list(LEGACY_INVOICE_ORDERS_HEADERS),
                 [f"legacy-{index}" for index in range(len(LEGACY_INVOICE_ORDERS_HEADERS))],
             ],
-            INVOICE_ITEMS_TAB: [list(INVOICE_ITEMS_HEADERS), ["item"] * len(INVOICE_ITEMS_HEADERS)],
+            INVOICE_ITEMS_TAB: [list(PRE_FINANCIAL_INVOICE_ITEMS_HEADERS), ["item"] * len(PRE_FINANCIAL_INVOICE_ITEMS_HEADERS)],
         }
         if include_statement_data:
             self.rows[STATEMENT_DATA_TAB] = [list(STATEMENT_DATA_HEADERS)]
@@ -172,8 +174,8 @@ def test_exact_target_schema_is_recognized_as_already_migrated():
 
 def test_exact_existing_statement_schema_is_eligible_only_for_component_ledger_tab():
     gateway = InMemorySchemaGateway(include_statement_data=True)
-    gateway.schema[INVOICE_ORDERS_TAB] = SheetSchema(11, INVOICE_ORDERS_HEADERS)
-    gateway.rows[INVOICE_ORDERS_TAB][0] = list(INVOICE_ORDERS_HEADERS)
+    gateway.schema[INVOICE_ORDERS_TAB] = SheetSchema(11, PRE_FINANCIAL_INVOICE_ORDERS_HEADERS)
+    gateway.rows[INVOICE_ORDERS_TAB][0] = list(PRE_FINANCIAL_INVOICE_ORDERS_HEADERS)
 
     assert classify_uat2_statement_schema(
         gateway.read_schema("synthetic-sheet")
@@ -209,7 +211,7 @@ def test_difference_is_exactly_aj_and_legacy_source_audit_values_only_shift_righ
 
     assert result.status is UAT2StatementSchemaMigrationStatus.MIGRATED
     assert INVOICE_ORDERS_DIFFERENCE_INDEX == 35
-    assert INVOICE_ORDERS_HEADERS[INVOICE_ORDERS_DIFFERENCE_INDEX] == "difference"
+    assert PRE_FINANCIAL_INVOICE_ORDERS_HEADERS[INVOICE_ORDERS_DIFFERENCE_INDEX] == "difference"
     assert tuple(gateway.rows[INVOICE_ORDERS_TAB][1]) == (
         *legacy_row[:INVOICE_ORDERS_DIFFERENCE_INDEX],
         "",
@@ -260,7 +262,7 @@ def test_migration_uses_one_batch_with_only_schema_requests():
 
 def test_preflight_failure_produces_zero_write():
     gateway = InMemorySchemaGateway()
-    gateway.schema[INVOICE_ITEMS_TAB] = SheetSchema(12, ("wrong", *INVOICE_ITEMS_HEADERS[1:]))
+    gateway.schema[INVOICE_ITEMS_TAB] = SheetSchema(12, ("wrong", *PRE_FINANCIAL_INVOICE_ITEMS_HEADERS[1:]))
 
     with pytest.raises(UAT2StatementSchemaMigrationError, match="Invoice_Items"):
         UAT2StatementSchemaMigrator(spreadsheet_id="synthetic-sheet", gateway=gateway).migrate()
@@ -322,8 +324,8 @@ def test_migration_preflight_and_write_are_inside_the_shared_commit_lock():
     assert result.status is UAT2StatementSchemaMigrationStatus.MIGRATED
 
 
-def test_invoice_items_schema_is_unchanged():
-    assert INVOICE_ITEMS_HEADERS == (
+def test_statement_migration_keeps_its_approved_invoice_items_schema():
+    assert PRE_FINANCIAL_INVOICE_ITEMS_HEADERS == (
         "platform", "order_id", "item_index", "seller_sku", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
     )
     assert len(STATEMENT_DATA_HEADERS) == 40
@@ -343,7 +345,7 @@ def test_google_gateway_submits_the_prebuilt_migration_as_one_batch_update():
             return Request({
                 "valueRanges": [
                     {"values": [list(LEGACY_INVOICE_ORDERS_HEADERS)]},
-                    {"values": [list(INVOICE_ITEMS_HEADERS)]},
+                        {"values": [list(PRE_FINANCIAL_INVOICE_ITEMS_HEADERS)]},
                 ]
             })
 

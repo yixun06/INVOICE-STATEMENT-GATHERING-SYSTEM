@@ -16,10 +16,10 @@ from src.invoice_app.services.application_commit_lock import (
     ApplicationCommitLock,
 )
 from src.invoice_app.services.uat2_persistence_schema import (
-    INVOICE_ITEMS_HEADERS,
+    PRE_FINANCIAL_INVOICE_ITEMS_HEADERS as INVOICE_ITEMS_HEADERS,
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_DIFFERENCE_INDEX,
-    INVOICE_ORDERS_HEADERS,
+    PRE_FINANCIAL_INVOICE_ORDERS_HEADERS as INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
     LEGACY_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,

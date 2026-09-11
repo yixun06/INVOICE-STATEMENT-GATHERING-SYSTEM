@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from .shopee_extractor import ShopeeExtractedData
 from .shopee_financial_parser import missing_income_detail_fields
+from .shopee_financial_parser import UNKNOWN_OR_MIXED
 from .validation import (
     count_product_anchor_items,
     extract_expected_product_count,
@@ -20,6 +21,7 @@ from ..review_reason_codes import (
     INCOME_DETAILS_REQUIRED_FIELD_MISSING,
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
+    FINANCIAL_LAYOUT_UNRESOLVED,
     NO_VALID_PRODUCTS,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
     PRODUCT_COUNT_MISMATCH,
@@ -96,7 +98,23 @@ def find_shopee_review_issue(
             reason=format_validation_errors(validation_errors),
         )
 
-    missing_income_fields = missing_income_detail_fields(data.normalized_text, data.income)
+    if data.invoice_financial_layout == UNKNOWN_OR_MIXED:
+        return ShopeeReviewIssue(
+            order_id=data.order_id,
+            reason=(
+                "Invoice financial layout is unresolved: only one independent "
+                "Return/Refund source signal was found."
+            ),
+            reason_code=FINANCIAL_LAYOUT_UNRESOLVED,
+        )
+
+    missing_income_fields = missing_income_detail_fields(
+        data.normalized_text,
+        data.income,
+        layout=data.invoice_financial_layout,
+        label_presence=data.income_label_presence,
+        refund_amount=data.refund_amount,
+    )
     if missing_income_fields:
         if "Estimated Order Income or Order Income" in missing_income_fields:
             if source_incomplete_evidence:
@@ -132,6 +150,7 @@ def find_shopee_review_issue(
         product_items,
         data.income.get("merchandise_subtotal"),
         data.refund_amount,
+        product_price=data.income.get("product_price"),
     )
     if product_amount_error:
         return ShopeeReviewIssue(
@@ -143,6 +162,7 @@ def find_shopee_review_issue(
     financial_error = validate_shopee_financial_reconciliation(
         data.income,
         data.refund_amount,
+        layout=data.invoice_financial_layout,
     )
     if financial_error:
         return ShopeeReviewIssue(order_id=data.order_id, reason=financial_error)

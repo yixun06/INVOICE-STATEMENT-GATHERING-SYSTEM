@@ -8,6 +8,9 @@ from ..utils.normalize import normalize_whitespace, parse_decimal
 
 MONEY_PATTERN = r"[-+]?\s*RM\s*[-+]?\s*[\d,]+(?:\.\d+)?"
 MISSING_FINANCIAL_VALUE = "N/A"
+NORMAL_ORDER = "NORMAL_ORDER"
+RETURN_REFUND = "RETURN_REFUND"
+UNKNOWN_OR_MIXED = "UNKNOWN_OR_MIXED"
 
 INCOME_ALIASES: dict[str, tuple[str, ...]] = {
     "merchandise_subtotal": ("Merchandise Subtotal",),
@@ -25,17 +28,20 @@ INCOME_ALIASES: dict[str, tuple[str, ...]] = {
         "Estimated Shipping Fee Rebate from Shopee",
     ),
     "seller_paid_shipping_fee_sst": ("Seller Paid Shipping Fee SST",),
+    "reverse_shipping_fee": ("Reverse Shipping Fee",),
+    "reverse_shipping_fee_sst": ("Reverse Shipping Fee SST",),
     "vouchers_rebates_total": ("Vouchers & Rebates",),
     "fees_charges_total": ("Fees & Charges",),
     "commission_fee": ("Commission Fee",),
     "service_fee": ("Service Fee",),
     "transaction_fee": ("Transaction Fee",),
+    "ams_commission_fee": ("AMS Commission Fee",),
     "ads_escrow_top_up_fee": ("Ads Escrow Top Up Fee",),
     "estimated_order_income": ("Estimated Order Income",),
     "final_amount": ("Final Amount",),
 }
 
-REQUIRED_INCOME_DETAIL_FIELDS = (
+NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS = (
     "merchandise_subtotal",
     "product_price",
     "shipping_subtotal",
@@ -47,6 +53,18 @@ REQUIRED_INCOME_DETAIL_FIELDS = (
     "service_fee",
     "transaction_fee",
 )
+
+RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS = (
+    "merchandise_subtotal",
+    "product_price",
+    "shipping_subtotal",
+    "shipping_fee_paid_by_buyer",
+    "shipping_fee_charged_by_logistic_provider",
+    "seller_paid_shipping_fee_sst",
+)
+
+# Backwards-compatible public name for callers that only describe normal orders.
+REQUIRED_INCOME_DETAIL_FIELDS = NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS
 
 
 def parse_income_details(text: str) -> dict[str, str]:
@@ -88,17 +106,111 @@ def extract_refund_amount(text: str) -> Decimal | None:
     return parse_decimal(match.group(1)).quantize(Decimal("0.01")) if match else None
 
 
-def missing_income_detail_fields(text: str, income: dict[str, str]) -> list[str]:
+def income_label_presence(text: str) -> frozenset[str]:
+    """Return exact supported labels visible inside the seller Income section."""
+    section = extract_section(
+        text,
+        r"^\s*(?:Hide\s+)?Income Details\s*$",
+        (
+            r"^\s*Buyer Payment\s*$",
+            r"^\s*Order History\s*$",
+            r"^\s*Home\s+My Orders\s*$",
+            r"^\s*[^\n]{0,40}\bAdd a Note\s*$",
+        ),
+    )
+    return frozenset(
+        field
+        for field, aliases in INCOME_ALIASES.items()
+        if any(_alias_label_visible(section, alias) for alias in aliases)
+    )
+
+
+def classify_invoice_financial_layout(
+    text: str,
+    *,
+    label_presence: frozenset[str] | None = None,
+) -> str:
+    """Classify only from independent, source-visible refund signals."""
+    labels = label_presence if label_presence is not None else income_label_presence(text)
+    return classify_invoice_financial_layout_from_signals(
+        invoice_financial_layout_signals(text, label_presence=labels)
+    )
+
+
+def invoice_financial_layout_signals(
+    text: str,
+    *,
+    label_presence: frozenset[str] | None = None,
+) -> frozenset[str]:
+    labels = label_presence if label_presence is not None else income_label_presence(text)
+    signals = {
+        name
+        for name, present in {
+            "refund_amount": bool(re.search(r"\bRefund\s+Amount\b", text, flags=re.IGNORECASE)),
+            "return_refund_marker": bool(
+                re.search(r"^\s*Return\s*/\s*Refund(?:\s+product)?\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+            ),
+            "reverse_shipping_fee": "reverse_shipping_fee" in labels,
+            "reverse_shipping_fee_sst": "reverse_shipping_fee_sst" in labels,
+        }.items()
+        if present
+    }
+    return frozenset(signals)
+
+
+def classify_invoice_financial_layout_from_signals(signals: frozenset[str]) -> str:
+    signal_count = len(signals)
+    if signal_count >= 2:
+        return RETURN_REFUND
+    if signal_count == 1:
+        return UNKNOWN_OR_MIXED
+    return NORMAL_ORDER
+
+
+def missing_income_detail_fields(
+    text: str,
+    income: dict[str, str],
+    *,
+    layout: str = NORMAL_ORDER,
+    label_presence: frozenset[str] | None = None,
+    refund_amount: Decimal | None = None,
+) -> list[str]:
     missing: list[str] = []
     if not re.search(r"(?:Hide\s+)?Income Details", text, flags=re.IGNORECASE):
         missing.append("Income Details section")
 
-    for field in REQUIRED_INCOME_DETAIL_FIELDS:
+    required_fields = (
+        RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS
+        if layout == RETURN_REFUND
+        else NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS
+    )
+    for field in required_fields:
         if is_missing_financial_value(income.get(field)):
             missing.append(INCOME_ALIASES[field][0])
-    if is_missing_financial_value(income.get("order_income")):
+    if layout == RETURN_REFUND:
+        if refund_amount is None:
+            missing.append("Refund Amount")
+        if (
+            is_missing_financial_value(income.get("order_income"))
+            or str(income.get("income_type", "")).strip() != "Final"
+        ):
+            missing.append("Order Income")
+    elif is_missing_financial_value(income.get("order_income")):
         missing.append("Estimated Order Income or Order Income")
+
+    if label_presence is not None:
+        for field in sorted(label_presence):
+            if field in INCOME_ALIASES and is_missing_financial_value(income.get(field)):
+                label = INCOME_ALIASES[field][0]
+                if label not in missing:
+                    missing.append(label)
     return missing
+
+
+def _alias_label_visible(text: str, alias: str) -> bool:
+    suffix = r"(?!\s+SST\b)" if alias.casefold() == "reverse shipping fee" else ""
+    prefix = r"(?<!AMS\s)" if alias.casefold() == "commission fee" else ""
+    return bool(re.search(rf"{prefix}{re.escape(alias)}{suffix}", text, flags=re.IGNORECASE))
 
 
 def parse_buyer_payment(text: str) -> dict[str, str]:
@@ -150,6 +262,7 @@ def calculate_platform_fees(income: dict[str, str]) -> str:
         income.get("commission_fee", ""),
         income.get("service_fee", ""),
         income.get("transaction_fee", ""),
+        income.get("ams_commission_fee", ""),
         income.get("ads_escrow_top_up_fee", ""),
     ]
     present = [value for value in values if not is_missing_financial_value(value)]
@@ -161,8 +274,9 @@ def calculate_platform_fees(income: dict[str, str]) -> str:
 
 def extract_alias_money(text: str, aliases: tuple[str, ...]) -> str:
     for alias in aliases:
+        prefix = r"(?<!AMS\s)" if alias.casefold() == "commission fee" else ""
         match = re.search(
-            rf"{re.escape(alias)}(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})",
+            rf"{prefix}{re.escape(alias)}(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})",
             text,
             flags=re.IGNORECASE,
         )

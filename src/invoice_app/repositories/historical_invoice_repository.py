@@ -198,15 +198,15 @@ class InMemoryHistoricalInvoiceRepository:
 def _order_facts(order: CanonicalInvoiceOrder) -> dict[str, object]:
     fields = (
         "platform", "order_id", "order_status", "order_created_date", "delivered_date", "completed_date", "fund_transfer_date",
-        "merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst",
-        "vouchers_rebates_total", "voucher_type", "voucher_code", "voucher_funded_by", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total",
+        "merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "reverse_shipping_fee", "reverse_shipping_fee_sst",
+        "vouchers_rebates_total", "voucher_type", "voucher_code", "voucher_funded_by", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ams_commission_fee", "ads_escrow_top_up_fee", "fees_charges_total",
         "order_income", "income_type", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment",
     )
     return {field: _value(getattr(order, field)) for field in fields}
 
 
 def _item_facts(item: CanonicalInvoiceItem) -> dict[str, object]:
-    fields = ("platform", "order_id", "item_index", "seller_sku", "product_name", "variation", "quantity", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total")
+    fields = ("platform", "order_id", "item_index", "seller_sku", "sku_missing_in_source", "product_name", "variation", "quantity", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "promotion_advertised_amount", "promotion_discount_percent", "source_group_total")
     return {field: _value(getattr(item, field)) for field in fields}
 
 

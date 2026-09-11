@@ -21,6 +21,7 @@ class CanonicalInvoiceOrder:
     delivered_date: date | None = None
     completed_date: date | None = None
     fund_transfer_date: date | None = None
+    invoice_financial_layout: str | None = None
     merchandise_subtotal: Decimal | None = None
     product_price: Decimal | None = None
     shipping_subtotal: Decimal | None = None
@@ -28,6 +29,8 @@ class CanonicalInvoiceOrder:
     shipping_fee_charged_by_logistic_provider: Decimal | None = None
     shipping_fee_rebate_from_shopee: Decimal | None = None
     seller_paid_shipping_fee_sst: Decimal | None = None
+    reverse_shipping_fee: Decimal | None = None
+    reverse_shipping_fee_sst: Decimal | None = None
     vouchers_rebates_total: Decimal | None = None
     voucher_type: str | None = None
     voucher_code: str | None = None
@@ -36,6 +39,7 @@ class CanonicalInvoiceOrder:
     commission_fee: Decimal | None = None
     service_fee: Decimal | None = None
     transaction_fee: Decimal | None = None
+    ams_commission_fee: Decimal | None = None
     ads_escrow_top_up_fee: Decimal | None = None
     fees_charges_total: Decimal | None = None
     order_income: Decimal | None = None
@@ -62,6 +66,7 @@ class CanonicalInvoiceItem:
     order_id: str
     item_index: int
     seller_sku: str | None = None
+    sku_missing_in_source: bool | None = None
     nav: str | None = None
     product_name: str | None = None
     variation: str | None = None
@@ -71,6 +76,8 @@ class CanonicalInvoiceItem:
     line_subtotal: Decimal | None = None
     promotion_group_id: str | None = None
     promotion_label: str | None = None
+    promotion_advertised_amount: Decimal | None = None
+    promotion_discount_percent: Decimal | None = None
     source_group_total: Decimal | None = None
     statement_product_price: Decimal | None = None
     statement_refund_amount: Decimal | None = None
@@ -114,11 +121,14 @@ _ORDER_MONEY_FIELDS = (
     "shipping_fee_charged_by_logistic_provider",
     "shipping_fee_rebate_from_shopee",
     "seller_paid_shipping_fee_sst",
+    "reverse_shipping_fee",
+    "reverse_shipping_fee_sst",
     "vouchers_rebates_total",
     "voucher_amount",
     "commission_fee",
     "service_fee",
     "transaction_fee",
+    "ams_commission_fee",
     "ads_escrow_top_up_fee",
     "fees_charges_total",
     "order_income",
@@ -147,6 +157,10 @@ def map_accepted_shopee_invoice(
         raise ValueError(
             "Historical invoice persistence accepts only Accepted Shopee source data."
         )
+    if _text(order.get("invoice_financial_layout")) == "UNKNOWN_OR_MIXED":
+        raise ValueError(
+            "UNKNOWN_OR_MIXED Invoice financial layout cannot be persisted as Accepted."
+        )
 
     canonical_order = CanonicalInvoiceOrder(
         platform="Shopee",
@@ -156,6 +170,7 @@ def map_accepted_shopee_invoice(
         delivered_date=_canonical_date(order.get("delivered_date")),
         completed_date=_canonical_date(order.get("completed_date")),
         fund_transfer_date=_canonical_date(order.get("fund_transfer_date")),
+        invoice_financial_layout=_optional_text(order.get("invoice_financial_layout")),
         **{field: _money(order.get(field)) for field in _ORDER_MONEY_FIELDS},
         voucher_type=_optional_text(order.get("voucher_type")),
         voucher_code=_optional_text(order.get("voucher_code")),
@@ -204,6 +219,7 @@ def _map_item(
         order_id=order.order_id,
         item_index=index,
         seller_sku=_optional_text(source.get("seller_sku")),
+        sku_missing_in_source=_optional_bool(source.get("sku_missing_in_source")),
         nav=_optional_text(master.get("nav")),
         product_name=_optional_text(source.get("product_name")),
         variation=_first_present_text(
@@ -219,6 +235,8 @@ def _map_item(
         ),
         promotion_group_id=_optional_text(source.get("promotion_group_id")),
         promotion_label=_optional_text(source.get("promotion_label")),
+        promotion_advertised_amount=_money(source.get("promotion_advertised_amount")),
+        promotion_discount_percent=_money(source.get("promotion_discount_percent")),
         source_group_total=_first_present_money(
             source.get("source_group_total"),
             source.get("promotion_group_total"),
@@ -270,6 +288,19 @@ def _quantity(value: Any) -> int | None:
         return int(str(value).strip())
     except (TypeError, ValueError) as error:
         raise ValueError(f"Invalid quantity value: {value!r}") from error
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None or _text(value) in {"", "N/A"}:
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = _text(value).casefold()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 def _text(value: Any) -> str:

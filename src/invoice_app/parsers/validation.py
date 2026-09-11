@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ..utils.normalize import parse_quantity
+from .shopee_financial_parser import NORMAL_ORDER, RETURN_REFUND
 
 
 MONEY_TOLERANCE = Decimal("0.02")
@@ -95,6 +96,8 @@ def validate_shopee_product_amounts(
     items: list[dict[str, Any]],
     merchandise_subtotal: Any,
     refund_amount: Any = None,
+    *,
+    product_price: Any = None,
 ) -> str | None:
     totals: list[Decimal] = []
     seen_promotion_groups: set[str] = set()
@@ -129,8 +132,16 @@ def validate_shopee_product_amounts(
     if seller_subtotal is None or not totals:
         return None
     extracted_total = sum(totals, Decimal("0"))
+    source_product_price = _decimal_value(product_price)
+    if source_product_price is not None and abs(extracted_total - source_product_price) > MONEY_TOLERANCE:
+        return (
+            "Product Amount Reconciliation Failed: "
+            f"extracted source subtotals total {extracted_total:.2f}, "
+            f"but seller Product Price is {source_product_price:.2f}."
+        )
     signed_refund = _decimal_value(refund_amount)
-    reconciled_total = extracted_total + (
+    product_base = source_product_price if source_product_price is not None else extracted_total
+    reconciled_total = product_base + (
         signed_refund if signed_refund is not None else Decimal("0")
     )
     if abs(reconciled_total - seller_subtotal) > MONEY_TOLERANCE:
@@ -150,19 +161,12 @@ def validate_shopee_product_amounts(
 def validate_shopee_financial_reconciliation(
     income: dict[str, str],
     refund_amount: Any = None,
+    *,
+    layout: str = NORMAL_ORDER,
 ) -> str | None:
-    signed_refund = _decimal_value(refund_amount)
-    product_component = (
-        "merchandise_subtotal"
-        if signed_refund is not None
-        else "product_price"
-    )
-    required_fields = (
-        product_component,
-        "shipping_subtotal",
-        "fees_charges_total",
-        "order_income",
-    )
+    required_fields = ["merchandise_subtotal", "product_price", "shipping_subtotal", "order_income"]
+    if layout != RETURN_REFUND:
+        required_fields.append("fees_charges_total")
     if any(_is_missing_money(income.get(field)) for field in required_fields):
         return None
 
@@ -173,10 +177,53 @@ def validate_shopee_financial_reconciliation(
     if any(value is None for value in required_values.values()):
         return "Financial Reconciliation Failed: a seller financial component is not numeric."
 
+    shipping_fields = (
+        "shipping_fee_paid_by_buyer",
+        "shipping_fee_charged_by_logistic_provider",
+        "shipping_fee_rebate_from_shopee",
+        "seller_paid_shipping_fee_sst",
+        "reverse_shipping_fee",
+        "reverse_shipping_fee_sst",
+    )
+    shipping_values = _present_decimal_values(income, shipping_fields)
+    if isinstance(shipping_values, str):
+        return shipping_values
+    if shipping_values:
+        shipping_components = sum(shipping_values, Decimal("0"))
+        if abs(shipping_components - required_values["shipping_subtotal"]) > MONEY_TOLERANCE:
+            return (
+                "Financial Reconciliation Failed: "
+                f"source-present shipping components total {shipping_components:.2f}, "
+                f"but Shipping Subtotal is {required_values['shipping_subtotal']:.2f}."
+            )
+
+    fee_fields = (
+        "commission_fee",
+        "service_fee",
+        "transaction_fee",
+        "ams_commission_fee",
+        "ads_escrow_top_up_fee",
+    )
+    fee_values = _present_decimal_values(income, fee_fields)
+    if isinstance(fee_values, str):
+        return fee_values
+    fees_aggregate = _decimal_value(income.get("fees_charges_total"))
+    if fees_aggregate is not None and fee_values:
+        fee_components = sum(fee_values, Decimal("0"))
+        if abs(fee_components - fees_aggregate) > MONEY_TOLERANCE:
+            return (
+                "Financial Reconciliation Failed: "
+                f"source-present fee components total {fee_components:.2f}, "
+                f"but Fees & Charges is {fees_aggregate:.2f}."
+            )
+
+    applicable_fees = fees_aggregate
+    if applicable_fees is None:
+        applicable_fees = sum(fee_values, Decimal("0"))
     expected_income = (
-        required_values[product_component]
+        required_values["merchandise_subtotal"]
         + required_values["shipping_subtotal"]
-        + required_values["fees_charges_total"]
+        + applicable_fees
     )
     vouchers = income.get("vouchers_rebates_total")
     if not _is_missing_money(vouchers):
@@ -193,6 +240,22 @@ def validate_shopee_financial_reconciliation(
             f"but Order Income is {order_income:.2f}."
         )
     return None
+
+
+def _present_decimal_values(
+    values: dict[str, str], fields: tuple[str, ...]
+) -> list[Decimal] | str:
+    result: list[Decimal] = []
+    for field in fields:
+        raw = values.get(field)
+        if _is_missing_money(raw):
+            continue
+        parsed = _decimal_value(raw)
+        if parsed is None:
+            label = field.replace("_", " ").title()
+            return f"Financial Reconciliation Failed: {label} is not numeric."
+        result.append(parsed)
+    return result
 
 
 def _has_decimal_value(value: Any) -> bool:

@@ -299,7 +299,7 @@ def test_malformed_persisted_money_or_item_identity_fails_visibly():
     gateway = FakeGateway()
     repository = _repository(gateway)
     repository.import_invoice(_bundle())
-    gateway.tabs[INVOICE_ORDERS_TAB][1][7] = "not-money"
+    gateway.tabs[INVOICE_ORDERS_TAB][1][INVOICE_ORDERS_HEADERS.index("merchandise_subtotal")] = "not-money"
     repository.refresh()
     with pytest.raises(HistoricalInvoiceStorageError, match="malformed Decimal"):
         repository.list_orders()

@@ -529,16 +529,28 @@ def _deserialize_order(row: Sequence[Any], row_number: int) -> CanonicalInvoiceO
     values = dict(zip(INVOICE_ORDERS_HEADERS, row))
     required = {"platform", "order_id"}
     dates = {"order_created_date", "delivered_date", "completed_date", "fund_transfer_date", "payout_completed_date"}
-    money = {"merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "vouchers_rebates_total", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment", "difference"}
+    money = {"merchandise_subtotal", "product_price", "shipping_subtotal", "shipping_fee_paid_by_buyer", "shipping_fee_charged_by_logistic_provider", "shipping_fee_rebate_from_shopee", "seller_paid_shipping_fee_sst", "reverse_shipping_fee", "reverse_shipping_fee_sst", "vouchers_rebates_total", "voucher_amount", "commission_fee", "service_fee", "transaction_fee", "ams_commission_fee", "ads_escrow_top_up_fee", "fees_charges_total", "order_income", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment", "difference"}
     parsed = {field: _required_text(values[field], field, INVOICE_ORDERS_TAB, row_number) if field in required else _date(values[field], INVOICE_ORDERS_TAB, row_number) if field in dates else _decimal(values[field], INVOICE_ORDERS_TAB, row_number) if field in money else _optional(values[field]) for field in INVOICE_ORDERS_HEADERS if field != "first_imported_at"}
     return CanonicalInvoiceOrder(**parsed, first_imported_at=_datetime(values["first_imported_at"], INVOICE_ORDERS_TAB, row_number))
 
 
 def _deserialize_item(row: Sequence[Any], row_number: int) -> CanonicalInvoiceItem:
     values = dict(zip(INVOICE_ITEMS_HEADERS, row))
-    money = {"unit_price", "actual_selling_unit_price", "line_subtotal", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount"}
-    parsed = {field: _required_text(values[field], field, INVOICE_ITEMS_TAB, row_number) if field in {"platform", "order_id"} else _integer(values[field], field, INVOICE_ITEMS_TAB, row_number, required=field == "item_index") if field in {"item_index", "quantity"} else _decimal(values[field], INVOICE_ITEMS_TAB, row_number) if field in money else _optional(values[field]) for field in INVOICE_ITEMS_HEADERS}
+    money = {"unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_advertised_amount", "promotion_discount_percent", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount"}
+    parsed = {field: _required_text(values[field], field, INVOICE_ITEMS_TAB, row_number) if field in {"platform", "order_id"} else _integer(values[field], field, INVOICE_ITEMS_TAB, row_number, required=field == "item_index") if field in {"item_index", "quantity"} else _decimal(values[field], INVOICE_ITEMS_TAB, row_number) if field in money else _boolean(values[field], INVOICE_ITEMS_TAB, row_number) if field == "sku_missing_in_source" else _optional(values[field]) for field in INVOICE_ITEMS_HEADERS}
     return CanonicalInvoiceItem(**parsed)
+
+
+def _boolean(value: Any, tab: str, row_number: int) -> bool | None:
+    text = _optional(value)
+    if text is None:
+        return None
+    normalized = text.casefold()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    raise HistoricalInvoiceStorageError(f"{tab} row {row_number} has malformed Boolean data.")
 
 
 def _decimal(value: Any, tab: str, row_number: int) -> Decimal | None:
