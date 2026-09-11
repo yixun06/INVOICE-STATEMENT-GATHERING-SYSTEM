@@ -889,20 +889,6 @@ def show_current_batch_validation_data() -> None:
     else:
         st.caption("No accepted orders are available in the current batch.")
 
-    show_table_section_heading(
-        "Manual Review",
-        "Current-batch sources that require review. Editing and correction are not available here.",
-    )
-    if reviews:
-        show_manual_review(
-            reviews,
-            table_key="data_import_current_batch_manual_review_table",
-            include_download=False,
-            include_payment_status=True,
-            show_heading=False,
-        )
-    else:
-        st.caption("No current-batch sources require Manual Review.")
 
 def show_upload_panel() -> list[Any] | None:
     if "uploader_version" not in st.session_state:

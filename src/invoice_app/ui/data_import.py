@@ -47,6 +47,9 @@ from ..services.shopee_statement_persistence import (
     StatementWriteIntegrityError,
 )
 from ..services.shopee_statement_item_matching import business_match_method
+from ..services.manual_review_resolution import (
+    MISSING_INCOME, PRODUCT_COUNT_MISMATCH, apply_resolution, resolution_plan,
+)
 
 
 
@@ -255,6 +258,7 @@ def _render_validation_step(
     _render_source_summary(result)
     if result.source_specific_details.get("show_platform_order_outcomes"):
         render_platform_orders_validation_data()
+        _render_manual_review_resolution()
     _render_contract_validation(result)
     if st.session_state.get("pending_validation_recovery_action"):
         _render_recovery_confirmation()
@@ -354,6 +358,73 @@ def _render_recovery_notice() -> None:
 def _render_recovery_area() -> None:
     st.subheader("Available recovery actions")
     st.caption("Use the available action to remove the identified source from the current batch and check it again. Original source files remain unchanged.")
+
+
+def _render_manual_review_resolution() -> None:
+    reviews = [item for item in st.session_state.get("reviews", []) if str(item.get("status", "")).strip() in {"", "Manual Review"}]
+    st.subheader("Manual Review")
+    notice = st.session_state.pop("manual_resolution_notice", None)
+    if notice:
+        (st.success if notice.startswith("Correction applied") else st.warning)(notice)
+    if not reviews:
+        st.caption("No current-batch sources require Manual Review.")
+        return
+    st.dataframe([{"Source PDF": item.get("source_pdf"), "Order ID": item.get("order_id"), "Reason": item.get("reason")} for item in reviews], hide_index=True)
+    st.subheader("Manual Review actions")
+    for review in reviews:
+        plan = resolution_plan(review)
+        with st.container(border=True):
+            st.write(f"**{review.get('order_id') or 'Unknown order'}** — {review.get('reason') or 'Manual Review required.'}")
+            st.caption(f"Source: {review.get('source_pdf') or 'Unavailable'}")
+            if plan is None:
+                st.info("This issue needs source evidence or Product Master resolution and cannot be force-resolved.")
+                if st.button("View Details", key=f"manual_details_{id(review)}"):
+                    _render_issue_details(ValidationIssue(reason=str(review.get("reason") or "Manual Review required."), evidence=review))
+                continue
+            if plan.issue_type == PRODUCT_COUNT_MISMATCH:
+                st.caption(f"Expected Products: {plan.expected_products if plan.expected_products is not None else 'source count unavailable'} · Extracted Products: {len(review.get('product_payloads') or [])}")
+                if review.get("product_payloads"):
+                    st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
+                _render_missing_product_form(plan.key)
+            else:
+                _render_income_form(plan.key, review)
+
+
+def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
+    try:
+        master, _ = load_configured_product_price_master()
+        outcome = apply_resolution(st.session_state, key=key, values=values, price_master=master)
+    except ProductMasterSourceError as error:
+        st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
+    else:
+        st.session_state.manual_resolution_notice = (
+            "Correction applied and revalidated. Continue to Reconcile." if outcome.resolved else f"Still needs review — {outcome.reason}"
+        )
+    st.rerun()
+
+
+def _render_missing_product_form(key: str) -> None:
+    with st.form(f"missing_product_{key}", border=False):
+        st.caption("Add only facts visible in the original Invoice source. NAV and Master Unit Price are derived after validation.")
+        seller_sku = st.text_input("Seller SKU", key=f"mr_sku_{key}")
+        product_name = st.text_input("Product Name", key=f"mr_name_{key}")
+        variation = st.text_input("Variation (optional)", key=f"mr_variation_{key}")
+        quantity = st.number_input("Quantity", min_value=1, step=1, key=f"mr_qty_{key}")
+        actual_price = st.text_input("Actual Selling Unit Price", key=f"mr_actual_{key}")
+        subtotal = st.text_input("Line Subtotal", key=f"mr_subtotal_{key}")
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(key, {"seller_sku": seller_sku, "product_name": product_name, "variation": variation, "quantity": quantity, "actual_selling_unit_price": actual_price, "line_subtotal": subtotal})
+
+
+def _render_income_form(key: str, review: dict[str, Any]) -> None:
+    payload = review.get("order_payload") or {}
+    with st.form(f"income_resolution_{key}", border=False):
+        st.caption(f"Parser value: {payload.get('order_income') or 'Missing'}")
+        income = st.text_input("Order Income", key=f"mr_income_{key}")
+        income_type = st.selectbox("Income Type", ("Estimated", "Final"), key=f"mr_income_type_{key}")
+        final_amount = st.text_input("Final Amount (only when shown in source)", key=f"mr_final_{key}")
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(key, {"order_income": income, "income_type": income_type, "final_amount": final_amount})
 
 def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")

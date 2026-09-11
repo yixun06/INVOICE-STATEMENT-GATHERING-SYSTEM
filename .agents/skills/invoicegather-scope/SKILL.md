@@ -2797,6 +2797,16 @@ removed. The Shopee Dashboard remains reserved for a future DB-backed Live
 Analysis view. Manual Review correction/editing, Add Missing Product, and Apply
 & Revalidate are explicitly deferred to Round 2.
 
+### Manual Review resolution — Round 2
+
+Manual Review corrects supported extraction facts only; it must never invent a
+missing source value, SKU, amount, date, or zero. Use compact issue-driven
+forms and Apply & Revalidate, not a generic Invoice editor. Product Count
+Mismatch may add one source-supported product fact; NAV and Master Unit Price
+remain authoritative Product Master-derived values. Non-resolvable source or
+Product Master issues remain NEEDS_REVIEW. A corrected record re-enters the
+normal Validate → Reconcile → Review & Commit workflow without a special writer.
+
 ## 16.2 Validation Recovery UX — Confirmed principle, actions partly TODO
 
 A validation failure must not be a dead-end error message when a safe, well-defined correction can be performed inside the current workflow.
