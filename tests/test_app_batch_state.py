@@ -462,6 +462,17 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
     )
     assert current_order_table["Order ID"].tolist() == ["SHP-1", "LZD-1", "ZNX-1"]
     assert {"Payment Status", "Refund Amount"} <= set(current_order_table.columns)
+    assert app.session_state.filtered_state["data_import_current_batch_optional_order_columns"] == [
+        "order_created_date",
+        "order_status",
+        "order_income",
+        "final_amount",
+        "source_pdf",
+    ]
+    order_columns_picker = next(
+        element for element in app.multiselect if element.label == "Order columns"
+    )
+    assert "Merchandise Subtotal" in order_columns_picker.options
     assert {"Current Batch Overview", "Search and Filters"} <= {
         element.value for element in app.subheader
     }
@@ -473,6 +484,20 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
         ("Final Amount", "RM 10.00"),
         ("Manual Review", "1"),
     } <= {(metric.label, metric.value) for metric in app.metric}
+
+    order_columns_picker.set_value(
+        [
+            "Order Created Date",
+            "Order Status",
+            "Order Income",
+            "Final Amount",
+            "Source PDF",
+            "Merchandise Subtotal",
+        ]
+    ).run(timeout=20)
+    assert "merchandise_subtotal" in app.session_state.filtered_state[
+        "data_import_current_batch_optional_order_columns"
+    ]
 
     next(element for element in app.text_input if element.label == "Product or SKU").set_value("LZD-SKU").run(timeout=20)
 

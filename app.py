@@ -892,7 +892,24 @@ def show_current_batch_validation_data() -> None:
 
     show_table_section_heading(
         "Current Batch — Order Level Data",
-        "Filter accepted orders by Order ID, Product or SKU, and Platform. The table toolbar can reveal every available order field.",
+        "Choose the default visible order fields, then filter accepted orders by Order ID, Product or SKU, and Platform.",
+    )
+    show_locked_columns(ORDER_REQUIRED_COLUMNS)
+    initial_order_optional_columns = [
+        column for column in order_columns if column not in ORDER_REQUIRED_COLUMNS
+    ]
+    selected_optional_order_columns = st.multiselect(
+        "Order columns",
+        options=optional_columns(available_order_columns, ORDER_REQUIRED_COLUMNS),
+        default=initial_order_optional_columns,
+        format_func=lambda column: FIELD_LABELS.get(column, column),
+        key="data_import_current_batch_optional_order_columns",
+        help="Platform and Order ID are always included. Select fields such as Merchandise Subtotal, Product Price, fees, or dates to add them to the table.",
+    )
+    selected_order_columns = selected_view_columns(
+        available_order_columns,
+        ORDER_REQUIRED_COLUMNS,
+        selected_optional_order_columns,
     )
     if orders:
         display_orders = [
@@ -924,7 +941,7 @@ def show_current_batch_validation_data() -> None:
             return
         show_data_table(
             filtered_order_frame,
-            order_columns,
+            selected_order_columns,
             key="data_import_current_batch_order_level_table",
             available_columns=available_order_columns,
             height=320,
