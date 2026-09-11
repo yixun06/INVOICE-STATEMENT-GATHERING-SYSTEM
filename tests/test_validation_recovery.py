@@ -232,6 +232,12 @@ def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_
     )
     app.run(timeout=20)
 
+    assert "Historical Invoice Status" not in {element.value for element in app.subheader}
+    assert all("Historical Status" not in frame.value.columns for frame in app.dataframe)
+
+    app.session_state["data_import_step"] = 4
+    app.run(timeout=20)
+
     historical_table = next(
         frame.value
         for frame in app.dataframe
@@ -298,7 +304,7 @@ def test_review_commit_readiness_includes_historical_option_a_gate(tmp_path, mon
     assert app.exception == []
     assert not any("Ready to Commit" in success.value for success in app.success)
     assert any(
-        "Return to Validate and resolve/remove all non-NEW sources before Commit."
+        "Return to Reconcile and resolve/remove all non-NEW sources before Commit."
         in warning.value
         for warning in app.warning
     )

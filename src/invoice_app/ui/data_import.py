@@ -91,6 +91,7 @@ def render_data_import(
     *,
     render_platform_orders_upload: Callable[[], Any],
     render_platform_orders_outcomes: Callable[[], Any],
+    render_platform_orders_validation_data: Callable[[], Any],
     discard_current_batch: Callable[[], None],
 ) -> None:
     """Render the sequential import workspace over the existing services."""
@@ -105,7 +106,10 @@ def render_data_import(
     elif step == 2:
         _render_upload_step(render_platform_orders_upload)
     elif step == 3:
-        _render_validation_step(render_platform_orders_outcomes)
+        _render_validation_step(
+            render_platform_orders_outcomes,
+            render_platform_orders_validation_data,
+        )
     elif step == 4:
         _render_reconciliation_step()
     else:
@@ -242,13 +246,16 @@ def _render_weekly_statement_upload() -> None:
             st.rerun()
 
 
-def _render_validation_step(render_platform_orders_outcomes: Callable[[], Any]) -> None:
+def _render_validation_step(
+    render_platform_orders_outcomes: Callable[[], Any],
+    render_platform_orders_validation_data: Callable[[], Any],
+) -> None:
     st.subheader("Validate")
     result = _current_import_result()
     _render_source_summary(result)
-    _render_contract_validation(result)
     if result.source_specific_details.get("show_platform_order_outcomes"):
-        _validate_historical_invoice_staging()
+        render_platform_orders_validation_data()
+    _render_contract_validation(result)
     if st.session_state.get("pending_validation_recovery_action"):
         _render_recovery_confirmation()
     if result.source_specific_details.get("show_platform_order_outcomes"):
@@ -350,6 +357,12 @@ def _render_recovery_area() -> None:
 
 def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")
+    if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        _reconcile_historical_invoice_staging()
+        if st.session_state.get("pending_validation_recovery_action"):
+            _render_recovery_confirmation()
+        _render_next_step("Continue to review & commit", 5)
+        return
     reconciliation = _current_import_result().reconciliation
     if not reconciliation.available:
         reason = reconciliation.source_specific_details.get("reason")
@@ -391,7 +404,7 @@ def _render_review_and_commit_step() -> None:
             st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
         else:
             st.warning(
-                "Return to Validate and resolve/remove all non-NEW sources before Commit.",
+                "Return to Reconcile and resolve/remove all non-NEW sources before Commit.",
                 icon=":material/warning:",
             )
         _render_historical_invoice_commit()
@@ -448,7 +461,7 @@ def _render_historical_invoice_commit() -> None:
     st.subheader("Historical Invoice Commit")
     st.caption(
         "Only Accepted Shopee invoices are eligible. Lazada and ZENXIN remain outside UAT2 Phase 3 persistence. "
-        "Historical status is calculated during Validate."
+        "Historical status is calculated during Reconcile."
     )
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
     if not entries:
@@ -462,7 +475,7 @@ def _render_historical_invoice_commit() -> None:
     )
     refresh_required = bool(st.session_state.get("uat2_historical_commit_refresh_required", False))
     if refresh_required:
-        st.warning("Return to Validate and revalidate historical status before retrying.")
+        st.warning("Return to Reconcile and revalidate historical status before retrying.")
     clean_batch = _historical_commit_ready(entries)
     if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not clean_batch or refresh_required, key="uat2_historical_commit"):
         try:
@@ -487,7 +500,7 @@ def _render_historical_invoice_commit() -> None:
             st.error(f"Historical Invoice storage write failed: {error}")
 
 
-def _validate_historical_invoice_staging() -> None:
+def _reconcile_historical_invoice_staging() -> None:
     signature = _historical_commit_signature()
     refresh_required = st.session_state.get(
         "uat2_historical_commit_refresh_required", False
@@ -519,7 +532,7 @@ def _validate_historical_invoice_staging() -> None:
     _render_historical_status_details(
         entries,
         allow_removal=True,
-        key_prefix="validate_historical",
+        key_prefix="reconcile_historical",
     )
 
 

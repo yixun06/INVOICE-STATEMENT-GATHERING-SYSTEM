@@ -203,7 +203,10 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
         if platform_name != "Shopee":
             navigate(app, platform_name)
         assert app.exception == []
-        assert "Manual Review" in {element.value for element in app.subheader}
+        if platform_name == "Shopee":
+            assert "Manual Review" not in {element.value for element in app.subheader}
+        else:
+            assert "Manual Review" in {element.value for element in app.subheader}
         assert ("Manual Review", "1") in {
             (metric.label, metric.value) for metric in app.metric
         }
@@ -212,12 +215,7 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
             assert "order_payload" not in dataframe.value.columns
             assert "product_payloads" not in dataframe.value.columns
         if platform_name == "Shopee":
-            review_table = next(
-                dataframe.value
-                for dataframe in app.dataframe
-                if "Payment Status" in dataframe.value.columns
-            )
-            assert review_table["Payment Status"].tolist() == ["Released"]
+            assert app.dataframe == []
         else:
             assert all("Payment Status" not in dataframe.value.columns for dataframe in app.dataframe)
 
@@ -337,7 +335,7 @@ def test_platform_tabs_hide_manual_review_section_when_that_platform_has_none(tm
     app.run(timeout=20)
 
     assert app.exception == []
-    assert "Manual Review" in {element.value for element in app.subheader}
+    assert "Manual Review" not in {element.value for element in app.subheader}
     assert ("Manual Review", "1") in {
         (metric.label, metric.value) for metric in app.metric
     }
@@ -414,7 +412,7 @@ def test_zenxin_preview_invoice_date_is_typed_without_lazada_format_coercion(tmp
     assert order_table["Invoice Date"].dtype.kind == "M"
     assert order_table["Invoice Date"].iloc[0].strftime("%d/%m/%Y") == "31/03/2026"
 
-def test_platform_order_defaults_are_compact_for_shopee_and_lazada_only(tmp_path, monkeypatch):
+def test_data_import_order_level_is_compact_and_omits_dashboard_debug_columns(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -427,46 +425,19 @@ def test_platform_order_defaults_are_compact_for_shopee_and_lazada_only(tmp_path
     app.session_state["reviews"] = []
     app.session_state["batch_id"] = "batch-default-columns"
     app.session_state["pdf_count"] = 3
-    app.session_state["navigation"] = "Shopee"
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
 
     app.run(timeout=20)
     assert app.exception == []
-    shopee_order_table = next(
+    current_order_table = next(
         dataframe.value
         for dataframe in app.dataframe
-        if "Payment Status" in dataframe.value.columns
+        if "Order ID" in dataframe.value.columns
     )
-    assert shopee_order_table["Payment Status"].tolist() == ["Pending"]
-    assert "Refund Amount" in shopee_order_table.columns
-    navigate(app, "Lazada")
-    assert app.exception == []
-    navigate(app, "ZENXIN")
-
-    assert app.exception == []
-    state = app.session_state.filtered_state
-    assert state["Shopee_optional_order_columns"] == [
-        "order_status",
-        "payment_status",
-        "order_created_date",
-        "fund_transfer_date",
-        "order_income",
-        "merchandise_subtotal",
-    ]
-    assert state["Lazada_optional_order_columns"] == [
-        "invoice_number",
-        "order_date",
-        "invoice_date",
-        "payment_method",
-        "subtotal",
-        "net_paid",
-        "source_pdf",
-        "status",
-    ]
-    assert state["ZENXIN_optional_order_columns"] == [
-        column
-        for column in PLATFORM_ORDER_FIELDS["ZENXIN"]
-        if column not in {"platform", "order_id"}
-    ]
+    assert current_order_table["Order ID"].tolist() == ["SHP-1", "LZD-1", "ZNX-1"]
+    assert {"Payment Status", "Refund Amount"}.isdisjoint(current_order_table.columns)
 
 
 def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path, monkeypatch):
@@ -485,7 +456,9 @@ def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path
     app.session_state["reviews"] = []
     app.session_state["batch_id"] = "batch-order-date-projection"
     app.session_state["pdf_count"] = 1
-    app.session_state["navigation"] = "Shopee"
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
 
     app.run(timeout=20)
 
@@ -654,25 +627,32 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert app.toggle == []
     assert app.get("badge") == []
     assert "View skipped items" in {expander.label for expander in app.expander}
-    assert {"Validate", "Result Summary", "Available recovery actions"} <= {
+    assert {
+        "Validate",
+        "Result Summary",
+        "Current Batch — Order Level Data",
+        "Manual Review",
+        "Available recovery actions",
+    } <= {
         element.value for element in app.subheader
     }
-    assert len(app.dataframe) == 1
-    assert list(app.dataframe[0].value.columns) == [
-        "Source PDF",
-        "Order ID",
-        "Historical Status",
-        "Reason / Message",
-    ]
+    current_order_table = next(
+        dataframe.value for dataframe in app.dataframe if "Order ID" in dataframe.value.columns
+    )
+    assert current_order_table["Order ID"].tolist() == ["ORD-A"]
+    assert all("Historical Status" not in dataframe.value.columns for dataframe in app.dataframe)
 
     navigate(app, "Shopee")
 
     assert app.exception == []
-    assert {"Search and Filters", "Order Level", "Product Level", "Manual Review"} <= {
+    assert {"Search and Filters", "Product Level"} <= {
         element.value for element in app.subheader
     }
+    assert {"Order Level", "Manual Review"}.isdisjoint(
+        {element.value for element in app.subheader}
+    )
     assert app.expander == []
-    assert len(app.dataframe) == 3
+    assert len(app.dataframe) == 1
     assert {"Export full Shopee batch", "Export current filtered view"} <= {
         button.label for button in app.get("download_button")
     }

@@ -2752,8 +2752,8 @@ standalone heavyweight Statement management page:
 Invoice Import
 → PDF / ZIP upload
 → Parse / Manual Review
-→ Validate current batch and historical Order IDs
-→ remove only unwanted current-batch candidates
+→ Validate current-source extraction, Order Level Data, Manual Review, and processing issues
+→ Reconcile historical Invoice DB Order IDs and remove only unwanted current-batch candidates
 → Review & Commit Invoice_Orders + Invoice_Items
 
 Statement Import
@@ -2779,6 +2779,23 @@ Keep Statement presentation compact and import-focused: batch facts,
 validation/readiness status, Order reconciliation rows, and SKU matching rows.
 Billing remains a future committed-data query and Live Analysis remains a
 future database-backed report; neither belongs in Statement Import.
+
+### Invoice Import responsibility split — Confirmed / Locked
+
+For the Invoice Import workflow, `Validate` answers whether the current uploaded
+source is valid. It owns the current-batch Order Level Data, the read-only
+Manual Review table, processing errors, and source validation status. It must
+not show Historical Invoice DB classification.
+
+`Reconcile` answers how that validated batch compares with the historical
+Invoice DB. It owns Historical Invoice Status, existing Order ID
+classification/reclassification, and safe removal from the **current** candidate
+batch. Removal must never delete a historical DB row.
+
+The duplicated Shopee Dashboard Order Level Data and Manual Review table are
+removed. The Shopee Dashboard remains reserved for a future DB-backed Live
+Analysis view. Manual Review correction/editing, Add Missing Product, and Apply
+& Revalidate are explicitly deferred to Round 2.
 
 ## 16.2 Validation Recovery UX — Confirmed principle, actions partly TODO
 

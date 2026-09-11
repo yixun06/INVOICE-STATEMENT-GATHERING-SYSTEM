@@ -851,6 +851,59 @@ def show_current_batch_outcomes() -> None:
         show_upload_result_summary(summary)
     show_batch_outcome_details()
 
+
+def show_current_batch_validation_data() -> None:
+    """Render the concise, current-batch-only operational data for Validate."""
+    orders = st.session_state.get("orders", [])
+    reviews = st.session_state.get("reviews", [])
+    order_columns = [
+        "platform",
+        "order_id",
+        "order_created_date",
+        "order_status",
+        "order_income",
+        "final_amount",
+        "source_pdf",
+    ]
+    show_table_section_heading(
+        "Current Batch — Order Level Data",
+        "Accepted orders from the currently uploaded batch.",
+    )
+    if orders:
+        display_orders = [
+            order
+            for platform_name in PLATFORMS
+            for order in _platform_order_display_rows(
+                platform_name,
+                [item for item in orders if item.get("platform") == platform_name],
+            )
+        ]
+        order_frame = frame_with_columns(display_orders, order_columns, MISSING_VALUE_PLACEHOLDER)
+        show_data_table(
+            order_frame,
+            order_columns,
+            key="data_import_current_batch_order_level_table",
+            available_columns=order_columns,
+            height=320,
+        )
+    else:
+        st.caption("No accepted orders are available in the current batch.")
+
+    show_table_section_heading(
+        "Manual Review",
+        "Current-batch sources that require review. Editing and correction are not available here.",
+    )
+    if reviews:
+        show_manual_review(
+            reviews,
+            table_key="data_import_current_batch_manual_review_table",
+            include_download=False,
+            include_payment_status=True,
+            show_heading=False,
+        )
+    else:
+        st.caption("No current-batch sources require Manual Review.")
+
 def show_upload_panel() -> list[Any] | None:
     if "uploader_version" not in st.session_state:
         st.session_state.uploader_version = 0
@@ -1109,7 +1162,7 @@ def show_platform_tab(
             icon=":material/download:",
             key=f"{platform_name}_export_disabled",
         )
-        if platform_reviews:
+        if platform_reviews and platform_name != "Shopee":
             show_manual_review(
                 platform_reviews,
                 title="Manual Review",
@@ -1157,7 +1210,7 @@ def show_platform_tab(
     product_df = frame_with_columns(product_display_rows, platform_product_columns, missing_value)
     filtered_order_df, filtered_product_df = apply_platform_filters(platform_name, order_df, product_df)
 
-    if platform_orders:
+    if platform_orders and platform_name != "Shopee":
         show_table_section_heading(
             "Order Level",
             "Choose default order/export columns. The table toolbar can reveal every available order field.",
@@ -1219,13 +1272,14 @@ def show_platform_tab(
                 platform_name=platform_name,
             )
 
-    show_manual_review(
-        platform_reviews,
-        title="Manual Review",
-        table_key=f"{platform_name}_manual_review_table",
-        include_download=False,
-        include_payment_status=platform_name == "Shopee",
-    )
+    if platform_name != "Shopee":
+        show_manual_review(
+            platform_reviews,
+            title="Manual Review",
+            table_key=f"{platform_name}_manual_review_table",
+            include_download=False,
+            include_payment_status=False,
+        )
     show_platform_export(
         platform_name=platform_name,
         full_batch_kpi=full_batch_kpi,
@@ -1687,6 +1741,7 @@ def show_manual_review(
     table_key: str = "manual_review_table",
     include_download: bool = True,
     include_payment_status: bool = False,
+    show_heading: bool = True,
 ) -> None:
     review_frame = public_review_frame(
         reviews,
@@ -1695,10 +1750,11 @@ def show_manual_review(
     if review_frame.empty:
         return
 
-    show_table_section_heading(
-        title,
-        f"{len(review_frame)} item(s) need manual checking before they can be used in the final dataset.",
-    )
+    if show_heading:
+        show_table_section_heading(
+            title,
+            f"{len(review_frame)} item(s) need manual checking before they can be used in the final dataset.",
+        )
     if "processing_timestamp" in review_frame.columns:
         review_frame["processing_timestamp"] = pd.to_datetime(review_frame["processing_timestamp"], errors="coerce")
     review_display_frame = pascal_case_frame(review_frame)
@@ -1753,6 +1809,7 @@ if selected_page == DATA_IMPORT_PAGE:
     render_data_import(
         render_platform_orders_upload=show_upload_panel,
         render_platform_orders_outcomes=show_current_batch_outcomes,
+        render_platform_orders_validation_data=show_current_batch_validation_data,
         discard_current_batch=request_batch_discard_confirmation,
     )
 elif selected_page == WEEKLY_BILLING_PAGE:
