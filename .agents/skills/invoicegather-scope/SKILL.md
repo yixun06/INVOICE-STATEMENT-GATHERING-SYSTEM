@@ -223,8 +223,35 @@ excluded because it is a derived parser classification.
 Every source-fact Manual Review correction must pass one complete revalidation
 chain: product count and structure, promotion evidence/allocation, product and
 financial totals, layout classification/requirements, Product Master/NAV, and
-current-batch rules. Phase B multi-product drafts, promotion-group selection,
-and Promotion Subtotal correction remain deferred.
+current-batch rules. There is no manual-override Accepted path.
+
+### Invoice Manual Review source correction — Phase B / Locked
+
+Manual Review may correct only facts visibly present in the source. Product
+Count Mismatch uses a session-only order/source correction draft so multiple
+missing products can be added, edited, or removed before one Apply & Revalidate.
+Extracted plus manually added products must exactly equal the source-declared
+count; a lower count cannot apply and a higher count is invalid. Drafts clear
+after success/cancel and are invalidated when their batch, source, order, or
+review identity changes. They are never persisted.
+
+Seller SKU is entered only when visible. If genuinely absent it remains blank
+with `sku_missing_in_source=True`, enabling only the approved deterministic
+Product Name plus Variation lookup. Product Master Unit Price and NAV come from
+the same matched master row; users cannot edit them or clear Pricing Conflict.
+
+A manual product may select No Promotion or one reliable source-detected group
+from the same order. The UI never accepts a freeform `promotion_group_id` and
+preserves the selected group's label, advertised amount/discount, target,
+membership, and source total. Allocation remains system-derived and reruns in
+the complete validation chain.
+
+Promotion Subtotal correction is allowed only for Case 1: reliable container
+boundary, group identity, member ownership, and a visibly present subtotal that
+the parser failed to certify. Source confirmation is required. Case 2
+(ambiguous boundary/membership/ownership) and Case 3 (subtotal absent from the
+PDF) remain blocked; advertised amounts, Product Master prices, and calculated
+unit-price totals cannot substitute for the missing source fact.
 
 ## STEP 2 — Shopee Weekly Statement Locked Scope v1 — Confirmed / Locked
 

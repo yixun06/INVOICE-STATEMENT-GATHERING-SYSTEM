@@ -48,7 +48,23 @@ from ..services.shopee_statement_persistence import (
 )
 from ..services.shopee_statement_item_matching import business_match_method
 from ..services.manual_review_resolution import (
-    MISSING_INCOME, PRODUCT_COUNT_MISMATCH, apply_resolution, resolution_plan,
+    MISSING_INCOME,
+    PRODUCT_COUNT_MISMATCH,
+    PROMOTION_SUBTOTAL,
+    add_draft_product,
+    apply_product_draft,
+    apply_resolution,
+    clear_correction_draft,
+    draft_products,
+    draft_promotion_subtotals,
+    draft_summary,
+    edit_draft_product,
+    promotion_group_options,
+    promotion_subtotal_groups,
+    remove_draft_product,
+    resolution_plan,
+    set_draft_promotion_subtotal,
+    synchronize_correction_drafts,
 )
 
 
@@ -74,6 +90,7 @@ _WORKFLOW_KEYS = (
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
+    "manual_review_correction_drafts",
 )
 
 
@@ -377,6 +394,7 @@ def _render_recovery_area() -> None:
 
 
 def _render_manual_review_resolution() -> None:
+    synchronize_correction_drafts(st.session_state)
     reviews = [item for item in st.session_state.get("reviews", []) if str(item.get("status", "")).strip() in {"", "Manual Review"}]
     st.subheader("Manual Review")
     notice = st.session_state.pop("manual_resolution_notice", None)
@@ -411,10 +429,11 @@ def _render_manual_review_resolution() -> None:
                     )
                 continue
             if plan.issue_type == PRODUCT_COUNT_MISMATCH:
-                st.caption(f"Expected Products: {plan.expected_products if plan.expected_products is not None else 'source count unavailable'} · Extracted Products: {len(review.get('product_payloads') or [])}")
                 if review.get("product_payloads"):
                     st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
-                _render_missing_product_form(plan.key)
+                _render_missing_product_draft(plan.key, review)
+            elif plan.issue_type == PROMOTION_SUBTOTAL:
+                _render_promotion_subtotal_form(plan.key, review)
             else:
                 _render_income_form(plan.key, review)
 
@@ -432,17 +451,159 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
     st.rerun()
 
 
-def _render_missing_product_form(key: str) -> None:
-    with st.form(f"missing_product_{key}", border=False):
-        st.caption("Add only facts visible in the original Invoice source. NAV and Master Unit Price are derived after validation.")
-        seller_sku = st.text_input("Seller SKU", key=f"mr_sku_{key}")
-        product_name = st.text_input("Product Name", key=f"mr_name_{key}")
-        variation = st.text_input("Variation (optional)", key=f"mr_variation_{key}")
-        quantity = st.number_input("Quantity", min_value=1, step=1, key=f"mr_qty_{key}")
-        actual_price = st.text_input("Actual Selling Unit Price", key=f"mr_actual_{key}")
-        subtotal = st.text_input("Line Subtotal", key=f"mr_subtotal_{key}")
+def _render_missing_product_draft(key: str, review: dict[str, Any]) -> None:
+    summary = draft_summary(st.session_state, review)
+    st.caption(
+        f"Extracted Products: {summary.extracted_count} · Manually Added: {summary.manual_count} · "
+        f"Source Declared: {summary.declared_count if summary.declared_count is not None else 'Unavailable'} · "
+        f"Remaining Missing: {summary.remaining_missing if summary.remaining_missing is not None else 'Unavailable'}"
+    )
+    manual_products = draft_products(st.session_state, review)
+    if manual_products:
+        st.write("Manual corrections")
+    for index, product in enumerate(manual_products):
+        with st.expander(f"Product {index + 1}: {product.get('product_name') or 'Unnamed product'}"):
+            _render_draft_product_form(key, review, index=index, existing=product)
+            if st.button("Remove product", key=f"mr_remove_{key}_{index}", icon=":material/delete:"):
+                outcome = remove_draft_product(st.session_state, key=key, index=index)
+                st.session_state.manual_resolution_notice = "Draft product removed." if outcome.resolved else str(outcome.reason)
+                st.rerun()
+    if summary.remaining_missing is None or summary.remaining_missing > 0:
+        with st.expander("Add missing product", expanded=not manual_products):
+            _render_draft_product_form(key, review)
+    _render_draft_promotion_subtotals(key, review)
+    with st.container(horizontal=True):
+        if st.button(
+            "Apply & Revalidate",
+            type="primary",
+            key=f"mr_apply_draft_{key}",
+            disabled=summary.remaining_missing != 0 or summary.exceeds_declared_count,
+        ):
+            _apply_product_draft(key)
+        if st.button("Cancel corrections", key=f"mr_clear_draft_{key}"):
+            clear_correction_draft(st.session_state, key=key)
+            st.session_state.manual_resolution_notice = "Correction draft cleared."
+            st.rerun()
+
+
+def _render_draft_promotion_subtotals(key: str, review: dict[str, Any]) -> None:
+    saved = draft_promotion_subtotals(st.session_state, review)
+    for group in promotion_subtotal_groups(review):
+        with st.form(f"draft_promotion_subtotal_{key}_{group.group_id}", border=False):
+            st.caption(f"Promotion subtotal source correction: {group.label} · {', '.join(group.member_names)}")
+            subtotal = st.text_input(
+                "Promotion Subtotal",
+                value=saved.get(group.group_id, ""),
+                key=f"mr_draft_promo_subtotal_{key}_{group.group_id}",
+            )
+            confirmed = st.checkbox(
+                "I verified this subtotal is visibly printed in the original Invoice source",
+                key=f"mr_draft_promo_confirm_{key}_{group.group_id}",
+            )
+            if st.form_submit_button("Save promotion subtotal"):
+                outcome = set_draft_promotion_subtotal(
+                    st.session_state,
+                    key=key,
+                    group_id=group.group_id,
+                    value=subtotal,
+                    source_confirmed=confirmed,
+                )
+                st.session_state.manual_resolution_notice = (
+                    "Correction draft updated." if outcome.resolved else f"Still needs review — {outcome.reason}"
+                )
+                st.rerun()
+
+
+def _render_draft_product_form(
+    key: str,
+    review: dict[str, Any],
+    *,
+    index: int | None = None,
+    existing: dict[str, Any] | None = None,
+) -> None:
+    existing = existing or {}
+    suffix = f"{key}_{index if index is not None else 'new'}"
+    groups = promotion_group_options(review)
+    group_labels = ["No Promotion", *[
+        f"{group.label} · {', '.join(group.member_names)}"
+        + (f" · subtotal RM{group.source_group_total}" if group.source_group_total else "")
+        for group in groups
+    ]]
+    group_ids = ["", *[group.group_id for group in groups]]
+    selected_id = str(existing.get("promotion_group_id") or "")
+    selected_index = group_ids.index(selected_id) if selected_id in group_ids else 0
+    promotion_index = st.selectbox(
+        "Promotion membership",
+        range(len(group_labels)),
+        index=selected_index,
+        format_func=lambda value: group_labels[value],
+        key=f"mr_promotion_{suffix}",
+    )
+    has_promotion = bool(group_ids[promotion_index])
+    with st.form(f"missing_product_{suffix}", border=False):
+        st.caption("Enter only facts visible in the original Invoice. NAV, Product Master price, and promotion allocation are derived.")
+        sku_source = st.selectbox(
+            "Seller SKU source evidence",
+            ("Visible in source", "Not shown in source"),
+            index=1 if existing.get("sku_missing_in_source") else 0,
+            key=f"mr_sku_source_{suffix}",
+        )
+        seller_sku = st.text_input("Seller SKU", value=str(existing.get("seller_sku") or ""), key=f"mr_sku_{suffix}")
+        product_name = st.text_input("Product Name", value=str(existing.get("product_name") or ""), key=f"mr_name_{suffix}")
+        variation = st.text_input("Variation (optional)", value=str(existing.get("variation") or ""), key=f"mr_variation_{suffix}")
+        quantity = st.number_input("Quantity", min_value=1, step=1, value=max(1, int(existing.get("quantity") or 1)), key=f"mr_qty_{suffix}")
+        if has_promotion:
+            st.caption("Actual selling allocation is derived from the selected source promotion group.")
+            actual_price = ""
+            subtotal = ""
+        else:
+            actual_price = st.text_input("Source Actual Selling Unit Price", value=str(existing.get("unit_price") or ""), key=f"mr_actual_{suffix}")
+            subtotal = st.text_input("Source Line Subtotal", value=str(existing.get("source_line_subtotal") or ""), key=f"mr_subtotal_{suffix}")
+        label = "Save changes" if index is not None else "Add missing product"
+        if st.form_submit_button(label, type="primary"):
+            values = {
+                "seller_sku_visible": sku_source == "Visible in source", "seller_sku": seller_sku,
+                "product_name": product_name, "variation": variation, "quantity": quantity,
+                "promotion_group_id": group_ids[promotion_index],
+                "actual_selling_unit_price": actual_price, "line_subtotal": subtotal,
+            }
+            outcome = (
+                edit_draft_product(st.session_state, key=key, index=index, values=values)
+                if index is not None
+                else add_draft_product(st.session_state, key=key, values=values)
+            )
+            st.session_state.manual_resolution_notice = (
+                "Correction draft updated." if outcome.resolved else f"Still needs review — {outcome.reason}"
+            )
+            st.rerun()
+
+
+def _apply_product_draft(key: str) -> None:
+    try:
+        master, _ = load_configured_product_price_master()
+        outcome = apply_product_draft(st.session_state, key=key, price_master=master)
+    except ProductMasterSourceError as error:
+        st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
+    else:
+        st.session_state.manual_resolution_notice = (
+            "Correction applied and revalidated. Continue to Reconcile."
+            if outcome.resolved else f"Still needs review — {outcome.reason}"
+        )
+    st.rerun()
+
+
+def _render_promotion_subtotal_form(key: str, review: dict[str, Any]) -> None:
+    groups = promotion_subtotal_groups(review)
+    if not groups:
+        st.info("Promotion evidence is ambiguous or the subtotal is absent from the source, so it cannot be safely corrected here.")
+        return
+    labels = [f"{group.label} · {', '.join(group.member_names)}" for group in groups]
+    with st.form(f"promotion_subtotal_{key}", border=False):
+        selected = st.selectbox("Promotion group", range(len(groups)), format_func=lambda value: labels[value], key=f"mr_promo_subtotal_group_{key}")
+        subtotal = st.text_input("Promotion Subtotal", key=f"mr_promo_subtotal_{key}")
+        confirmed = st.checkbox("I verified this subtotal is visibly printed in the original Invoice source", key=f"mr_promo_subtotal_confirm_{key}")
         if st.form_submit_button("Apply & Revalidate", type="primary"):
-            _apply_manual_resolution(key, {"seller_sku": seller_sku, "product_name": product_name, "variation": variation, "quantity": quantity, "actual_selling_unit_price": actual_price, "line_subtotal": subtotal})
+            _apply_manual_resolution(key, {"source_confirmed": confirmed, "promotion_group_id": groups[selected].group_id, "source_group_total": subtotal})
 
 
 def _render_income_form(key: str, review: dict[str, Any]) -> None:

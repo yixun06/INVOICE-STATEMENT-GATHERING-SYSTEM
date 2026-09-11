@@ -934,6 +934,12 @@ def _normalize_product_record(row: dict[str, Any]) -> dict[str, Any]:
         normalized[field] = _normalize_money_value(normalized.get(field, ""))
     _sync_product_aliases(normalized)
     _apply_platform_placeholders(normalized, PLATFORM_PRODUCT_PLACEHOLDER_FIELDS)
+    if (
+        str(normalized.get("platform") or "").strip() == "Shopee"
+        and bool(normalized.get("sku_missing_in_source"))
+        and str(row.get("seller_sku") or "").strip() in {"", MISSING_VALUE_PLACEHOLDER}
+    ):
+        normalized["seller_sku"] = ""
     return normalized
 
 

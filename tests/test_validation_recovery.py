@@ -21,6 +21,7 @@ from src.invoice_app.services.historical_invoice_intake import IntakeStatus, Inv
 from src.invoice_app.review_reason_codes import (
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
+    PRODUCT_COUNT_MISMATCH,
 )
 
 
@@ -400,6 +401,46 @@ def test_source_supported_income_manual_review_renders_confirmation_form(tmp_pat
     assert {"Order Income", "Income Type"} <= {
         widget.label for widget in (*app.text_input, *app.selectbox)
     }
+
+
+def test_product_count_manual_review_renders_session_draft_without_derived_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "draft-batch"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
+    app.session_state["orders"] = []
+    app.session_state["products"] = []
+    app.session_state["processing_errors"] = []
+    app.session_state["duplicate_skipped"] = []
+    app.session_state["unsupported_files"] = []
+    app.session_state["reviews"] = [{
+        "batch_id": "draft-batch",
+        "platform": "Shopee",
+        "order_id": "SHP-DRAFT",
+        "source_pdf": "draft.pdf",
+        "status": "Manual Review",
+        "reason_code": PRODUCT_COUNT_MISMATCH,
+        "reason": "Product Count Mismatch: source declares 3 products, but 1 product anchors were extracted.",
+        "order_payload": {"platform": "Shopee", "order_id": "SHP-DRAFT"},
+        "product_payloads": [{"seller_sku": "SKU-1", "product_name": "First", "quantity": 1}],
+    }]
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any("Remaining Missing: 2" in caption.value for caption in app.caption)
+    assert {"Add missing product", "Apply & Revalidate", "Cancel corrections"} <= {
+        button.label for button in app.button
+    }
+    assert next(button for button in app.button if button.label == "Apply & Revalidate").disabled
+    labels = {widget.label for widget in (*app.text_input, *app.selectbox)}
+    assert {"Seller SKU source evidence", "Promotion membership"} <= labels
+    assert "NAV" not in labels
+    assert "Product Master Unit Price" not in labels
+    assert "Promotion Group ID" not in labels
 
 
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):

@@ -1,5 +1,21 @@
 from src.invoice_app.services.manual_review_resolution import (
-    MISSING_INCOME, PRODUCT_COUNT_MISMATCH, apply_resolution, resolution_plan,
+    CORRECTION_DRAFTS_KEY,
+    MISSING_INCOME,
+    PRODUCT_COUNT_MISMATCH,
+    PROMOTION_SUBTOTAL,
+    add_draft_product,
+    apply_product_draft,
+    apply_resolution,
+    clear_correction_draft,
+    draft_products,
+    draft_summary,
+    edit_draft_product,
+    promotion_group_options,
+    promotion_subtotal_groups,
+    remove_draft_product,
+    resolution_plan,
+    set_draft_promotion_subtotal,
+    synchronize_correction_drafts,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.review_reason_codes import (
@@ -83,7 +99,8 @@ def test_product_count_resolution_adds_only_the_missing_staged_product_and_prese
     assert state["reviews"] == []
     assert [item["seller_sku"] for item in state["products"]] == ["SKU-1", "SKU-2"]
     assert state["products"][0]["source_pdf"] == "source.pdf"
-    assert "nav" not in state["products"][1]
+    assert state["products"][1]["nav"] == "NAV-2"
+    assert str(state["products"][1]["master_unit_price"]) == "20.00"
     assert state["products"][1]["line_subtotal"] == "20.00"
 
 
@@ -199,3 +216,271 @@ def test_legacy_income_completion_anchor_is_eligible_for_source_confirmation():
 
     assert plan is not None
     assert plan.issue_type == MISSING_INCOME
+
+
+def _draft_review(declared=4):
+    review = _review()
+    review["reason"] = f"Product Count Mismatch: source declares {declared} products, but 1 product anchors were extracted."
+    return review
+
+
+def _manual_values(sku, name, price="10.00", *, sku_visible=True, promotion_group_id=""):
+    return {
+        "seller_sku_visible": sku_visible,
+        "seller_sku": sku,
+        "product_name": name,
+        "variation": "",
+        "quantity": 1,
+        "actual_selling_unit_price": price,
+        "line_subtotal": price,
+        "promotion_group_id": promotion_group_id,
+    }
+
+
+def test_two_and_three_missing_products_accumulate_before_apply():
+    for declared, missing in ((3, 2), (4, 3)):
+        review = _draft_review(declared)
+        state = {"orders": [], "products": [], "reviews": [review]}
+        key = resolution_plan(review).key
+        for index in range(missing):
+            outcome = add_draft_product(
+                state,
+                key=key,
+                values=_manual_values(f"SKU-{index + 2}", f"Added {index + 2}"),
+            )
+            assert outcome.resolved is True
+        summary = draft_summary(state, review)
+        assert summary.manual_count == missing
+        assert summary.remaining_missing == 0
+
+
+def test_below_declared_count_cannot_apply_and_exceeding_count_is_rejected():
+    review = _draft_review(3)
+    state = {"orders": [], "products": [], "reviews": [review]}
+    key = resolution_plan(review).key
+    assert add_draft_product(state, key=key, values=_manual_values("SKU-2", "Second", "20.00")).resolved
+    outcome = apply_product_draft(state, key=key, price_master=_master())
+    assert outcome.resolved is False
+    assert "Add 1 more" in outcome.reason
+    assert add_draft_product(state, key=key, values=_manual_values("SKU-3", "Third")).resolved
+    rejected = add_draft_product(state, key=key, values=_manual_values("SKU-4", "Fourth"))
+    assert rejected.resolved is False
+    assert "exceed" in rejected.reason
+
+
+def test_draft_exactly_reaching_declared_count_runs_complete_revalidation():
+    review = _review()
+    state = {"orders": [], "products": [], "reviews": [review]}
+    key = resolution_plan(review).key
+    assert add_draft_product(state, key=key, values=_manual_values("SKU-2", "Second", "20.00")).resolved
+    outcome = apply_product_draft(state, key=key, price_master=_master())
+    assert outcome.resolved is True
+    assert state["reviews"] == []
+    assert [product["nav"] for product in state["products"]] == ["NAV-1", "NAV-2"]
+    assert CORRECTION_DRAFTS_KEY in state and state[CORRECTION_DRAFTS_KEY] == {}
+
+
+def test_manual_product_can_be_edited_removed_and_draft_cleared():
+    review = _draft_review(3)
+    state = {"reviews": [review]}
+    key = resolution_plan(review).key
+    add_draft_product(state, key=key, values=_manual_values("SKU-2", "Before"))
+    assert edit_draft_product(state, key=key, index=0, values=_manual_values("SKU-2", "After")).resolved
+    assert draft_products(state, review)[0]["product_name"] == "After"
+    assert remove_draft_product(state, key=key, index=0).resolved
+    assert draft_products(state, review) == ()
+    add_draft_product(state, key=key, values=_manual_values("SKU-2", "Again"))
+    clear_correction_draft(state, key=key)
+    assert draft_products(state, review) == ()
+
+
+def test_source_or_batch_change_invalidates_stale_draft():
+    review = _draft_review(2)
+    state = {"reviews": [review]}
+    key = resolution_plan(review).key
+    add_draft_product(state, key=key, values=_manual_values("SKU-2", "Second", "20.00"))
+    changed = dict(review, batch_id="new-batch")
+    state["reviews"] = [changed]
+    synchronize_correction_drafts(state)
+    assert state[CORRECTION_DRAFTS_KEY] == {}
+
+
+def test_seller_sku_presence_is_explicit_and_missing_source_sku_is_not_guessed():
+    review = _draft_review(2)
+    state = {"reviews": [review]}
+    key = resolution_plan(review).key
+    assert add_draft_product(state, key=key, values=_manual_values("SKU-2", "Second", "20.00")).resolved
+    visible = draft_products(state, review)[0]
+    assert visible["seller_sku"] == "SKU-2"
+    assert visible["sku_missing_in_source"] is False
+    clear_correction_draft(state, key=key)
+    assert add_draft_product(state, key=key, values=_manual_values("", "Second", "20.00", sku_visible=False)).resolved
+    missing = draft_products(state, review)[0]
+    assert missing["seller_sku"] == ""
+    assert missing["sku_missing_in_source"] is True
+
+
+def test_missing_source_sku_uses_deterministic_name_variation_match_and_conflict_stays_blocking():
+    review = _review()
+    state = {"orders": [], "products": [], "reviews": [review]}
+    key = resolution_plan(review).key
+    values = _manual_values("", "Second", "20.00", sku_visible=False)
+    values["variation"] = "Blue"
+    assert add_draft_product(state, key=key, values=values).resolved
+    assert apply_product_draft(state, key=key, price_master=_master()).resolved
+    assert state["products"][1]["seller_sku"] == ""
+    assert state["products"][1]["nav"] == "NAV-2"
+
+    conflict_review = _review()
+    conflict_state = {"orders": [], "products": [], "reviews": [conflict_review]}
+    conflict_key = resolution_plan(conflict_review).key
+    conflict_master = ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-1", "product_name": "First", "unit_selling_price": "10.00", "nav_code": "NAV-1"},
+        {"seller_sku": "X-1", "product_name": "Second", "variation_name": "Blue", "unit_selling_price": "20.00", "nav_code": "NAV-2"},
+        {"seller_sku": "X-2", "product_name": "Second", "variation_name": "Blue", "unit_selling_price": "21.00", "nav_code": "NAV-3"},
+    ])
+    assert add_draft_product(conflict_state, key=conflict_key, values=values).resolved
+    blocked = apply_product_draft(conflict_state, key=conflict_key, price_master=conflict_master)
+    assert blocked.resolved is False
+    assert conflict_state["reviews"] == [conflict_review]
+
+
+def _promotion_review(*, source_status="visible_unresolved", reliable=True, complete=False):
+    review = _review()
+    review["reason_code"] = "INCOMPLETE_PROMOTION_EVIDENCE"
+    review["reason"] = "INCOMPLETE_PROMOTION_EVIDENCE: subtotal needs review."
+    member = review["product_payloads"][0]
+    member.update({
+        "promotion_group_id": "source-group-1",
+        "promotion_label": "Any 2 at RM20.00",
+        "promotion_advertised_amount": "20.00",
+        "promotion_target_qty": 2,
+        "promotion_member_qty": 1,
+        "_promotion_boundary_status": "reliable" if reliable else "ambiguous",
+        "_promotion_member_ownership_status": "reliable" if reliable else "ambiguous",
+        "_promotion_subtotal_source_status": source_status,
+        "promotion_metadata_status": "incomplete",
+        "source_line_subtotal": "N/A",
+        "line_total": "N/A",
+        "line_subtotal": "N/A",
+    })
+    if complete:
+        member["source_group_total"] = "20.00"
+        member["promotion_group_total"] = "20.00"
+        member["_promotion_subtotal_source_status"] = "resolved"
+        member.pop("promotion_metadata_status")
+    review["order_payload"]["merchandise_subtotal"] = "20.00"
+    review["order_payload"]["product_price"] = "20.00"
+    review["order_payload"]["order_income"] = "20.00"
+    return review
+
+
+def _promotion_master():
+    return ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-1", "product_name": "First", "variation_name": "", "unit_selling_price": "20.00", "nav_code": "NAV-1"},
+    ])
+
+
+def test_only_reliable_existing_promotion_groups_are_selectable_and_metadata_is_preserved():
+    review = _promotion_review(complete=True)
+    review["reason_code"] = PRODUCT_COUNT_MISMATCH
+    review["reason"] = "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted."
+    options = promotion_group_options(review)
+    assert [option.group_id for option in options] == ["source-group-1"]
+    state = {"reviews": [review]}
+    key = resolution_plan(review).key
+    values = _manual_values("SKU-2", "Second", "20.00", promotion_group_id="source-group-1")
+    assert add_draft_product(state, key=key, values=values).resolved
+    added = draft_products(state, review)[0]
+    assert added["promotion_label"] == "Any 2 at RM20.00"
+    assert added["promotion_advertised_amount"] == "20.00"
+    assert added["source_group_total"] == "20.00"
+    clear_correction_draft(state, key=key)
+    bad = add_draft_product(state, key=key, values={**values, "promotion_group_id": "typed-id"})
+    assert bad.resolved is False
+
+
+def test_no_promotion_is_supported_and_membership_correction_reruns_allocation():
+    no_promo_review = _review()
+    no_promo_state = {"orders": [], "products": [], "reviews": [no_promo_review]}
+    no_promo_key = resolution_plan(no_promo_review).key
+    assert add_draft_product(no_promo_state, key=no_promo_key, values=_manual_values("SKU-2", "Second", "20.00")).resolved
+    assert "promotion_group_id" not in draft_products(no_promo_state, no_promo_review)[0]
+
+    review = _promotion_review(complete=True)
+    review["reason_code"] = PRODUCT_COUNT_MISMATCH
+    review["reason"] = "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted."
+    state = {"orders": [], "products": [], "reviews": [review]}
+    key = resolution_plan(review).key
+    values = _manual_values("SKU-2", "Second", "20.00", promotion_group_id="source-group-1")
+    assert add_draft_product(state, key=key, values=values).resolved
+    outcome = apply_product_draft(state, key=key, price_master=ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-1", "product_name": "First", "unit_selling_price": "20.00", "nav_code": "NAV-1"},
+        {"seller_sku": "SKU-2", "product_name": "Second", "unit_selling_price": "20.00", "nav_code": "NAV-2"},
+    ]))
+    assert outcome.resolved is True
+    assert {product["promotion_member_qty"] for product in state["products"]} == {1}
+    assert {product["participating_qty"] for product in state["products"]} == {2}
+    assert {str(product["source_group_total"]) for product in state["products"]} == {"20.00"}
+
+
+def test_product_count_draft_can_include_safe_case_one_subtotal_before_one_apply():
+    review = _promotion_review()
+    review["reason_code"] = PRODUCT_COUNT_MISMATCH
+    review["reason"] = "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted."
+    state = {"orders": [], "products": [], "reviews": [review]}
+    key = resolution_plan(review).key
+    assert add_draft_product(
+        state,
+        key=key,
+        values=_manual_values("SKU-2", "Second", "20.00", promotion_group_id="source-group-1"),
+    ).resolved
+    assert set_draft_promotion_subtotal(
+        state,
+        key=key,
+        group_id="source-group-1",
+        value="20.00",
+        source_confirmed=True,
+    ).resolved
+    outcome = apply_product_draft(state, key=key, price_master=ProductPriceMaster.from_rows([
+        {"seller_sku": "SKU-1", "product_name": "First", "unit_selling_price": "20.00", "nav_code": "NAV-1"},
+        {"seller_sku": "SKU-2", "product_name": "Second", "unit_selling_price": "20.00", "nav_code": "NAV-2"},
+    ]))
+    assert outcome.resolved is True
+    assert {str(product["source_group_total"]) for product in state["products"]} == {"20.00"}
+
+
+def test_ambiguous_group_and_source_absent_subtotal_are_not_resolvable():
+    ambiguous = _promotion_review(reliable=False)
+    absent = _promotion_review(source_status="absent")
+    assert promotion_group_options(ambiguous) == ()
+    assert promotion_subtotal_groups(ambiguous) == ()
+    assert resolution_plan(ambiguous) is None
+    assert promotion_subtotal_groups(absent) == ()
+    assert resolution_plan(absent) is None
+
+
+def test_case_one_source_visible_subtotal_reruns_full_revalidation():
+    review = _promotion_review()
+    plan = resolution_plan(review)
+    assert plan is not None and plan.issue_type == PROMOTION_SUBTOTAL
+    state = {"orders": [], "products": [], "reviews": [review]}
+    outcome = apply_resolution(
+        state,
+        key=plan.key,
+        values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "RM20.00"},
+        price_master=_promotion_master(),
+    )
+    assert outcome.resolved is True
+    assert str(state["products"][0]["source_group_total"]) == "20.00"
+    assert state["products"][0]["nav"] == "NAV-1"
+
+
+def test_case_one_subtotal_cannot_bypass_financial_or_product_master_failure():
+    review = _promotion_review()
+    plan = resolution_plan(review)
+    review["order_payload"]["order_income"] = "19.00"
+    state = {"orders": [], "products": [], "reviews": [review]}
+    failed = apply_resolution(state, key=plan.key, values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "20.00"}, price_master=_promotion_master())
+    assert failed.resolved is False
+    assert "Financial Reconciliation Failed" in failed.reason

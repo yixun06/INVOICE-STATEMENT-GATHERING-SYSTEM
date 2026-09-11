@@ -221,6 +221,14 @@ def _promotion_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
     for field in ("promotion_target_qty", "participating_qty", "promotion_member_qty"):
         if field in item:
             metadata[field] = item[field]
+    for field in (
+        "_promotion_boundary_status",
+        "_promotion_member_ownership_status",
+        "_promotion_subtotal_source_status",
+        "_promotion_subtotal_resolution",
+    ):
+        if str(item.get(field, "")).strip():
+            metadata[field] = str(item[field]).strip()
     if str(item.get("promotion_incomplete_reason", "")).strip():
         metadata["promotion_incomplete_reason"] = str(item["promotion_incomplete_reason"]).strip()
     return metadata

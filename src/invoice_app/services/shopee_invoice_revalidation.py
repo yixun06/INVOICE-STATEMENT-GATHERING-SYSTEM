@@ -23,6 +23,10 @@ from src.invoice_app.parsers.validation import (
     validate_shopee_promotion_evidence,
 )
 from src.invoice_app.services.product_price_master import PriceLookupStatus, ProductPriceMaster
+from src.invoice_app.services.product_pricing import (
+    ProductPricingStatus,
+    calculate_shopee_product_pricing,
+)
 
 
 _MATCHED = {
@@ -52,8 +56,10 @@ def revalidate_shopee_invoice(
     expected_product_count: int | None = None,
 ) -> ShopeeInvoiceRevalidationResult:
     """Run the complete post-correction validation chain without writing state."""
+    prepared = [dict(product) for product in products]
+    _refresh_promotion_membership_quantities(prepared)
     working = resolve_promotion_group_totals(
-        [dict(product) for product in products],
+        prepared,
         order.get("product_price"),
     )
     extracted_count = count_product_anchor_items(working, require_sku=True)
@@ -107,7 +113,37 @@ def revalidate_shopee_invoice(
         if not lookup.nav_code:
             return _failed(working, "Resolved Product Master row has blank NAV CODE.")
         enrichment.append({"unit_price": lookup.unit_selling_price, "nav": lookup.nav_code})
+    pricing = calculate_shopee_product_pricing(working, price_master)
+    invalid_promotion = next(
+        (
+            result
+            for result in pricing
+            if result.promotion_group_id
+            and result.pricing_status is not ProductPricingStatus.PROMOTION_ALLOCATED
+        ),
+        None,
+    )
+    if invalid_promotion is not None:
+        return _failed(
+            working,
+            invalid_promotion.reason
+            or "Promotion allocation remains unresolved after source correction.",
+            layout=layout,
+        )
     return ShopeeInvoiceRevalidationResult(tuple(working), tuple(enrichment), layout)
+
+
+def _refresh_promotion_membership_quantities(products: list[dict[str, Any]]) -> None:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for product in products:
+        group_id = str(product.get("promotion_group_id") or "").strip()
+        if group_id:
+            groups.setdefault(group_id, []).append(product)
+    for members in groups.values():
+        participating = sum(int(member.get("quantity", 0) or 0) for member in members)
+        for member in members:
+            member["promotion_member_qty"] = int(member.get("quantity", 0) or 0)
+            member["participating_qty"] = participating
 
 
 def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -> str | None:

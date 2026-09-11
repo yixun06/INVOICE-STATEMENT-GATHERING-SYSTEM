@@ -72,9 +72,11 @@ def test_missing_container_subtotal_is_incomplete_and_does_not_guess_members():
 
     assert item["promotion_metadata_status"] == "incomplete"
     assert item["promotion_incomplete_reason"]
-    assert "promotion_group_id" not in item
+    assert item["promotion_group_id"] == next_item["promotion_group_id"]
+    assert item["_promotion_boundary_status"] == "reliable"
+    assert item["_promotion_member_ownership_status"] == "reliable"
+    assert item["_promotion_subtotal_source_status"] == "absent"
     assert validate_shopee_promotion_evidence([item, next_item]).startswith("INCOMPLETE_PROMOTION_EVIDENCE:")
-    assert "promotion_group_id" not in next_item
 
 def test_percent_off_label_preserves_percent_and_container_total_separately():
     first = _item("A", 1, None, "Any 3 enjoy 33% off")

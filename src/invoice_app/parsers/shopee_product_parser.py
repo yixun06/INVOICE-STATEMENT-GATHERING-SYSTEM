@@ -546,37 +546,65 @@ def _apply_group_promotion(
             index += 1
             continue
 
+        group_number += 1
+        group_id = f"{promotion_group_id}:group{group_number}"
+        participating_qty = sum(int(member.get("quantity", 0) or 0) for member in members)
+        _set_provisional_group_metadata(
+            members,
+            group_id=group_id,
+            promotion_label=promotion_label,
+            target_qty=target_qty,
+            advertised_amount=advertised_amount,
+            discount_percent=discount_percent,
+            participating_qty=participating_qty,
+        )
+
         candidates = [
             candidate
             for member in members
             for candidate in _promotion_candidates_for_item(member)
         ]
         if not candidates:
-            _mark_incomplete_promotion(
-                item, promotion_label, target_qty, advertised_amount, discount_percent,
+            for member in members:
+                member["_promotion_subtotal_source_status"] = "absent"
+            _mark_groups_incomplete(
+                [members],
                 "Promotion container has no subtotal candidate inside its source ownership boundary.",
             )
-            index += 1
+            index = next_index
             continue
         item["_promotion_subtotal_candidates"] = candidates
-
-        group_number += 1
-        group_id = f"{promotion_group_id}:group{group_number}"
-        participating_qty = sum(int(member.get("quantity", 0) or 0) for member in members)
         for member in members:
-            member["promotion_group_id"] = group_id
-            member["promotion_label"] = promotion_label
-            member["promotion_target_qty"] = target_qty
-            if advertised_amount is not None:
-                member["promotion_advertised_amount"] = advertised_amount
-            if discount_percent is not None:
-                member["promotion_discount_percent"] = discount_percent
-            member["participating_qty"] = participating_qty
-            member["promotion_member_qty"] = int(member.get("quantity", 0) or 0)
-            member["promotion"] = promotion_label
-            member["source_line_subtotal"] = None
-            member["line_total"] = None
+            member["_promotion_subtotal_source_status"] = "visible_unresolved"
         index = next_index
+
+
+def _set_provisional_group_metadata(
+    members: list[dict[str, Any]],
+    *,
+    group_id: str,
+    promotion_label: str,
+    target_qty: int,
+    advertised_amount: Decimal | None,
+    discount_percent: Decimal | None,
+    participating_qty: int,
+) -> None:
+    """Retain reliable container ownership even before subtotal certification."""
+    for member in members:
+        member["promotion_group_id"] = group_id
+        member["promotion_label"] = promotion_label
+        member["promotion_target_qty"] = target_qty
+        member["_promotion_boundary_status"] = "reliable"
+        member["_promotion_member_ownership_status"] = "reliable"
+        if advertised_amount is not None:
+            member["promotion_advertised_amount"] = advertised_amount
+        if discount_percent is not None:
+            member["promotion_discount_percent"] = discount_percent
+        member["participating_qty"] = participating_qty
+        member["promotion_member_qty"] = int(member.get("quantity", 0) or 0)
+        member["promotion"] = promotion_label
+        member["source_line_subtotal"] = None
+        member["line_total"] = None
 
 
 def _promotion_candidates_for_item(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -613,6 +641,34 @@ def resolve_promotion_group_totals(
     group_members = list(groups.values())
     candidate_sets: list[list[dict[str, Any]]] = []
     for members in group_members:
+        certified_totals = {
+            _decimal_value(member.get("source_group_total"))
+            for member in members
+            if member.get("_promotion_subtotal_source_status") == "resolved"
+        }
+        certified_totals.discard(None)
+        if len(certified_totals) == 1 and all(
+            member.get("_promotion_subtotal_source_status") == "resolved"
+            for member in members
+        ):
+            candidate_sets.append([
+                {"id": f"certified:{members[0].get('promotion_group_id')}", "amount": next(iter(certified_totals))}
+            ])
+            continue
+        manual_totals = {
+            _decimal_value(member.get("source_group_total"))
+            for member in members
+            if member.get("_promotion_subtotal_resolution") == "source_confirmed_manual"
+        }
+        manual_totals.discard(None)
+        if len(manual_totals) == 1 and all(
+            member.get("_promotion_subtotal_resolution") == "source_confirmed_manual"
+            for member in members
+        ):
+            candidate_sets.append([
+                {"id": f"manual:{members[0].get('promotion_group_id')}", "amount": next(iter(manual_totals))}
+            ])
+            continue
         candidates: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
         for member in members:
@@ -694,6 +750,13 @@ def _set_group_total(members: list[dict[str, Any]], source_group_total: Decimal)
     for member in members:
         member["source_group_total"] = source_group_total
         member["promotion_group_total"] = source_group_total
+        member["_promotion_subtotal_source_status"] = (
+            "manual_confirmed"
+            if member.get("_promotion_subtotal_resolution") == "source_confirmed_manual"
+            else "resolved"
+        )
+        member.pop("promotion_metadata_status", None)
+        member.pop("promotion_incomplete_reason", None)
 
 
 def _mark_groups_incomplete(

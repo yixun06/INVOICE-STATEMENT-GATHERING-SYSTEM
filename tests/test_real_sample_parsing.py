@@ -329,7 +329,8 @@ def test_parse_real_shopee_without_source_sku_remains_accepted():
     assert reviews == []
     assert len(orders) == 1
     assert len(products) == 1
-    assert products[0]["seller_sku"] == "N/A"
+    assert products[0]["seller_sku"] == ""
+    assert products[0]["sku_missing_in_source"] is True
     assert products[0]["quantity"] == 4
     assert products[0]["line_total"] == "83.60"
     assert "remarks" not in products[0]
