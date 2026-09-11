@@ -15,8 +15,11 @@ from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceOrder
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
+    INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
+    ShippingFeeDiscrepancy,
+    ServiceFeeDetail,
     SettlementIncomeRow,
 )
 from src.invoice_app.services.shopee_statement_item_matching import (
@@ -29,7 +32,10 @@ from src.invoice_app.services.application_commit_lock import (
     APPLICATION_COMMIT_LOCK,
     ApplicationCommitLock,
 )
-from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
+from src.invoice_app.services.uat2_persistence_schema import (
+    STATEMENT_DATA_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+)
 from src.invoice_app.services.statement_reconciliation import (
     MISSING_COMPARISON_EVIDENCE,
     UNMATCHED_ORDER,
@@ -97,6 +103,7 @@ class StatementCommitPlan:
     statement: ParsedShopeeWeeklyStatement
     audit: StatementBatchAudit
     rows: tuple[tuple[str, ...], ...]
+    financial_component_rows: tuple[tuple[str, ...], ...]
     order_comparisons: tuple[StatementOrderComparison, ...]
     invoice_order_updates: tuple[InvoiceOrderStatementUpdate, ...]
     invoice_item_updates: tuple[InvoiceItemStatementUpdate, ...]
@@ -187,6 +194,7 @@ def prepare_statement_commit_plan(
         matched_item_keys.append((source_row.order_id, match.invoice_item_index))
     rows.extend(sku_rows)
     rows.extend(_adjustment_row(statement, audit, adjustment) for adjustment in statement.adjustments)
+    financial_component_rows = _financial_component_rows(statement, audit)
 
     duplicate_keys = {key for key, count in Counter(matched_item_keys).items() if count > 1}
     item_updates = []
@@ -220,6 +228,7 @@ def prepare_statement_commit_plan(
         statement=statement,
         audit=audit,
         rows=tuple(rows),
+        financial_component_rows=financial_component_rows,
         order_comparisons=comparisons,
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
@@ -431,6 +440,239 @@ def _required_business_match_method(method: str | None) -> str:
 
 def _serialize_statement_row(values: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(_serialize(values.get(header)) for header in STATEMENT_DATA_HEADERS)
+
+
+_COMPONENT_RECORD_TYPES = {
+    "ORDER",
+    "SKU",
+    "SERVICE_FEE_DETAIL",
+    "SHIPPING_FEE_DISCREPANCY",
+}
+
+
+def _financial_component_rows(
+    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+) -> tuple[tuple[str, ...], ...]:
+    rows: list[tuple[str, ...]] = []
+    for income_row in statement.income_rows:
+        record_type = {"Order": "ORDER", "Sku": "SKU"}.get(income_row.view_by)
+        if record_type is None:
+            continue
+        for component_name in INCOME_COMPONENT_COLUMNS:
+            amount = income_row.financial_components.get(component_name)
+            if amount is None:
+                continue
+            rows.append(_financial_component_row(
+                statement=statement,
+                audit=audit,
+                record_type=record_type,
+                source_sheet="Income",
+                source_row_number=income_row.source_row_number,
+                sequence_no=income_row.sequence_no,
+                order_id=income_row.order_id,
+                statement_product_id=income_row.product_id,
+                component_name=component_name,
+                component_amount=amount,
+                component_note=None,
+                payout_completed_date=income_row.payout_completed_date,
+            ))
+    for detail in statement.service_fee_details:
+        rows.extend(_service_fee_component_rows(statement, audit, detail))
+    for discrepancy in statement.shipping_fee_discrepancies:
+        rows.extend(_shipping_discrepancy_component_rows(statement, audit, discrepancy))
+    _validate_financial_component_rows(rows, statement)
+    return tuple(rows)
+
+
+def _service_fee_component_rows(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    detail: ServiceFeeDetail,
+) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        _financial_component_row(
+            statement=statement,
+            audit=audit,
+            record_type="SERVICE_FEE_DETAIL",
+            source_sheet="Service Fee Details",
+            source_row_number=detail.source_row_number,
+            sequence_no=detail.sequence_no,
+            order_id=detail.order_id,
+            statement_product_id=None,
+            component_name=component_name,
+            component_amount=amount,
+            component_note=None,
+            payout_completed_date=None,
+        )
+        for component_name, amount in detail.components.items()
+        if amount is not None
+    )
+
+
+def _shipping_discrepancy_component_rows(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    discrepancy: ShippingFeeDiscrepancy,
+) -> tuple[tuple[str, ...], ...]:
+    values: list[tuple[str, ...]] = []
+    for component_name, amount in (
+        ("Expected Shipping Fee:", discrepancy.expected_shipping_fee),
+        (
+            "Actual Shipping Fee Charged by Logistic Provider:",
+            discrepancy.actual_shipping_fee,
+        ),
+    ):
+        if amount is not None:
+            values.append(_financial_component_row(
+                statement=statement,
+                audit=audit,
+                record_type="SHIPPING_FEE_DISCREPANCY",
+                source_sheet="Shipping Fee Discrepancy",
+                source_row_number=discrepancy.source_row_number,
+                sequence_no=None,
+                order_id=discrepancy.order_id,
+                statement_product_id=None,
+                component_name=component_name,
+                component_amount=amount,
+                component_note=None,
+                payout_completed_date=None,
+            ))
+    if discrepancy.reason:
+        values.append(_financial_component_row(
+            statement=statement,
+            audit=audit,
+            record_type="SHIPPING_FEE_DISCREPANCY",
+            source_sheet="Shipping Fee Discrepancy",
+            source_row_number=discrepancy.source_row_number,
+            sequence_no=None,
+            order_id=discrepancy.order_id,
+            statement_product_id=None,
+            component_name="Discrepancy reason",
+            component_amount=None,
+            component_note=discrepancy.reason,
+            payout_completed_date=None,
+        ))
+    return tuple(values)
+
+
+def _financial_component_row(
+    *,
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    record_type: str,
+    source_sheet: str,
+    source_row_number: int,
+    sequence_no: str | None,
+    order_id: str | None,
+    statement_product_id: str | None,
+    component_name: str,
+    component_amount: Decimal | None,
+    component_note: str | None,
+    payout_completed_date: date | None,
+) -> tuple[str, ...]:
+    values = {
+        "statement_batch_id": audit.statement_batch_id,
+        "statement_file_hash": statement.file_hash,
+        "record_type": record_type,
+        "statement_source_sheet": source_sheet,
+        "statement_source_row_number": source_row_number,
+        "sequence_no": sequence_no,
+        "platform": "Shopee",
+        "order_id": order_id,
+        "statement_product_id": statement_product_id,
+        "component_name": component_name,
+        "component_amount": component_amount,
+        "component_note": component_note,
+        "statement_period_from": statement.statement_period_from,
+        "statement_period_to": statement.statement_period_to,
+        "payout_completed_date": payout_completed_date,
+        "committed_at": audit.committed_at,
+        "commit_status": "COMMITTED",
+    }
+    return tuple(
+        _serialize(values.get(header))
+        for header in STATEMENT_FINANCIAL_COMPONENT_HEADERS
+    )
+
+
+def _validate_financial_component_rows(
+    rows: Sequence[tuple[str, ...]], statement: ParsedShopeeWeeklyStatement
+) -> None:
+    positions = {
+        header: index
+        for index, header in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    identities: set[tuple[str, str, str, str]] = set()
+    for row in rows:
+        if len(row) != len(STATEMENT_FINANCIAL_COMPONENT_HEADERS):
+            raise StatementCommitBlocked("Financial component rows do not match the exact ledger schema.")
+        record_type = row[positions["record_type"]]
+        if record_type not in _COMPONENT_RECORD_TYPES:
+            raise StatementCommitBlocked(f"Unsupported financial component record type: {record_type!r}.")
+        identity = tuple(
+            row[positions[header]]
+            for header in (
+                "statement_batch_id",
+                "statement_source_sheet",
+                "statement_source_row_number",
+                "component_name",
+            )
+        )
+        if not all(identity):
+            raise StatementCommitBlocked("Financial component row has incomplete stable identity.")
+        if identity in identities:
+            raise StatementCommitBlocked(
+                "Financial component plan contains duplicate stable identity: "
+                + "/".join(identity)
+            )
+        identities.add(identity)
+        amount = row[positions["component_amount"]]
+        note = row[positions["component_note"]]
+        if not amount and not note:
+            raise StatementCommitBlocked("Financial component row has neither numeric amount nor text evidence.")
+        if note and record_type != "SHIPPING_FEE_DISCREPANCY":
+            raise StatementCommitBlocked("Text financial component evidence is only supported for Shipping Fee Discrepancy.")
+        source_sheet = row[positions["statement_source_sheet"]]
+        sequence_no = row[positions["sequence_no"]]
+        order_id = row[positions["order_id"]]
+        if record_type in {"ORDER", "SKU"}:
+            expected_view = "Order" if record_type == "ORDER" else "Sku"
+            if source_sheet != "Income" or not sequence_no or not order_id:
+                raise StatementCommitBlocked("Income financial component row lacks traceable source identity.")
+            if not any(
+                source_row.view_by == expected_view
+                and source_row.sequence_no == sequence_no
+                and str(source_row.source_row_number)
+                == row[positions["statement_source_row_number"]]
+                for source_row in statement.income_rows
+            ):
+                raise StatementCommitBlocked("Income financial component row cannot be traced to a Statement source row.")
+        elif record_type == "SERVICE_FEE_DETAIL":
+            if source_sheet != "Service Fee Details" or not sequence_no or not order_id:
+                raise StatementCommitBlocked("Service Fee Detail component row lacks traceable source identity.")
+            if not any(
+                detail.sequence_no == sequence_no
+                and detail.order_id == order_id
+                and str(detail.source_row_number)
+                == row[positions["statement_source_row_number"]]
+                for detail in statement.service_fee_details
+            ):
+                raise StatementCommitBlocked(
+                    "Service Fee Detail component row cannot be traced to a Statement source row."
+                )
+        elif (
+            source_sheet != "Shipping Fee Discrepancy"
+            or not order_id
+            or not any(
+                discrepancy.order_id == order_id
+                and str(discrepancy.source_row_number)
+                == row[positions["statement_source_row_number"]]
+                for discrepancy in statement.shipping_fee_discrepancies
+            )
+        ):
+            raise StatementCommitBlocked(
+                "Shipping discrepancy component row cannot be traced to a Statement source row."
+            )
 
 
 def _serialize(value: object | None) -> str:

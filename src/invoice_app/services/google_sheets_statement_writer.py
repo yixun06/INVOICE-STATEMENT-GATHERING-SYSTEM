@@ -41,6 +41,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
 )
 
 
@@ -85,12 +87,20 @@ class _StatementTarget:
 
 
 @dataclass(frozen=True)
+class _FinancialComponentTarget:
+    row_index: int
+    values: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class _WriterSnapshot:
     sheet_ids: Mapping[str, int]
     orders: Mapping[tuple[str, str], _OrderTarget]
     items: Mapping[tuple[str, str, int], _ItemTarget]
     statement_rows: tuple[_StatementTarget, ...]
     statement_append_row_index: int
+    financial_component_rows: tuple[_FinancialComponentTarget, ...]
+    financial_component_append_row_index: int
     commit_state: StatementCommitState
 
 
@@ -104,7 +114,7 @@ class GoogleSheetsStatementWriter:
         self._gateway = gateway
 
     def reload_commit_state(self) -> StatementCommitState:
-        """Freshly read all three authoritative tabs for guarded preflight."""
+        """Freshly read all four authoritative tabs for guarded preflight."""
         return self._read_snapshot().commit_state
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
@@ -139,7 +149,12 @@ class GoogleSheetsStatementWriter:
 
     def _read_snapshot(self) -> _WriterSnapshot:
         try:
-            required_tabs = (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB, STATEMENT_DATA_TAB)
+            required_tabs = (
+                INVOICE_ORDERS_TAB,
+                INVOICE_ITEMS_TAB,
+                STATEMENT_DATA_TAB,
+                STATEMENT_FINANCIAL_COMPONENTS_TAB,
+            )
             sheet_ids = self._gateway.read_sheet_ids(
                 self._spreadsheet_id, required_tabs
             )
@@ -156,6 +171,11 @@ class GoogleSheetsStatementWriter:
         order_rows = _rows_with_positions(tabs, INVOICE_ORDERS_TAB, INVOICE_ORDERS_HEADERS)
         item_rows = _rows_with_positions(tabs, INVOICE_ITEMS_TAB, INVOICE_ITEMS_HEADERS)
         statement_rows = _rows_with_positions(tabs, STATEMENT_DATA_TAB, STATEMENT_DATA_HEADERS)
+        financial_component_rows = _rows_with_positions(
+            tabs,
+            STATEMENT_FINANCIAL_COMPONENTS_TAB,
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+        )
 
         orders: dict[tuple[str, str], _OrderTarget] = {}
         for row_index, values in order_rows:
@@ -194,6 +214,13 @@ class GoogleSheetsStatementWriter:
             items=items,
             statement_rows=persisted_statement_rows,
             statement_append_row_index=_append_row_index(tabs[STATEMENT_DATA_TAB]),
+            financial_component_rows=tuple(
+                _FinancialComponentTarget(row_index, values)
+                for row_index, values in financial_component_rows
+            ),
+            financial_component_append_row_index=_append_row_index(
+                tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]
+            ),
             commit_state=commit_state,
         )
 
@@ -201,13 +228,20 @@ class GoogleSheetsStatementWriter:
         self, plan: StatementCommitPlan, snapshot: _WriterSnapshot
     ) -> tuple[Mapping[str, Any], ...]:
         _validate_incoming_statement_identities(plan, snapshot)
+        _validate_incoming_financial_component_identities(plan, snapshot)
         requests: list[Mapping[str, Any]] = [
             _update_rows_request(
                 snapshot.sheet_ids[STATEMENT_DATA_TAB],
                 snapshot.statement_append_row_index,
                 0,
                 plan.rows,
-            )
+            ),
+            _update_rows_request(
+                snapshot.sheet_ids[STATEMENT_FINANCIAL_COMPONENTS_TAB],
+                snapshot.financial_component_append_row_index,
+                0,
+                plan.financial_component_rows,
+            ),
         ]
         seen_orders: set[tuple[str, str]] = set()
         for update in plan.invoice_order_updates:
@@ -366,6 +400,41 @@ def _validate_incoming_statement_identities(
         )
 
 
+def _validate_incoming_financial_component_identities(
+    plan: StatementCommitPlan, snapshot: _WriterSnapshot
+) -> None:
+    positions = {
+        header: index
+        for index, header in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    identity_fields = (
+        "statement_batch_id",
+        "statement_source_sheet",
+        "statement_source_row_number",
+        "component_name",
+    )
+    existing = {
+        tuple(_text(target.values[positions[field]]) for field in identity_fields)
+        for target in snapshot.financial_component_rows
+    }
+    incoming = [
+        tuple(_text(row[positions[field]]) for field in identity_fields)
+        for row in plan.financial_component_rows
+    ]
+    if not incoming:
+        raise StatementCommitBlocked("Statement plan has no financial component ledger rows.")
+    if any(not all(identity) for identity in incoming):
+        raise StatementCommitBlocked("Financial component plan has incomplete stable identity.")
+    if len(set(incoming)) != len(incoming):
+        raise StatementCommitBlocked("Financial component plan contains duplicate stable identity.")
+    collisions = sorted(set(incoming) & existing)
+    if collisions:
+        raise StatementCommitBlocked(
+            "Statement_Financial_Components already contains planned stable identity: "
+            + ", ".join("/".join(identity) for identity in collisions[:5])
+        )
+
+
 def _order_update_requests(
     sheet_id: int, target: _OrderTarget, update: InvoiceOrderStatementUpdate
 ) -> tuple[Mapping[str, Any], ...]:
@@ -449,6 +518,17 @@ def _classify_write_result(
     all_statements = bool(expected_rows) and all(count == 1 for count in statement_counts)
     no_statements = all(count == 0 for count in statement_counts)
 
+    expected_components = set(plan.financial_component_rows)
+    after_components = [
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.financial_component_rows
+    ]
+    component_counts = [after_components.count(row) for row in expected_components]
+    all_components = bool(expected_components) and all(
+        count == 1 for count in component_counts
+    )
+    no_components = all(count == 0 for count in component_counts)
+
     expected_targets = _expected_target_values(plan)
     all_enrichments = True
     no_enrichments = True
@@ -458,9 +538,9 @@ def _classify_write_result(
         expected_values = tuple(value for _, value in field_values)
         all_enrichments = all_enrichments and after_values == expected_values
         no_enrichments = no_enrichments and after_values == before_values
-    if all_statements and all_enrichments:
+    if all_statements and all_components and all_enrichments:
         return StatementWriteVerification.ALL_APPLIED
-    if no_statements and no_enrichments:
+    if no_statements and no_components and no_enrichments:
         return StatementWriteVerification.NONE_APPLIED
     return StatementWriteVerification.MIXED
 

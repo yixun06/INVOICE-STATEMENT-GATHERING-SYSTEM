@@ -24,6 +24,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     LEGACY_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
 )
 
 
@@ -33,6 +35,7 @@ class UAT2StatementSchemaMigrationError(RuntimeError):
 
 class UAT2StatementSchemaState(Enum):
     ELIGIBLE_FOR_MIGRATION = "ELIGIBLE_FOR_MIGRATION"
+    ELIGIBLE_FOR_COMPONENT_LEDGER_MIGRATION = "ELIGIBLE_FOR_COMPONENT_LEDGER_MIGRATION"
     ALREADY_MIGRATED = "ALREADY_MIGRATED"
 
 
@@ -73,6 +76,7 @@ def classify_uat2_statement_schema(
     orders = snapshot.tabs.get(INVOICE_ORDERS_TAB)
     items = snapshot.tabs.get(INVOICE_ITEMS_TAB)
     statement_data = snapshot.tabs.get(STATEMENT_DATA_TAB)
+    components = snapshot.tabs.get(STATEMENT_FINANCIAL_COMPONENTS_TAB)
     if orders is None or items is None:
         missing = [
             tab
@@ -86,12 +90,25 @@ def classify_uat2_statement_schema(
         raise UAT2StatementSchemaMigrationError(
             "UAT2 Statement schema migration rejected: Invoice_Items header is not the exact canonical schema."
         )
-    if orders.headers == LEGACY_INVOICE_ORDERS_HEADERS and statement_data is None:
+    if (
+        orders.headers == LEGACY_INVOICE_ORDERS_HEADERS
+        and statement_data is None
+        and components is None
+    ):
         return UAT2StatementSchemaState.ELIGIBLE_FOR_MIGRATION
     if (
         orders.headers == INVOICE_ORDERS_HEADERS
         and statement_data is not None
         and statement_data.headers == STATEMENT_DATA_HEADERS
+        and components is None
+    ):
+        return UAT2StatementSchemaState.ELIGIBLE_FOR_COMPONENT_LEDGER_MIGRATION
+    if (
+        orders.headers == INVOICE_ORDERS_HEADERS
+        and statement_data is not None
+        and statement_data.headers == STATEMENT_DATA_HEADERS
+        and components is not None
+        and components.headers == STATEMENT_FINANCIAL_COMPONENT_HEADERS
     ):
         return UAT2StatementSchemaState.ALREADY_MIGRATED
     raise UAT2StatementSchemaMigrationError(
@@ -103,13 +120,31 @@ def build_uat2_statement_schema_migration_requests(
     snapshot: SpreadsheetSchemaSnapshot,
 ) -> tuple[Mapping[str, Any], ...]:
     """Build the sole permitted schema batch after exact old-state preflight."""
-    if classify_uat2_statement_schema(snapshot) is not UAT2StatementSchemaState.ELIGIBLE_FOR_MIGRATION:
+    state = classify_uat2_statement_schema(snapshot)
+    component_sheet_id = _unused_sheet_id(snapshot)
+    component_requests = (
+        {
+            "addSheet": {
+                "properties": {
+                    "sheetId": component_sheet_id,
+                    "title": STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                }
+            }
+        },
+        _header_update_request(
+            component_sheet_id, 0, STATEMENT_FINANCIAL_COMPONENT_HEADERS
+        ),
+    )
+    if state is UAT2StatementSchemaState.ELIGIBLE_FOR_COMPONENT_LEDGER_MIGRATION:
+        return component_requests
+    if state is not UAT2StatementSchemaState.ELIGIBLE_FOR_MIGRATION:
         raise UAT2StatementSchemaMigrationError("UAT2 Statement schema is already migrated; no batch was built.")
     invoice_orders_sheet_id = snapshot.tabs[INVOICE_ORDERS_TAB].sheet_id
-    statement_data_sheet_id = _unused_sheet_id(snapshot)
+    statement_data_sheet_id = component_sheet_id + 1
     return (
         {"addSheet": {"properties": {"sheetId": statement_data_sheet_id, "title": STATEMENT_DATA_TAB}}},
         _header_update_request(statement_data_sheet_id, 0, STATEMENT_DATA_HEADERS),
+        *component_requests,
         {
             "insertDimension": {
                 "range": {

@@ -240,8 +240,9 @@ Validation Status
 Commit Status
 ```
 
-Persist future Statement records in one Google Sheets tab named
-`Statement_Data`. Do not split Statement persistence across multiple tabs.
+Persist the reconciliation projection in the existing Google Sheets tab named
+`Statement_Data`. Keep it at its exact approved 40 columns; do not add
+financial-component columns to it.
 Each persisted row uses one of these record types:
 
 ```text
@@ -254,12 +255,10 @@ Persist only Statement data relevant to Invoice reconciliation, Invoice
 enrichment, future Billing/Product Summary, and necessary auditability. The
 exact approved `Statement_Data` column list is locked below.
 
-The parser and validator currently retain a wider settlement-component
-breakdown (including commission, AMS, Ads, shipping, voucher, and rebate
-effects) than the approved 40-column persistence schema stores. Do not silently
-discard the design concern: a separate schema-impact decision is still required
-before Billing depends on those components. This semantics correction does not
-add columns or perform another UAT2 schema migration.
+Persist the wider settlement-component breakdown in the append-only companion
+ledger `Statement_Financial_Components`. It is source evidence for future
+Billing and does not redefine Invoice source facts or alter the 40-column
+`Statement_Data` projection.
 
 Statement `file_hash` identifies the uploaded Statement file. Invoice
 `source_fingerprint` identifies material normalized Invoice source facts. They
@@ -328,13 +327,48 @@ committed `Statement_Data` values.
 `Product Master SKU`, `Product Master Parent SKU`, `Product Name`,
 `Product Name + Price`, or `Verified Name Repair`.
 
+### Statement financial component ledger — Approved / Locked
+
+`Statement_Financial_Components` is an append-only, exact 17-column ledger:
+
+```text
+ 1. statement_batch_id
+ 2. statement_file_hash
+ 3. record_type
+ 4. statement_source_sheet
+ 5. statement_source_row_number
+ 6. sequence_no
+ 7. platform
+ 8. order_id
+ 9. statement_product_id
+10. component_name
+11. component_amount
+12. component_note
+13. statement_period_from
+14. statement_period_to
+15. payout_completed_date
+16. committed_at
+17. commit_status
+```
+
+Its stable identity is `(statement_batch_id, statement_source_sheet,
+statement_source_row_number, component_name)`. A duplicate/collision is a
+whole-batch zero-write blocker. Only `ORDER`, `SKU`, `SERVICE_FEE_DETAIL`, and
+`SHIPPING_FEE_DISCREPANCY` records are permitted. Income records retain every
+non-missing parser component under its exact Shopee header, including zero and
+signed values; `None` is omitted. `Product Price` and `Refund Amount` are
+intentionally duplicated as ledger evidence and must equal the corresponding
+`Statement_Data` projection. Service Fee Details retain their dynamic numeric
+components. Shipping discrepancies retain numeric expected/actual components
+and an optional `Discrepancy reason` text-evidence record.
+
 ### UAT2 Statement schema migration contract — Approved / Locked
 
-The real UAT2 Google Sheet was migrated externally and now has the exact target
-40-column `Invoice_Orders`, unchanged 19-column `Invoice_Items`, and exact
-40-column `Statement_Data` schemas. The one-time migrator remains available for
-already-completed-state recognition only. Do not execute it, add
-`Statement_Data` again, or insert `difference` again.
+The real UAT2 Google Sheet has the exact target 40-column `Invoice_Orders`,
+unchanged 19-column `Invoice_Items`, and exact 40-column `Statement_Data`
+schemas. A narrow one-time migration may add only the empty
+`Statement_Financial_Components` ledger tab after exact-header and empty-data
+preflight. It must not add `Statement_Data` again or insert `difference` again.
 
 The legacy `Invoice_Orders` header is the exact approved Invoice header before
 `difference`; the target is the exact current canonical 40-column header with
@@ -350,6 +384,11 @@ legacy 39-column Invoice_Orders + exact Invoice_Items + Statement_Data absent
 → eligible for migration
 
 target 40-column Invoice_Orders + exact Invoice_Items + exact 40-column Statement_Data
++ Statement_Financial_Components absent
+→ eligible only for ledger-tab creation
+
+target 40-column Invoice_Orders + exact Invoice_Items + exact 40-column Statement_Data
++ exact 17-column Statement_Financial_Components
 → already migrated; do not repeat a write
 
 any other/mixed header or Statement_Data state
@@ -371,16 +410,18 @@ blindly repeat the migration.
 ### Concrete Google Sheets Statement writer — Approved / Locked
 
 The concrete Statement writer must fresh-read `Invoice_Orders`,
-`Invoice_Items`, and committed `Statement_Data` history inside the existing
+`Invoice_Items`, committed `Statement_Data` history, and committed
+`Statement_Financial_Components` identities inside the existing
 shared application commit lock. Resolve every Order target uniquely by exact
 `(Platform, Order ID)` and every Item target by exact
 `(Platform, Order ID, item_index)`. Missing or duplicate persisted targets,
 unexpected headers, or an unbuildable request are zero-write failures.
 
-Determine the `Statement_Data` append start after the last populated row in
-that fresh snapshot. Preserve every approved ORDER, SKU, and ADJUSTMENT row.
-Submit one `spreadsheets.batchUpdate` containing the complete Statement append,
-Invoice Order enrichment, and only eligible Invoice Item enrichment. Repeated
+Determine both append starts after the last populated row in that fresh
+snapshot. Preserve every approved `Statement_Data` row and every committed
+financial-component ledger row. Submit one `spreadsheets.batchUpdate`
+containing the complete Statement projection append, financial component ledger
+append, Invoice Order enrichment, and only eligible Invoice Item enrichment. Repeated
 Statement SKU rows that resolve to one Item remain separate Statement rows and
 produce no Item enrichment update.
 
@@ -389,10 +430,11 @@ committed file hash is `ALREADY_IMPORTED`; the same committed period with a
 different file is `POSSIBLE_REVISION`; both are zero write.
 
 After a successful or uncertain API response, freshly read back deterministic
-Statement row identities and expected Invoice enrichments. All expected
-changes present means success; none means safely not applied and requires a
-fresh commit attempt; mixed or unverifiable state requires manual integrity
-recovery. Never retry automatically or claim database rollback semantics.
+Statement projection identities, financial-component identities, and expected
+Invoice enrichments. All expected changes present means success; none means
+safely not applied and requires a fresh commit attempt; mixed or unverifiable
+state requires manual integrity recovery. Never retry automatically or claim
+database rollback semantics.
 
 ### Confirmed Statement enrichment rules
 
@@ -625,7 +667,7 @@ acquire shared application commit lock
 → freshly reload authoritative persisted state
 → revalidate
 → build the complete write plan
-→ perform the Statement_Data + Invoice_Orders + Invoice_Items write
+→ perform the Statement_Data + Statement_Financial_Components + Invoice_Orders + Invoice_Items write
 → resolve the final write outcome
 → release the lock
 ```
@@ -639,8 +681,9 @@ edits during an app commit are outside the supported concurrency model.
 Concurrency exclusion and cross-tab write atomicity are separate requirements:
 the process-local lock serializes supported commits in this one application
 instance, while one `spreadsheets.batchUpdate` must independently cover the
-approved Statement_Data inserts, Invoice_Orders updates, and Invoice_Items
-updates. Preserve deterministic `statement_batch_id` / stable-row-identity
+approved Statement_Data inserts, Statement_Financial_Components inserts,
+Invoice_Orders updates, and Invoice_Items updates. Preserve deterministic
+`statement_batch_id` / stable-row-identity
 readback for uncertain network/API outcomes; do not claim database rollback
 semantics.
 
@@ -2786,7 +2829,7 @@ Statement Import
 → Parse
 → Validate / Reconcile
 → compact Order and SKU review
-→ guarded whole-batch Commit to Statement_Data + Invoice_Orders + eligible Invoice_Items
+→ guarded whole-batch Commit to Statement_Data + Statement_Financial_Components + Invoice_Orders + eligible Invoice_Items
 ```
 
 Statement Import reuses the existing parser/service, reconciliation, Product

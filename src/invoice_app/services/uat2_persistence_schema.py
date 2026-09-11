@@ -6,6 +6,7 @@ from __future__ import annotations
 INVOICE_ORDERS_TAB = "Invoice_Orders"
 INVOICE_ITEMS_TAB = "Invoice_Items"
 STATEMENT_DATA_TAB = "Statement_Data"
+STATEMENT_FINANCIAL_COMPONENTS_TAB = "Statement_Financial_Components"
 
 # This is retained only for the one-time, explicitly approved schema migration.
 LEGACY_INVOICE_ORDERS_HEADERS = (
@@ -38,9 +39,19 @@ STATEMENT_DATA_HEADERS = (
     "matched_item_index", "match_method",
 )
 
+STATEMENT_FINANCIAL_COMPONENT_HEADERS = (
+    "statement_batch_id", "statement_file_hash", "record_type",
+    "statement_source_sheet", "statement_source_row_number", "sequence_no",
+    "platform", "order_id", "statement_product_id", "component_name",
+    "component_amount", "component_note", "statement_period_from",
+    "statement_period_to", "payout_completed_date", "committed_at",
+    "commit_status",
+)
+
 
 assert len(LEGACY_INVOICE_ORDERS_HEADERS) == 39
 assert len(INVOICE_ORDERS_HEADERS) == 40
 assert INVOICE_ORDERS_HEADERS[INVOICE_ORDERS_DIFFERENCE_INDEX] == "difference"
 assert len(INVOICE_ITEMS_HEADERS) == 19
 assert len(STATEMENT_DATA_HEADERS) == 40
+assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17

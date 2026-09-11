@@ -43,10 +43,17 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
 )
 
 
-SHEET_IDS = {INVOICE_ORDERS_TAB: 11, INVOICE_ITEMS_TAB: 12, STATEMENT_DATA_TAB: 13}
+SHEET_IDS = {
+    INVOICE_ORDERS_TAB: 11,
+    INVOICE_ITEMS_TAB: 12,
+    STATEMENT_DATA_TAB: 13,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB: 14,
+}
 
 
 class InMemoryStatementGateway:
@@ -56,6 +63,9 @@ class InMemoryStatementGateway:
             INVOICE_ORDERS_TAB: [list(INVOICE_ORDERS_HEADERS), list(_serialize_order(order))],
             INVOICE_ITEMS_TAB: [list(INVOICE_ITEMS_HEADERS), list(_serialize_item(_invoice_item()))],
             STATEMENT_DATA_TAB: [list(STATEMENT_DATA_HEADERS)],
+            STATEMENT_FINANCIAL_COMPONENTS_TAB: [
+                list(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+            ],
         }
         self.read_calls = 0
         self.sheet_id_calls = 0
@@ -77,7 +87,17 @@ class InMemoryStatementGateway:
         self.batch_calls.append(tuple(requests))
         if self.fail_mode == "before":
             raise OSError("synthetic failure before apply")
-        selected = requests[:1] if self.fail_mode == "mixed" else requests
+        if self.fail_mode == "mixed":
+            selected = requests[:1]
+        elif self.fail_mode == "ledger_missing":
+            selected = tuple(
+                request
+                for request in requests
+                if request["updateCells"]["range"]["sheetId"]
+                != SHEET_IDS[STATEMENT_FINANCIAL_COMPONENTS_TAB]
+            )
+        else:
+            selected = requests
         for request in selected:
             self._apply_update(request["updateCells"])
         if self.fail_mode in {"after", "mixed"}:
@@ -223,12 +243,13 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     assert result.committed is True
     assert len(gateway.batch_calls) == 1
     requests = gateway.batch_calls[0]
-    assert {request["updateCells"]["range"]["sheetId"] for request in requests} == {11, 12, 13}
+    assert {request["updateCells"]["range"]["sheetId"] for request in requests} == {11, 12, 13, 14}
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["payment_status"] == "RELEASED"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["income_type"] == "Estimated"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["order_income"] == "9.00"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["final_amount"] == "10.00"
     assert _row_values(gateway, INVOICE_ITEMS_TAB)["statement_net_selling_amount"] == "10.00"
+    assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 5
 
 
 def test_missing_or_duplicate_order_target_produces_zero_write():
@@ -421,6 +442,18 @@ def test_uncertain_mixed_result_requires_manual_integrity_recovery_without_retry
     with pytest.raises(StatementWriteIntegrityError, match="manual recovery"):
         _commit(gateway, _plan())
 
+    assert len(gateway.batch_calls) == 1
+
+
+def test_uncertain_result_with_everything_except_ledger_requires_manual_recovery():
+    gateway = InMemoryStatementGateway()
+    gateway.fail_mode = "ledger_missing"
+
+    with pytest.raises(StatementWriteIntegrityError, match="manual recovery"):
+        _commit(gateway, _plan())
+
+    assert len(gateway.tabs[STATEMENT_DATA_TAB]) > 1
+    assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 1
     assert len(gateway.batch_calls) == 1
 
 

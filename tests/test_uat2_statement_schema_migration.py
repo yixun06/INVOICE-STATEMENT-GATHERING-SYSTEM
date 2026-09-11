@@ -30,6 +30,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     LEGACY_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
 )
 from src.invoice_app.services.uat2_statement_schema_migration import (
     SheetSchema,
@@ -44,13 +46,22 @@ from src.invoice_app.services.uat2_statement_schema_migration import (
 
 
 class InMemorySchemaGateway:
-    def __init__(self, *, include_statement_data: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        include_statement_data: bool = False,
+        include_components: bool = False,
+    ) -> None:
         self.schema = {
             INVOICE_ORDERS_TAB: SheetSchema(11, LEGACY_INVOICE_ORDERS_HEADERS),
             INVOICE_ITEMS_TAB: SheetSchema(12, INVOICE_ITEMS_HEADERS),
         }
         if include_statement_data:
             self.schema[STATEMENT_DATA_TAB] = SheetSchema(13, STATEMENT_DATA_HEADERS)
+        if include_components:
+            self.schema[STATEMENT_FINANCIAL_COMPONENTS_TAB] = SheetSchema(
+                14, STATEMENT_FINANCIAL_COMPONENT_HEADERS
+            )
         self.rows = {
             INVOICE_ORDERS_TAB: [
                 list(LEGACY_INVOICE_ORDERS_HEADERS),
@@ -60,6 +71,10 @@ class InMemorySchemaGateway:
         }
         if include_statement_data:
             self.rows[STATEMENT_DATA_TAB] = [list(STATEMENT_DATA_HEADERS)]
+        if include_components:
+            self.rows[STATEMENT_FINANCIAL_COMPONENTS_TAB] = [
+                list(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+            ]
         self.read_calls = 0
         self.batch_bodies: list[tuple[dict, ...]] = []
         self.fail_before_apply = False
@@ -155,6 +170,20 @@ def test_exact_target_schema_is_recognized_as_already_migrated():
     assert classify_uat2_statement_schema(gateway.read_schema("synthetic-sheet")) is UAT2StatementSchemaState.ALREADY_MIGRATED
 
 
+def test_exact_existing_statement_schema_is_eligible_only_for_component_ledger_tab():
+    gateway = InMemorySchemaGateway(include_statement_data=True)
+    gateway.schema[INVOICE_ORDERS_TAB] = SheetSchema(11, INVOICE_ORDERS_HEADERS)
+    gateway.rows[INVOICE_ORDERS_TAB][0] = list(INVOICE_ORDERS_HEADERS)
+
+    assert classify_uat2_statement_schema(
+        gateway.read_schema("synthetic-sheet")
+    ) is UAT2StatementSchemaState.ELIGIBLE_FOR_COMPONENT_LEDGER_MIGRATION
+    requests = build_uat2_statement_schema_migration_requests(
+        gateway.read_schema("synthetic-sheet")
+    )
+    assert [next(iter(request)) for request in requests] == ["addSheet", "updateCells"]
+
+
 def test_unexpected_or_mixed_headers_fail_closed():
     gateway = InMemorySchemaGateway()
     gateway.schema[INVOICE_ORDERS_TAB] = SheetSchema(11, ("wrong", *LEGACY_INVOICE_ORDERS_HEADERS[1:]))
@@ -211,15 +240,16 @@ def test_migration_uses_one_batch_with_only_schema_requests():
     assert len(gateway.batch_bodies) == 1
     requests = gateway.batch_bodies[0]
     assert [next(iter(request)) for request in requests] == [
-        "addSheet", "updateCells", "insertDimension", "updateCells"
+        "addSheet", "updateCells", "addSheet", "updateCells",
+        "insertDimension", "updateCells",
     ]
-    assert requests[2]["insertDimension"]["range"] == {
+    assert requests[4]["insertDimension"]["range"] == {
         "sheetId": 11,
         "dimension": "COLUMNS",
         "startIndex": 35,
         "endIndex": 36,
     }
-    assert requests[3]["updateCells"]["range"] == {
+    assert requests[5]["updateCells"]["range"] == {
         "sheetId": 11,
         "startRowIndex": 0,
         "endRowIndex": 1,
