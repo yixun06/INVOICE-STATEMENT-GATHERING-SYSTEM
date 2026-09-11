@@ -325,6 +325,40 @@ def test_data_import_has_no_stale_check_historical_status_text():
     assert "Check Historical Status" not in source
 
 
+def test_non_resolvable_manual_review_details_render_without_changing_readiness(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "incomplete-source-batch"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
+    app.session_state["orders"] = []
+    app.session_state["products"] = []
+    app.session_state["processing_errors"] = []
+    app.session_state["duplicate_skipped"] = []
+    app.session_state["unsupported_files"] = []
+    app.session_state["reviews"] = [{
+        "platform": "Shopee", "order_id": "SHP-INCOMPLETE", "source_pdf": "incomplete.pdf",
+        "status": "Manual Review",
+        "reason": "Income Completion Anchor Missing: Source Document Appears Incomplete.",
+    }]
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Apply & Revalidate" not in {button.label for button in app.button}
+    assert not adapt_platform_orders_import_result(
+        batch_id="incomplete-source-batch", orders=[], products=[],
+        reviews=app.session_state.filtered_state["reviews"], processing_errors=[],
+        duplicate_skipped=[], unsupported_files=[],
+    ).commit_readiness.ready
+    next(button for button in app.button if button.label == "View Details").click().run(timeout=20)
+
+    assert app.exception == []
+    assert "Details" in {caption.value for caption in app.caption}
+    assert app.session_state.filtered_state["reviews"][0]["status"] == "Manual Review"
+
+
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))

@@ -379,7 +379,20 @@ def _render_manual_review_resolution() -> None:
             if plan is None:
                 st.info("This issue needs source evidence or Product Master resolution and cannot be force-resolved.")
                 if st.button("View Details", key=f"manual_details_{id(review)}"):
-                    _render_issue_details(ValidationIssue(reason=str(review.get("reason") or "Manual Review required."), evidence=review))
+                    _render_issue_details(
+                        ValidationIssue(
+                            layer="manual_review",
+                            severity="warning",
+                            blocking=False,
+                            reason=str(review.get("reason") or "Manual Review required."),
+                            affected_item=(
+                                str(review.get("order_id") or "").strip()
+                                or str(review.get("source_pdf") or "").strip()
+                                or None
+                            ),
+                            evidence=review,
+                        )
+                    )
                 continue
             if plan.issue_type == PRODUCT_COUNT_MISMATCH:
                 st.caption(f"Expected Products: {plan.expected_products if plan.expected_products is not None else 'source count unavailable'} · Extracted Products: {len(review.get('product_payloads') or [])}")
