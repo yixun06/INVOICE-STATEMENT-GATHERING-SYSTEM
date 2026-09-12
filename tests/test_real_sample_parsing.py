@@ -281,6 +281,17 @@ def test_parse_real_shopee_to_ship_without_final_amount():
     assert products[0]["line_subtotal"] == "95.60"
 
 
+def test_parse_real_shopee_final_amount_with_overlapping_page_advertisement():
+    paths = list(ROOT.glob("archive/**/*260828J0XTYX28.pdf"))
+    if not paths:
+        pytest.skip("Local UAT regression PDF is unavailable.")
+    pdf_path = paths[0]
+    orders, _, reviews = process_pdf_file(pdf_path.name, pdf_path, "batch-final-amount")
+    assert reviews == []
+    assert orders[0]["order_id"] == "260828J0XTYX28"
+    assert orders[0]["final_amount"] == "27.48"
+
+
 def test_parse_real_shopee_promotional_bundle_allocation():
     pdf_path, document, extracted = extract_real_shopee_sample(
         "08082026",

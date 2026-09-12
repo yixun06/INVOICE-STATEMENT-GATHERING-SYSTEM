@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 import re
+from typing import TYPE_CHECKING
 
 from ..utils.normalize import normalize_whitespace, parse_decimal
+
+if TYPE_CHECKING:
+    from ..pdf_document import PdfDocument
 
 
 MONEY_PATTERN = r"[-+]?\s*RM\s*[-+]?\s*[\d,]+(?:\.\d+)?"
@@ -67,7 +71,7 @@ RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS = (
 REQUIRED_INCOME_DETAIL_FIELDS = NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS
 
 
-def parse_income_details(text: str) -> dict[str, str]:
+def parse_income_details(text: str, *, document: PdfDocument | None = None) -> dict[str, str]:
     section = extract_section(
         text,
         r"^\s*(?:Hide\s+)?Income Details\s*$",
@@ -82,6 +86,7 @@ def parse_income_details(text: str) -> dict[str, str]:
         field: extract_alias_money(section, aliases)
         for field, aliases in INCOME_ALIASES.items()
     }
+    result["final_amount"] = extract_final_amount(text, document=document)
     actual_income = _extract_actual_order_income(section)
     estimated_income = result["estimated_order_income"]
     if not is_missing_financial_value(actual_income):
@@ -94,6 +99,28 @@ def parse_income_details(text: str) -> dict[str, str]:
         result["order_income"] = MISSING_FINANCIAL_VALUE
         result["income_type"] = MISSING_FINANCIAL_VALUE
     return result
+
+
+def final_amount_label_present(text: str) -> bool:
+    return bool(re.search(r"\bFinal\s+Amount\b", text, flags=re.IGNORECASE))
+
+
+def extract_final_amount(text: str, *, document: PdfDocument | None = None) -> str:
+    match = re.search(rf"\bFinal\s+Amount\b(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})", text, flags=re.IGNORECASE)
+    if match:
+        return money_to_string(match.group(1))
+    if document is None:
+        return MISSING_FINANCIAL_VALUE
+    for page in document.pages:
+        words = page.styled_words
+        for index, word in enumerate(words[:-1]):
+            if word.text.casefold() != "final" or words[index + 1].text.casefold() != "amount":
+                continue
+            label = words[index + 1]
+            candidates = [candidate for candidate in words if candidate.x0 >= label.x1 and abs(candidate.top - word.top) <= 4 and re.fullmatch(MONEY_PATTERN, candidate.text.replace(" ", ""), flags=re.IGNORECASE)]
+            if len(candidates) == 1:
+                return money_to_string(candidates[0].text)
+    return MISSING_FINANCIAL_VALUE
 
 
 def extract_refund_amount(text: str) -> Decimal | None:

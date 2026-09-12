@@ -50,6 +50,7 @@ from ..services.shopee_statement_persistence import (
 from ..services.shopee_statement_item_matching import business_match_method
 from ..services.manual_review_resolution import (
     MISSING_INCOME,
+    FINAL_AMOUNT,
     PRODUCT_COUNT_MISMATCH,
     PROMOTION_SUBTOTAL,
     add_draft_product,
@@ -477,6 +478,8 @@ def _render_manual_review_resolution() -> None:
                 _render_missing_product_draft(plan.key, review)
             elif plan.issue_type == PROMOTION_SUBTOTAL:
                 _render_promotion_subtotal_form(plan.key, review)
+            elif plan.issue_type == FINAL_AMOUNT:
+                _render_final_amount_form(plan.key, review)
             else:
                 _render_income_form(plan.key, review)
 
@@ -662,6 +665,14 @@ def _render_income_form(key: str, review: dict[str, Any]) -> None:
         final_amount = st.text_input("Final Amount (optional — only when visible in source)", key=f"mr_final_{key}")
         if st.form_submit_button("Apply & Revalidate", type="primary"):
             _apply_manual_resolution(key, {"source_confirmed": source_confirmed, "order_income": income, "income_type": income_type, "final_amount": final_amount})
+
+
+def _render_final_amount_form(key: str, review: dict[str, Any]) -> None:
+    with st.form(f"final_amount_resolution_{key}", border=False):
+        final_amount = st.text_input("Final Amount", key=f"mr_final_only_{key}")
+        source_confirmed = st.checkbox("I confirm this Final Amount is visible in the original Invoice source.", key=f"mr_final_only_confirm_{key}")
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(key, {"source_confirmed": source_confirmed, "final_amount": final_amount})
 
 def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")

@@ -35,6 +35,7 @@ class ShopeeParser(BaseParser):
             batch_id,
             positioned_items,
             source_incomplete_evidence=source_incomplete_evidence(document),
+            document=document,
         )
 
     def _parse(
@@ -45,8 +46,9 @@ class ShopeeParser(BaseParser):
         positioned_items: list[dict[str, Any]],
         *,
         source_incomplete_evidence: str | None = None,
+        document: PdfDocument | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        extracted = extract_shopee_data(text, source_pdf, positioned_items)
+        extracted = extract_shopee_data(text, source_pdf, positioned_items, document=document)
         review_issue = find_shopee_review_issue(
             extracted,
             source_incomplete_evidence=source_incomplete_evidence,

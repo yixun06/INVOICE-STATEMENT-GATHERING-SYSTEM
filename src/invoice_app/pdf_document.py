@@ -15,6 +15,8 @@ class PdfWord:
     x1: float
     top: float
     bottom: float
+    font_name: str | None = None
+    font_size: float | None = None
 
     @property
     def center_x(self) -> float:
@@ -42,6 +44,7 @@ class PdfPage:
     height: float
     text: str
     words: tuple[PdfWord, ...]
+    styled_words: tuple[PdfWord, ...] = ()
     horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
 
 
@@ -62,6 +65,7 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                 text_chunks.append(page_text)
 
             words: tuple[PdfWord, ...] = ()
+            styled_words: tuple[PdfWord, ...] = ()
             horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
             if include_words:
                 extracted_words = page.extract_words(
@@ -81,6 +85,11 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                     for word in extracted_words
                     if str(word.get("text", "")).strip()
                 )
+                styled_words = tuple(
+                    PdfWord(str(word.get("text", "")), float(word.get("x0", 0)), float(word.get("x1", 0)), float(word.get("top", 0)), float(word.get("bottom", 0)), str(word.get("fontname", "")) or None, float(word.get("size", 0)) or None)
+                    for word in page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False, use_text_flow=False, extra_attrs=["fontname", "size"])
+                    if str(word.get("text", "")).strip()
+                )
                 horizontal_rules = _extract_horizontal_rules(page)
 
             pages.append(
@@ -90,6 +99,7 @@ def read_pdf_document(pdf_path: str | Path, *, include_words: bool = True) -> Pd
                     height=float(page.height),
                     text=page_text,
                     words=words,
+                    styled_words=styled_words,
                     horizontal_rules=horizontal_rules,
                 )
             )
@@ -117,6 +127,7 @@ def read_pdf_document_selective_words(
 
         for page_number, width, height, page_text, page in page_data:
             words: tuple[PdfWord, ...] = ()
+            styled_words: tuple[PdfWord, ...] = ()
             horizontal_rules: tuple[PdfHorizontalRule, ...] = ()
             if include_words:
                 extracted_words = page.extract_words(
@@ -136,6 +147,11 @@ def read_pdf_document_selective_words(
                     for word in extracted_words
                     if str(word.get("text", "")).strip()
                 )
+                styled_words = tuple(
+                    PdfWord(str(word.get("text", "")), float(word.get("x0", 0)), float(word.get("x1", 0)), float(word.get("top", 0)), float(word.get("bottom", 0)), str(word.get("fontname", "")) or None, float(word.get("size", 0)) or None)
+                    for word in page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False, use_text_flow=False, extra_attrs=["fontname", "size"])
+                    if str(word.get("text", "")).strip()
+                )
                 horizontal_rules = _extract_horizontal_rules(page)
 
             pages.append(
@@ -145,6 +161,7 @@ def read_pdf_document_selective_words(
                     height=height,
                     text=page_text,
                     words=words,
+                    styled_words=styled_words,
                     horizontal_rules=horizontal_rules,
                 )
             )

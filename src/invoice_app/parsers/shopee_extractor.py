@@ -6,12 +6,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..pdf_document import PdfDocument
 from ..utils.normalize import normalize_whitespace
 from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
     classify_invoice_financial_layout,
     extract_refund_amount,
     income_label_presence,
+    final_amount_label_present,
     parse_buyer_payment,
     parse_income_details,
     parse_voucher_detail,
@@ -48,6 +50,7 @@ class ShopeeExtractedData:
     fund_transfer_date: str
     invoice_financial_layout: str
     income_label_presence: frozenset[str]
+    final_amount_source_state: str
     product_items: tuple[dict[str, Any], ...]
     refund_amount: Decimal | None
     income: dict[str, str]
@@ -59,10 +62,11 @@ def extract_shopee_data(
     text: str,
     source_pdf: str,
     positioned_items: list[dict[str, Any]] | None = None,
+    document: PdfDocument | None = None,
 ) -> ShopeeExtractedData:
     normalized_text = normalize_pdf_text(text)
     order_id = extract_order_id(normalized_text, source_pdf)
-    income = parse_income_details(normalized_text)
+    income = parse_income_details(normalized_text, document=document)
     label_presence = income_label_presence(normalized_text)
     product_items = reconcile_product_candidates(
         positioned_items or [],
@@ -91,6 +95,7 @@ def extract_shopee_data(
             label_presence=label_presence,
         ),
         income_label_presence=label_presence,
+        final_amount_source_state=("parsed" if income.get("final_amount") != "N/A" else "unparsed" if final_amount_label_present(normalized_text) else "absent"),
         product_items=tuple(product_items),
         refund_amount=extract_refund_amount(normalized_text),
         income=income,

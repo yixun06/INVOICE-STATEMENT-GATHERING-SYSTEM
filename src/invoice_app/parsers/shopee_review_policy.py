@@ -21,6 +21,7 @@ from ..review_reason_codes import (
     INCOME_DETAILS_REQUIRED_FIELD_MISSING,
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
+    FINAL_AMOUNT_EXTRACTION_MISSING,
     FINANCIAL_LAYOUT_UNRESOLVED,
     NO_VALID_PRODUCTS,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
@@ -116,6 +117,12 @@ def find_shopee_review_issue(
         refund_amount=data.refund_amount,
     )
     if missing_income_fields:
+        if data.final_amount_source_state == "unparsed" and missing_income_fields == ["Final Amount"] and not source_incomplete_evidence:
+            return ShopeeReviewIssue(
+                order_id=data.order_id,
+                reason="Final Amount is visibly labelled in the source but its numeric value could not be extracted. Verify the exact source-visible amount before correcting it.",
+                reason_code=FINAL_AMOUNT_EXTRACTION_MISSING,
+            )
         if "Estimated Order Income or Order Income" in missing_income_fields:
             if source_incomplete_evidence:
                 return ShopeeReviewIssue(

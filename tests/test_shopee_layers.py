@@ -503,6 +503,21 @@ def test_shopee_final_amount_and_order_income_remain_independent():
     assert order["order_income"] == "24.53"
 
 
+@pytest.mark.parametrize(("source", "expected"), (
+    ("Final Amount RM27.48", "27.48"),
+    ("Order Adjustment\nFinal Amount RM0.00", "0.00"),
+    ("Final Amount -RM5.20", "-5.20"),
+))
+def test_shopee_final_amount_is_label_anchored_outside_income_details(source, expected):
+    income = parse_income_details(f"Hide Income Details\nEstimated Order Income RM1.00\nOrder Adjustment\n{source}\nBuyer Payment")
+    assert income["final_amount"] == expected
+
+
+def test_shopee_final_amount_does_not_collide_with_other_money_labels():
+    income = parse_income_details("Hide Income Details\nOrder Income RM9.00\nRefund Amount -RM9.00\nTotal Buyer Payment RM9.00")
+    assert income["final_amount"] == "N/A"
+
+
 @pytest.mark.parametrize(
     ("source_label", "canonical_field"),
     (

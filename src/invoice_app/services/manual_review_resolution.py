@@ -13,10 +13,11 @@ from .product_price_master import ProductPriceMaster
 from .shopee_invoice_revalidation import revalidate_shopee_invoice
 from ..parsers.shopee_mapper import resolve_shopee_payment_status
 from ..parsers.validation import validate_product_items
-from ..review_reason_codes import INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE
+from ..review_reason_codes import INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE, FINAL_AMOUNT_EXTRACTION_MISSING
 
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
 MISSING_INCOME = "MISSING_INCOME_INFORMATION"
+FINAL_AMOUNT = "FINAL_AMOUNT_EXTRACTION"
 PROMOTION_SUBTOTAL = "PROMOTION_SUBTOTAL"
 CORRECTION_DRAFTS_KEY = "manual_review_correction_drafts"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
@@ -62,6 +63,8 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         return ResolutionPlan(review_key(review), PRODUCT_COUNT_MISMATCH, int(match.group(1)) if match else None)
     if code in {INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING}:
         return ResolutionPlan(review_key(review), MISSING_INCOME)
+    if code == FINAL_AMOUNT_EXTRACTION_MISSING:
+        return ResolutionPlan(review_key(review), FINAL_AMOUNT)
     if code == INCOMPLETE_PROMOTION_EVIDENCE and promotion_subtotal_groups(review):
         return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
     return None
@@ -212,6 +215,15 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if subtotal is None:
             return ResolutionOutcome(False, "Promotion Subtotal must be a source-visible numeric amount.")
         _apply_confirmed_promotion_subtotal(products, group_id, subtotal)
+    elif plan.issue_type == FINAL_AMOUNT:
+        if values.get("source_confirmed") is not True:
+            return ResolutionOutcome(False, "Confirm that this Final Amount is visible in the original Invoice source.")
+        final_amount = _source_money(values.get("final_amount"))
+        if final_amount is None:
+            return ResolutionOutcome(False, "Final Amount must be a source-visible numeric amount.")
+        order["final_amount"] = final_amount
+        order["net_income"] = final_amount
+        order["net_amount"] = final_amount
     else:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(False, "Confirm that these values are visible in the original Invoice source before applying them.")
