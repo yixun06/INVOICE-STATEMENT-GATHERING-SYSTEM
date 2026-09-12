@@ -971,6 +971,9 @@ def _is_product_noise(value: str) -> bool:
         "payment information",
         "view transaction history",
         "chat now",
+        # Seller Centre renders this as a standalone product-row badge, not
+        # source product identity.
+        "hot listing",
         "unit price",
         "quantity",
         "subtotal",
