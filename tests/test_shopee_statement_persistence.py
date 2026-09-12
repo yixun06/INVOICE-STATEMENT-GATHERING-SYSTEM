@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from threading import Event, Thread
@@ -5,6 +6,11 @@ from threading import Event, Thread
 import pytest
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceOrder
+from src.invoice_app.domain.transaction_closure import (
+    TransactionClosureEvidence,
+    TransactionClosureStatus,
+    decide_transaction_closure,
+)
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
@@ -137,6 +143,133 @@ def test_adjustment_evidence_never_rewrites_original_invoice_business_facts():
         "payment_status",
         "difference",
     }
+
+
+def test_adjustment_only_evidence_never_creates_invoice_updates_or_closes_original():
+    order = replace(
+        _order(),
+        order_id="260325TESTLINK",
+        final_amount=Decimal("279.81"),
+        order_income=Decimal("279.81"),
+    )
+    adjustment = SettlementAdjustment(
+        sequence_no="1",
+        adjustment_complete_date=date(2026, 4, 6),
+        adjustment_type="Return Refund Adjustment After Order Completed",
+        adjustment_reason="Return",
+        adjustment_amount=Decimal("-279.81"),
+        linked_order_id=order.order_id,
+        payout_completed_date=date(2026, 3, 31),
+        source_row_number=2,
+    )
+    statement = replace(
+        _statement(sku_rows=0, adjustments=False),
+        income_rows=(),
+        summary_total_released=Decimal("0.00"),
+        adjustment_control_total=adjustment.adjustment_amount,
+        adjustments=(adjustment,),
+    )
+
+    plan = _plan(statement=statement, order=order)
+    closure = decide_transaction_closure(order)
+
+    assert plan.invoice_order_updates == ()
+    assert plan.invoice_item_updates == ()
+    assert plan.order_comparisons == ()
+    assert closure.status is TransactionClosureStatus.UNKNOWN
+    assert closure.evidence is None
+    assert order.payment_status is None
+    assert order.payout_completed_date is None
+    assert order.final_amount == Decimal("279.81")
+    assert order.order_income == Decimal("279.81")
+
+
+def test_original_order_view_payout_creates_released_update_and_closes_original():
+    statement = _statement(adjustments=False)
+    original = _order()
+
+    plan = _plan(statement=statement, order=original)
+    update = plan.invoice_order_updates[0]
+    updated_order = replace(
+        original,
+        payment_status=update.payment_status,
+        payout_completed_date=update.payout_completed_date,
+        difference=update.difference,
+    )
+    closure = decide_transaction_closure(updated_order)
+
+    assert update.order_id == statement.order_rows[0].order_id
+    assert update.payment_status == "RELEASED"
+    assert update.payout_completed_date == statement.order_rows[0].payout_completed_date
+    assert closure.status is TransactionClosureStatus.CLOSED
+    assert closure.evidence is TransactionClosureEvidence.STATEMENT_ORIGINAL_PAYOUT
+
+
+def test_mixed_order_and_adjustment_uses_only_original_order_view_for_invoice_updates():
+    original_only = _statement(adjustments=False)
+    later_adjustment = SettlementAdjustment(
+        sequence_no="1",
+        adjustment_complete_date=date(2026, 8, 12),
+        adjustment_type="Return Refund Adjustment After Order Completed",
+        adjustment_reason="Return",
+        adjustment_amount=Decimal("-3.00"),
+        linked_order_id="ORDER-1",
+        payout_completed_date=date(2026, 8, 15),
+        source_row_number=20,
+    )
+    mixed = replace(
+        original_only,
+        adjustment_control_total=later_adjustment.adjustment_amount,
+        adjustments=(later_adjustment,),
+    )
+    original = replace(
+        _order(),
+        order_status="Completed",
+        refund_amount=Decimal("0.00"),
+        source_hash="invoice-source-hash",
+    )
+
+    original_only_plan = _plan(statement=original_only, order=original)
+    mixed_plan = _plan(statement=mixed, order=original)
+    update = mixed_plan.invoice_order_updates[0]
+
+    assert mixed_plan.invoice_order_updates == original_only_plan.invoice_order_updates
+    assert mixed_plan.invoice_item_updates == original_only_plan.invoice_item_updates
+    assert update.payout_completed_date == date(2026, 8, 8)
+    assert update.payout_completed_date != later_adjustment.payout_completed_date
+    assert update.payment_status == "RELEASED"
+    assert original.payout_completed_date is None
+    assert original.payment_status is None
+    assert original.refund_amount == Decimal("0.00")
+    assert original.source_hash == "invoice-source-hash"
+
+
+def test_compensation_adjustment_without_payout_never_creates_invoice_updates():
+    order = replace(_order(), order_id="260321COMPTEST")
+    compensation = SettlementAdjustment(
+        sequence_no="1",
+        adjustment_complete_date=date(2026, 4, 10),
+        adjustment_type="Compensation",
+        adjustment_reason="Parcel was lost",
+        adjustment_amount=Decimal("87.90"),
+        linked_order_id=order.order_id,
+        payout_completed_date=None,
+        source_row_number=2,
+    )
+    statement = replace(
+        _statement(sku_rows=0, adjustments=False),
+        income_rows=(),
+        summary_total_released=Decimal("0.00"),
+        adjustment_control_total=compensation.adjustment_amount,
+        adjustments=(compensation,),
+    )
+
+    plan = _plan(statement=statement, order=order)
+
+    assert plan.invoice_order_updates == ()
+    assert plan.invoice_item_updates == ()
+    assert plan.order_comparisons == ()
+    assert decide_transaction_closure(order).status is TransactionClosureStatus.UNKNOWN
 
 
 def test_final_amount_has_priority_and_difference_is_signed():
