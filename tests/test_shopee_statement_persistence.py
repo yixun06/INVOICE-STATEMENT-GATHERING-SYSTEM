@@ -122,6 +122,23 @@ def test_order_sku_adjustment_rows_serialize_in_schema_order():
     assert plan.rows[2][positions["adjustment_amount"]] == "-1.00"
 
 
+def test_adjustment_evidence_never_rewrites_original_invoice_business_facts():
+    original = _order(final_amount="10.00", order_income="9.00")
+    plan = _plan(statement=_statement(adjustments=True), order=original)
+
+    assert original.final_amount == Decimal("10.00")
+    assert original.order_income == Decimal("9.00")
+    assert not hasattr(plan.invoice_order_updates[0], "final_amount")
+    assert not hasattr(plan.invoice_order_updates[0], "refund_amount")
+    assert not hasattr(plan.invoice_order_updates[0], "order_income")
+    assert set(plan.invoice_order_updates[0].__dataclass_fields__) == {
+        "order_id",
+        "payout_completed_date",
+        "payment_status",
+        "difference",
+    }
+
+
 def test_final_amount_has_priority_and_difference_is_signed():
     plan = _plan(order=_order(final_amount="12.00", order_income="10.00"))
     comparison = plan.order_comparisons[0]

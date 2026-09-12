@@ -12,6 +12,7 @@ from src.invoice_app.domain.historical_invoice import (
     map_accepted_shopee_invoice,
 )
 from src.invoice_app.repositories.historical_invoice_repository import (
+    CLOSED_TRANSACTION_SOURCE_CHANGE,
     ImportStatus,
     InMemoryHistoricalInvoiceRepository,
     source_fact_fingerprint,
@@ -77,6 +78,92 @@ def test_repository_import_statuses_no_duplicate_and_no_conflict_overwrite():
     assert repository.import_invoice(changed).status is ImportStatus.SOURCE_CONFLICT
     assert repository.get_order("Shopee", "000123456789").refund_amount == Decimal("-27.67")
     assert len(repository.get_items_by_order_ids("Shopee", ["000123456789"])["000123456789"]) == 1
+
+
+def test_closed_invoice_changed_refund_final_amount_and_items_stay_immutable():
+    repository = InMemoryHistoricalInvoiceRepository()
+    original = replace(
+        _bundle(),
+        order=replace(
+            _bundle().order,
+            fund_transfer_date=date(2026, 8, 8),
+            final_amount=Decimal("100.00"),
+            refund_amount=Decimal("0.00"),
+        ),
+    )
+    later = replace(
+        original,
+        order=replace(
+            original.order,
+            final_amount=Decimal("70.00"),
+            refund_amount=Decimal("-30.00"),
+        ),
+        items=(
+            replace(
+                original.items[0],
+                product_name="Changed later PDF product",
+                quantity=1,
+            ),
+        ),
+    )
+
+    assert repository.import_invoice(original).status is ImportStatus.NEW
+    identical = repository.import_invoice(original)
+    conflict = repository.import_invoice(later)
+
+    assert identical.status is ImportStatus.ALREADY_IMPORTED
+    assert conflict.status is ImportStatus.SOURCE_CONFLICT
+    assert conflict.reason_code == CLOSED_TRANSACTION_SOURCE_CHANGE
+    persisted = repository.get_order("Shopee", original.order.order_id)
+    persisted_items = repository.get_items_by_order_ids(
+        "Shopee", [original.order.order_id]
+    )[original.order.order_id]
+    assert persisted == original.with_source_fingerprint(
+        source_fact_fingerprint(original)
+    ).order
+    assert persisted_items == original.items
+
+
+def test_closed_invoice_same_source_facts_ignore_statement_enrichment():
+    repository = InMemoryHistoricalInvoiceRepository()
+    source = _bundle()
+    closed = replace(
+        source,
+        order=replace(
+            source.order,
+            payment_status="RELEASED",
+            payout_completed_date=date(2026, 8, 9),
+        ),
+    )
+    repository.import_invoice(closed)
+
+    result = repository.import_invoice(source)
+
+    assert result.status is ImportStatus.ALREADY_IMPORTED
+    assert result.reason_code is None
+
+
+def test_unknown_closure_keeps_generic_source_conflict_without_revision():
+    repository = InMemoryHistoricalInvoiceRepository()
+    original = replace(
+        _bundle(),
+        order=replace(
+            _bundle().order,
+            order_status="Completed",
+            payment_status=None,
+        ),
+    )
+    changed = replace(
+        original,
+        order=replace(original.order, order_income=Decimal("9.00")),
+    )
+
+    repository.import_invoice(original)
+    result = repository.import_invoice(changed)
+
+    assert result.status is ImportStatus.SOURCE_CONFLICT
+    assert result.reason_code is None
+    assert repository.get_order("Shopee", original.order.order_id).order_income == Decimal("352.79")
 
 
 def test_repository_batch_lookups_and_logical_bundle_retention():

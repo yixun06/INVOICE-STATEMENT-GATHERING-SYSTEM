@@ -27,6 +27,7 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     ImportResult,
     ImportStatus,
     _chunks,
+    classify_invoice_against_existing,
     _unique_bundles,
     _validate_chunk_size,
     source_fact_fingerprint,
@@ -348,13 +349,12 @@ class GoogleSheetsHistoricalInvoiceRepository:
 
     def _import_invoice_under_commit_lock(self, bundle: InvoiceBundle) -> ImportResult:
         self.refresh()
-        fingerprint = source_fact_fingerprint(bundle)
         identity = _identity(bundle.order.platform, bundle.order.order_id)
         existing = self._snapshot().bundles.get(identity)
+        result = classify_invoice_against_existing(bundle, existing)
         if existing is not None:
-            status = ImportStatus.ALREADY_IMPORTED if source_fact_fingerprint(existing) == fingerprint else ImportStatus.SOURCE_CONFLICT
-            return ImportResult(status, identity[0], identity[1], fingerprint)
-        stored = bundle.with_source_fingerprint(fingerprint)
+            return result
+        stored = bundle.with_source_fingerprint(result.source_fingerprint)
         try:
             self._gateway.append_bundle(
                 self._spreadsheet_id,
@@ -366,24 +366,16 @@ class GoogleSheetsHistoricalInvoiceRepository:
         except Exception as error:
             raise HistoricalInvoiceStorageError("UAT2 historical invoice bundle write failed.") from error
         self.refresh()
-        return ImportResult(ImportStatus.NEW, identity[0], identity[1], fingerprint)
+        return result
 
     def classify_invoices(self, bundles: Iterable[InvoiceBundle]) -> tuple[ImportResult, ...]:
         candidates = _unique_bundles(bundles)
         snapshot = self._snapshot().bundles
         results = []
         for bundle in candidates:
-            fingerprint = source_fact_fingerprint(bundle)
             identity = _identity(bundle.order.platform, bundle.order.order_id)
             existing = snapshot.get(identity)
-            status = (
-                ImportStatus.NEW
-                if existing is None
-                else ImportStatus.ALREADY_IMPORTED
-                if source_fact_fingerprint(existing) == fingerprint
-                else ImportStatus.SOURCE_CONFLICT
-            )
-            results.append(ImportResult(status, identity[0], identity[1], fingerprint))
+            results.append(classify_invoice_against_existing(bundle, existing))
         return tuple(results)
 
     def import_invoices(

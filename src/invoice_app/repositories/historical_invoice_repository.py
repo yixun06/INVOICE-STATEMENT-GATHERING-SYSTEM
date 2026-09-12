@@ -15,6 +15,13 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceOrder,
     InvoiceBundle,
 )
+from src.invoice_app.domain.transaction_closure import (
+    TransactionClosureStatus,
+    decide_transaction_closure,
+)
+
+
+CLOSED_TRANSACTION_SOURCE_CHANGE = "CLOSED_TRANSACTION_SOURCE_CHANGE"
 
 
 class ImportStatus(str, Enum):
@@ -29,6 +36,7 @@ class ImportResult:
     platform: str
     order_id: str
     source_fingerprint: str
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,34 +135,22 @@ class InMemoryHistoricalInvoiceRepository:
         }
 
     def import_invoice(self, bundle: InvoiceBundle) -> ImportResult:
-        fingerprint = source_fact_fingerprint(bundle)
-        stored = bundle.with_source_fingerprint(fingerprint)
         identity = _identity(bundle.order.platform, bundle.order.order_id)
         existing = self._bundles.get(identity)
-        if existing is None:
-            self._bundles[identity] = stored
-            status = ImportStatus.NEW
-        elif source_fact_fingerprint(existing) == fingerprint:
-            status = ImportStatus.ALREADY_IMPORTED
-        else:
-            status = ImportStatus.SOURCE_CONFLICT
-        return ImportResult(status, identity[0], identity[1], fingerprint)
+        result = classify_invoice_against_existing(bundle, existing)
+        if result.status is ImportStatus.NEW:
+            self._bundles[identity] = bundle.with_source_fingerprint(
+                result.source_fingerprint
+            )
+        return result
 
     def classify_invoices(self, bundles: Iterable[InvoiceBundle]) -> tuple[ImportResult, ...]:
         candidates = _unique_bundles(bundles)
         results = []
         for bundle in candidates:
-            fingerprint = source_fact_fingerprint(bundle)
             identity = _identity(bundle.order.platform, bundle.order.order_id)
             existing = self._bundles.get(identity)
-            status = (
-                ImportStatus.NEW
-                if existing is None
-                else ImportStatus.ALREADY_IMPORTED
-                if source_fact_fingerprint(existing) == fingerprint
-                else ImportStatus.SOURCE_CONFLICT
-            )
-            results.append(ImportResult(status, identity[0], identity[1], fingerprint))
+            results.append(classify_invoice_against_existing(bundle, existing))
         return tuple(results)
 
     def import_invoices(
@@ -203,6 +199,37 @@ def _order_facts(order: CanonicalInvoiceOrder) -> dict[str, object]:
         "order_income", "income_type", "final_amount", "refund_amount", "buyer_merchandise_subtotal", "buyer_shipping_fee", "shopee_voucher", "seller_voucher", "total_buyer_payment",
     )
     return {field: _value(getattr(order, field)) for field in fields}
+
+
+def classify_invoice_against_existing(
+    candidate: InvoiceBundle,
+    existing: InvoiceBundle | None,
+) -> ImportResult:
+    """Apply the existing source identity contract plus the closed-order guard."""
+
+    fingerprint = source_fact_fingerprint(candidate)
+    platform, order_id = _identity(
+        candidate.order.platform, candidate.order.order_id
+    )
+    if existing is None:
+        return ImportResult(ImportStatus.NEW, platform, order_id, fingerprint)
+    if source_fact_fingerprint(existing) == fingerprint:
+        return ImportResult(
+            ImportStatus.ALREADY_IMPORTED, platform, order_id, fingerprint
+        )
+    closure = decide_transaction_closure(existing.order)
+    reason_code = (
+        CLOSED_TRANSACTION_SOURCE_CHANGE
+        if closure.status is TransactionClosureStatus.CLOSED
+        else None
+    )
+    return ImportResult(
+        ImportStatus.SOURCE_CONFLICT,
+        platform,
+        order_id,
+        fingerprint,
+        reason_code,
+    )
 
 
 def _item_facts(item: CanonicalInvoiceItem) -> dict[str, object]:

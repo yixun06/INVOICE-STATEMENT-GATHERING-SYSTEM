@@ -23,7 +23,11 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
     _serialize_item,
     _serialize_order,
 )
-from src.invoice_app.repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError, ImportStatus
+from src.invoice_app.repositories.historical_invoice_repository import (
+    CLOSED_TRANSACTION_SOURCE_CHANGE,
+    HistoricalInvoiceBulkImportError,
+    ImportStatus,
+)
 from src.invoice_app.repositories.historical_invoice_repository import source_fact_fingerprint
 from src.invoice_app.services.product_master_source import GOOGLE_SHEETS_READONLY_SCOPE
 from src.invoice_app.services.application_commit_lock import (
@@ -134,6 +138,39 @@ def test_repeated_identical_import_does_not_append_again_and_conflict_keeps_orig
     assert repository.get_order("Shopee", original.order.order_id).refund_amount == Decimal("0.00")
 
 
+def test_closed_conflict_is_specific_and_never_appends_or_overwrites():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    original = replace(
+        _bundle(),
+        order=replace(
+            _bundle().order,
+            fund_transfer_date=date(2026, 8, 8),
+            final_amount=Decimal("12.50"),
+        ),
+    )
+    changed = replace(
+        original,
+        order=replace(
+            original.order,
+            refund_amount=Decimal("-2.50"),
+            final_amount=Decimal("10.00"),
+        ),
+        items=(replace(original.items[0], product_name="Later PDF product"),),
+    )
+
+    assert repository.import_invoice(original).status is ImportStatus.NEW
+    result = repository.import_invoice(changed)
+
+    assert result.status is ImportStatus.SOURCE_CONFLICT
+    assert result.reason_code == CLOSED_TRANSACTION_SOURCE_CHANGE
+    assert gateway.append_calls == 1
+    assert repository.get_order("Shopee", original.order.order_id).final_amount == Decimal("12.50")
+    assert repository.get_items_by_order_ids(
+        "Shopee", [original.order.order_id]
+    )[original.order.order_id] == original.items
+
+
 def test_many_requested_ids_use_one_snapshot_not_per_id():
     gateway = FakeGateway()
     repository = _repository(gateway)
@@ -217,6 +254,38 @@ def test_bulk_precommit_source_conflict_plus_new_is_zero_write():
     assert gateway.append_calls == 0
     assert result.chunk_sizes == ()
     assert repository.get_order("Shopee", "B") is None
+
+
+def test_bulk_precommit_closed_conflict_plus_new_is_zero_write():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    later = _bundle(order_id="CLOSED")
+    new_bundle = _bundle(order_id="NEW")
+    assert all(
+        result.status is ImportStatus.NEW
+        for result in repository.classify_invoices((later, new_bundle))
+    )
+    closed_original = replace(
+        later,
+        order=replace(
+            later.order,
+            fund_transfer_date=date(2026, 8, 8),
+            refund_amount=Decimal("-1.00"),
+        ),
+    )
+    _append_external_bundle(gateway, closed_original)
+
+    result = repository.import_invoices((later, new_bundle))
+
+    assert [item.status for item in result.results] == [
+        ImportStatus.SOURCE_CONFLICT,
+        ImportStatus.NEW,
+    ]
+    assert result.results[0].reason_code == CLOSED_TRANSACTION_SOURCE_CHANGE
+    assert result.chunk_sizes == ()
+    assert gateway.append_calls == 0
+    assert repository.get_order("Shopee", "NEW") is None
+    assert repository.get_order("Shopee", "CLOSED").refund_amount == Decimal("-1.00")
 
 
 def test_google_repository_holds_shared_lock_for_fresh_preflight_and_batch_write():

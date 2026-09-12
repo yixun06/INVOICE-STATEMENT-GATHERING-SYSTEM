@@ -10,6 +10,7 @@ from typing import Iterable
 from src.invoice_app.domain.historical_invoice import InvoiceBundle, map_accepted_shopee_invoice
 from src.invoice_app.repositories.historical_invoice_repository import (
     BulkImportResult,
+    CLOSED_TRANSACTION_SOURCE_CHANGE,
     HistoricalInvoiceRepository,
     ImportResult,
     ImportStatus,
@@ -38,6 +39,7 @@ class InvoiceIntakeEntry:
     status: IntakeStatus
     message: str | None
     bundle: InvoiceBundle | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,7 +186,20 @@ def _with_repository_result(
         ImportStatus.ALREADY_IMPORTED: "Same material historical invoice is already imported.",
         ImportStatus.SOURCE_CONFLICT: "Stored historical invoice has different material source facts.",
     }
-    return replace(entry, status=IntakeStatus(result.status.value), message=messages[result.status])
+    if result.reason_code == CLOSED_TRANSACTION_SOURCE_CHANGE:
+        message = (
+            "This transaction is already closed by seller payout/release evidence. "
+            "The later PDF cannot overwrite the original Invoice; any later financial "
+            "effect requires separate settlement/CN/Adjustment evidence."
+        )
+    else:
+        message = messages[result.status]
+    return replace(
+        entry,
+        status=IntakeStatus(result.status.value),
+        message=message,
+        reason_code=result.reason_code,
+    )
 
 
 def _with_import_result(
@@ -196,7 +211,12 @@ def _with_import_result(
     if result is None:
         return entry
     if result.status is ImportStatus.NEW:
-        return replace(entry, status=IntakeStatus.IMPORTED, message="Imported to historical invoice storage.")
+        return replace(
+            entry,
+            status=IntakeStatus.IMPORTED,
+            message="Imported to historical invoice storage.",
+            reason_code=None,
+        )
     return _with_repository_result(entry, results)
 
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder, InvoiceBundle
 from src.invoice_app.repositories.historical_invoice_repository import (
+    CLOSED_TRANSACTION_SOURCE_CHANGE,
     HistoricalInvoiceBulkImportError,
     InMemoryHistoricalInvoiceRepository,
 )
@@ -144,6 +145,41 @@ def test_option_a_blocks_every_mixed_batch_before_any_write():
 
     assert outcome.bulk_result.results == ()
     assert repository.write_chunks == ()
+
+
+def test_closed_source_change_has_operational_reason_and_blocks_mixed_batch():
+    repository = RecordingMemoryRepository()
+    closed = replace(
+        _bundle("CLOSED"),
+        order=replace(
+            _bundle("CLOSED").order,
+            fund_transfer_date=datetime(2026, 8, 8, tzinfo=timezone.utc).date(),
+            final_amount=Decimal("10.00"),
+        ),
+    )
+    repository.import_invoice(closed)
+    later = replace(
+        closed,
+        order=replace(
+            closed.order,
+            refund_amount=Decimal("-2.00"),
+            final_amount=Decimal("8.00"),
+        ),
+    )
+    preview = classify_staging(
+        (_entry(later), _entry(_bundle("NEW"))), repository
+    )
+
+    assert preview[0].status is IntakeStatus.SOURCE_CONFLICT
+    assert preview[0].reason_code == CLOSED_TRANSACTION_SOURCE_CHANGE
+    assert "cannot overwrite the original Invoice" in preview[0].message
+
+    outcome = import_new_staging(preview, repository)
+
+    assert outcome.bulk_result.results == ()
+    assert repository.write_chunks == ()
+    assert repository.get_order("Shopee", "NEW") is None
+    assert repository.get_order("Shopee", "CLOSED").final_amount == Decimal("10.00")
 
 
 def test_blank_nav_or_pricing_failure_routes_whole_order_to_needs_review(tmp_path, monkeypatch):
