@@ -5,6 +5,7 @@ from src.invoice_app.parsers.shopee_product_parser import (
     _Columns,
     _Row,
     _parse_positioned_item_block,
+    parse_text_products,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 
@@ -82,3 +83,27 @@ def test_hot_listing_words_inside_an_actual_product_name_are_preserved():
     assert item is not None
     assert item["product_name"] == "Hot Listing Coffee Gift Set"
     assert item["seller_sku"] == "COFFEE-1"
+
+
+def test_sku_with_spaces_is_preserved_for_positioned_and_text_product_parsing():
+    block = [
+        _row(100, _word("Simply Natural Organic Chia Seeds 250g", 110, 290, 100)),
+        _row(110, _word("23.90", 330, 350, 110), _word("1", 400, 405, 110), _word("23.90", 455, 475, 110)),
+        _row(120, _word("Variation: Btl 250g", 110, 205, 120)),
+        _row(130, _word("SKU:", 110, 130, 130), _word("btl", 135, 150, 130), _word("250g-9555208108993", 155, 260, 130), _word("23.90", 455, 475, 130)),
+    ]
+
+    positioned = _parse_positioned_item_block(block, _COLUMNS, ())
+    text_items = parse_text_products("""
+No. Product(s) Unit Price Quantity Subtotal
+Simply Natural Organic Chia Seeds 250g 23.90 1 23.90
+Variation: Btl 250g
+SKU: btl 250g-9555208108993
+Merchandise Subtotal RM23.90
+""")
+
+    assert positioned is not None
+    assert positioned["seller_sku"] == "btl 250g-9555208108993"
+    assert positioned["variation"] == "Btl 250g"
+    assert text_items[0]["seller_sku"] == "btl 250g-9555208108993"
+    assert text_items[0]["variation"] == "Btl 250g"

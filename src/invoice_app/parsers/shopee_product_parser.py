@@ -231,8 +231,8 @@ def _parse_positioned_item_block(
     if not block:
         return None
 
-    sku_match = re.search(r"\bSKU\s*:\s*([^\s]+)", block[-1].text, flags=re.IGNORECASE)
-    if not sku_match:
+    seller_sku = _extract_positioned_sku_value(block[-1], columns)
+    if not seller_sku:
         return None
 
     metric_row: _Row | None = None
@@ -280,7 +280,7 @@ def _parse_positioned_item_block(
     promotion_candidates = _promotion_subtotal_candidates(block, columns, horizontal_rules)
     return {
         "product_name": product_name,
-        "seller_sku": sku_match.group(1).strip(),
+        "seller_sku": seller_sku,
         "quantity": quantity,
         "unit_price": unit_price,
         "line_total": line_total,
@@ -833,8 +833,8 @@ def _promotion_group_id(page_number: int, section_number: int) -> str:
 def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
     if not block:
         return None
-    sku_match = re.search(r"\bSKU\s*:\s*([^\s]+)", block[-1], flags=re.IGNORECASE)
-    if not sku_match:
+    seller_sku = _extract_sku_value(block[-1], trim_trailing_money=True)
+    if not seller_sku:
         return None
 
     metric_index = -1
@@ -896,7 +896,7 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
 
     return {
         "product_name": product_name,
-        "seller_sku": sku_match.group(1).strip(),
+        "seller_sku": seller_sku,
         "quantity": quantity,
         "unit_price": unit_price,
         "line_total": line_total,
@@ -929,9 +929,9 @@ def _parse_complete_rows(lines: list[str]) -> list[dict[str, Any]]:
                 "evidence": "complete-row",
             }
             continue
-        sku = re.search(r"\bSKU\s*:\s*([^\s]+)", line, flags=re.IGNORECASE)
-        if sku and pending:
-            pending["seller_sku"] = sku.group(1).strip()
+        seller_sku = _extract_sku_value(line, trim_trailing_money=True)
+        if seller_sku and pending:
+            pending["seller_sku"] = seller_sku
             items.append(pending)
             pending = None
     return items
@@ -982,6 +982,25 @@ def _is_product_noise(value: str) -> bool:
     if _promotion_details(value) is not None:
         return True
     return bool(re.fullmatch(r"(?:no\.?)?\s*product\(s\)", lowered))
+
+
+def _extract_positioned_sku_value(row: _Row, columns: _Columns) -> str:
+    product_column_text = normalize_whitespace(" ".join(
+        word.text
+        for word in row.words
+        if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
+    ))
+    return _extract_sku_value(product_column_text)
+
+
+def _extract_sku_value(value: str, *, trim_trailing_money: bool = False) -> str:
+    """Return the complete SKU value printed after a Shopee `SKU:` label."""
+
+    match = re.search(r"\bSKU\s*:\s*(\S(?:.*?\S)?)\s*$", value, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    sku = normalize_whitespace(match.group(1))
+    return re.sub(r"\s+-?\d+\.\d{2}$", "", sku) if trim_trailing_money else sku
 
 
 def _has_product_anchor(item: dict[str, Any]) -> bool:
