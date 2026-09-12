@@ -21,6 +21,7 @@ from ..services.import_result_contract import ImportResult, ReconciliationExcept
 from ..services.validation_recovery import (
     REMOVE_SOURCE,
     VIEW_DETAILS,
+    execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
     recovery_actions_for_source,
 )
@@ -91,6 +92,7 @@ _WORKFLOW_KEYS = (
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
     "manual_review_correction_drafts",
+    "pending_validation_bulk_recovery",
 )
 
 
@@ -277,7 +279,7 @@ def _render_validation_step(
         render_platform_orders_validation_data()
         _render_manual_review_resolution()
     _render_contract_validation(result)
-    if st.session_state.get("pending_validation_recovery_action"):
+    if _has_pending_recovery():
         _render_recovery_confirmation()
     if result.source_specific_details.get("show_platform_order_outcomes"):
         render_platform_orders_outcomes()
@@ -361,26 +363,60 @@ def _render_issue_details(issue: ValidationIssue) -> None:
         st.write(issue.reason)
 
 
-@st.dialog("Remove source from current batch?", icon=":material/warning:")
+def _has_pending_recovery() -> bool:
+    return bool(
+        st.session_state.get("pending_validation_recovery_action")
+        or st.session_state.get("pending_validation_bulk_recovery")
+    )
+
+
+def _queue_bulk_recovery(sources: list[str], *, label: str) -> None:
+    source_names = tuple(dict.fromkeys(source.strip() for source in sources if source.strip()))
+    if not source_names:
+        return
+    st.session_state.pending_validation_bulk_recovery = {
+        "label": label,
+        "sources": source_names,
+    }
+    st.rerun()
+
+
+@st.dialog("Remove source(s) from current batch?", icon=":material/warning:")
 def _render_recovery_confirmation() -> None:
     action = st.session_state.get("pending_validation_recovery_action")
-    if not isinstance(action, RecoveryAction):
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    if not isinstance(action, RecoveryAction) and not isinstance(bulk, dict):
         st.session_state.pop("pending_validation_recovery_action", None)
+        st.session_state.pop("pending_validation_bulk_recovery", None)
         st.rerun()
-    st.warning(f"{action.label}: {action.affected_item}. This changes only current staging; archived source files remain unchanged.")
+    if isinstance(action, RecoveryAction):
+        description = f"{action.label}: {action.affected_item}."
+    else:
+        sources = tuple(bulk.get("sources", ()))
+        if not sources:
+            st.session_state.pop("pending_validation_bulk_recovery", None)
+            st.rerun()
+        description = f"{bulk.get('label', 'Remove selected sources')}: {len(sources)} source(s)."
+    st.warning(f"{description} This changes only current staging; archived source files remain unchanged.")
     with st.container(horizontal=True):
         if st.button("Confirm removal and revalidate", type="primary", icon=":material/delete:", key="confirm_validation_recovery"):
             begin_workflow_activity(st.session_state, "Revalidating")
             try:
-                execution = execute_current_batch_recovery(st.session_state, action)
+                execution = (
+                    execute_current_batch_recovery(st.session_state, action)
+                    if isinstance(action, RecoveryAction)
+                    else execute_current_batch_bulk_recovery(st.session_state, bulk["sources"])
+                )
             finally:
                 end_workflow_activity(st.session_state)
             st.session_state.validation_recovery_notice = execution.message
             st.session_state.validation_recovery_detail = None
             st.session_state.pop("pending_validation_recovery_action", None)
+            st.session_state.pop("pending_validation_bulk_recovery", None)
             st.rerun()
         if st.button("Cancel", key="cancel_validation_recovery"):
             st.session_state.pop("pending_validation_recovery_action", None)
+            st.session_state.pop("pending_validation_bulk_recovery", None)
             st.rerun()
 
 def _render_recovery_notice() -> None:
@@ -404,6 +440,13 @@ def _render_manual_review_resolution() -> None:
         st.caption("No current-batch sources require Manual Review.")
         return
     st.dataframe([{"Source PDF": item.get("source_pdf"), "Order ID": item.get("order_id"), "Reason": item.get("reason")} for item in reviews], hide_index=True)
+    review_sources = [str(item.get("source_pdf") or "").strip() for item in reviews]
+    if st.button(
+        "Remove all Manual Review sources from current batch",
+        icon=":material/delete_sweep:",
+        key="remove_all_manual_review_sources",
+    ):
+        _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
     st.subheader("Manual Review actions")
     for review in reviews:
         plan = resolution_plan(review)
@@ -624,7 +667,7 @@ def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         _reconcile_historical_invoice_staging()
-        if st.session_state.get("pending_validation_recovery_action"):
+        if _has_pending_recovery():
             _render_recovery_confirmation()
         _render_next_step("Continue to review & commit", 5)
         return
@@ -655,7 +698,7 @@ def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationE
 
 def _render_review_and_commit_step() -> None:
     st.subheader("Review & Commit")
-    if st.session_state.get("pending_validation_recovery_action"):
+    if _has_pending_recovery():
         _render_recovery_confirmation()
     result = _current_import_result()
     _render_source_summary(result)
@@ -825,6 +868,17 @@ def _render_historical_status_details(
     )
     if not allow_removal:
         return
+    needs_review_sources = [
+        entry.source_filename
+        for entry in entries
+        if entry.status is IntakeStatus.NEEDS_REVIEW and entry.source_filename
+    ]
+    if needs_review_sources and st.button(
+        "Remove all NEEDS_REVIEW sources from current batch",
+        icon=":material/delete_sweep:",
+        key=f"{key_prefix}_remove_all_needs_review",
+    ):
+        _queue_bulk_recovery(needs_review_sources, label="Remove all NEEDS_REVIEW sources")
     for entry in entries:
         if entry.status is IntakeStatus.NEW:
             continue

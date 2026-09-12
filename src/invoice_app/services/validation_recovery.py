@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
@@ -111,6 +111,48 @@ def execute_current_batch_recovery(
             f"Removed {source} from current staging and revalidated the remaining batch."
             if changed
             else f"No current staging records matched {source}; the batch was revalidated."
+        ),
+    )
+
+
+def execute_current_batch_bulk_recovery(
+    state: MutableMapping[str, Any],
+    sources: Iterable[str],
+) -> RecoveryExecution:
+    """Remove known current-batch sources together, then revalidate once."""
+
+    source_names = tuple(dict.fromkeys(
+        source.strip() for source in sources if isinstance(source, str) and source.strip()
+    ))
+    if not source_names:
+        raise ValueError("Bulk recovery requires at least one source file.")
+
+    sources_to_remove = frozenset(source_names)
+    removed_counts: dict[str, int] = {}
+    for bucket in _SOURCE_BUCKETS:
+        records = list(state.get(bucket, []))
+        retained = [record for record in records if source_name(record) not in sources_to_remove]
+        removed_counts[bucket] = len(records) - len(retained)
+        state[bucket] = retained
+
+    _revalidate_platform_batch_state(state)
+    for key in (
+        "uat2_historical_commit_entries",
+        "uat2_historical_commit_refresh_required",
+        "uat2_historical_commit_signature",
+    ):
+        state.pop(key, None)
+    changed = any(removed_counts.values())
+    digest = sha256("\n".join(sorted(source_names)).encode("utf-8")).hexdigest()[:12]
+    return RecoveryExecution(
+        action_id=f"remove_sources:{digest}",
+        changed=changed,
+        revalidated=True,
+        removed_counts=removed_counts,
+        message=(
+            f"Removed {len(source_names)} source(s) from current staging and revalidated the remaining batch."
+            if changed
+            else "No current staging records matched the selected sources; the batch was revalidated."
         ),
     )
 
