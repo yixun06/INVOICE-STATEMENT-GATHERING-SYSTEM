@@ -5,6 +5,7 @@ import pytest
 
 from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import (
+    NORMAL_ORDER,
     RETURN_REFUND,
     UNKNOWN_OR_MIXED,
     parse_buyer_payment,
@@ -191,8 +192,8 @@ def test_shopee_return_refund_product_text_does_not_infer_refund_amount():
 
     assert extracted.refund_amount is None
     assert order["refund_amount"] == "N/A"
-    assert extracted.invoice_financial_layout == UNKNOWN_OR_MIXED
-    assert find_shopee_review_issue(extracted).reason_code == "FINANCIAL_LAYOUT_UNRESOLVED"
+    assert extracted.invoice_financial_layout == NORMAL_ORDER
+    assert find_shopee_review_issue(extracted) is None
 
 
 def test_shopee_order_id_date_prefix_fills_only_a_missing_explicit_created_date():

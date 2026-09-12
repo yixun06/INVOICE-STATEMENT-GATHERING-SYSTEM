@@ -40,6 +40,15 @@ class _Columns:
     quantity_subtotal_boundary: float
 
 
+_SOURCE_RETURN_REFUND_QUANTITY = "source_return_refund_quantity"
+_SOURCE_RETURN_REFUND_ERROR = "_source_return_refund_error"
+_ITEM_RETURN_REFUND_PREFIX = re.compile(
+    r"^\s*(?P<quantity>-?\d+)\s+Return\s*/\s*Refund\b"
+    r"(?:\s+product\b)?\s*(?P<product_name>.*)$",
+    flags=re.IGNORECASE,
+)
+
+
 def parse_positioned_products(document: PdfDocument) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for page in document.pages:
@@ -124,6 +133,7 @@ def reconcile_product_candidates(
                 merged["line_total"] = fallback.get("line_total", Decimal("0"))
             if merged.get("source_line_subtotal") is None:
                 merged["source_line_subtotal"] = fallback.get("source_line_subtotal")
+            _reconcile_source_return_refund_evidence(merged, fallback)
         result.append(merged)
         if sku:
             seen_skus.add(sku)
@@ -250,6 +260,8 @@ def _parse_positioned_item_block(
         break
 
     name_parts: list[tuple[str, PdfWord, PdfWord]] = []
+    source_return_refund_quantities: list[int] = []
+    source_return_refund_errors: list[str] = []
     variation = ""
     promotion = ""
     for row in block[:-1]:
@@ -270,6 +282,13 @@ def _parse_positioned_item_block(
         if _promotion_details(candidate) is not None:
             promotion = candidate
             continue
+        candidate = _consume_source_return_refund_marker(
+            candidate,
+            source_return_refund_quantities,
+            source_return_refund_errors,
+        )
+        if not candidate:
+            continue
         name_parts.append((candidate, product_words[0], product_words[-1]))
 
     product_name, variation = normalize_product_identity(
@@ -278,7 +297,7 @@ def _parse_positioned_item_block(
     )
 
     promotion_candidates = _promotion_subtotal_candidates(block, columns, horizontal_rules)
-    return {
+    item = {
         "product_name": product_name,
         "seller_sku": seller_sku,
         "quantity": quantity,
@@ -291,6 +310,13 @@ def _parse_positioned_item_block(
         "evidence": "positioned",
         "metric_top": metric_row.top if metric_row else None,
     }
+    _attach_source_return_refund_evidence(
+        item,
+        ordered_quantity=quantity,
+        marker_quantities=source_return_refund_quantities,
+        errors=source_return_refund_errors,
+    )
+    return item
 
 
 def _join_coordinate_product_name_parts(
@@ -475,6 +501,8 @@ def _parse_positioned_items_without_sku(
             continue
         unit_price, quantity, line_total = metrics
         name_parts: list[str] = []
+        source_return_refund_quantities: list[int] = []
+        source_return_refund_errors: list[str] = []
         variation = ""
         for candidate_row in rows[previous_metric + 1 : metric_index + 1]:
             product_words = [
@@ -488,24 +516,35 @@ def _parse_positioned_items_without_sku(
             if candidate.lower().startswith("variation:"):
                 variation = candidate
             elif not re.search(r"(?:Any\s+)?\d+\s+at\s+RM", candidate, flags=re.IGNORECASE):
-                name_parts.append(candidate)
+                candidate = _consume_source_return_refund_marker(
+                    candidate,
+                    source_return_refund_quantities,
+                    source_return_refund_errors,
+                )
+                if candidate:
+                    name_parts.append(candidate)
 
         product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
-        items.append(
-            {
-                "product_name": product_name,
-                "seller_sku": "",
-                "quantity": quantity,
-                "unit_price": unit_price,
-                "line_total": line_total,
-                "source_line_subtotal": line_total,
-                "variation": variation,
-                "promotion": "",
-                "evidence": "positioned-no-sku",
-                "source_page": page_number,
-                "sku_missing_in_source": True,
-            }
+        item = {
+            "product_name": product_name,
+            "seller_sku": "",
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "line_total": line_total,
+            "source_line_subtotal": line_total,
+            "variation": variation,
+            "promotion": "",
+            "evidence": "positioned-no-sku",
+            "source_page": page_number,
+            "sku_missing_in_source": True,
+        }
+        _attach_source_return_refund_evidence(
+            item,
+            ordered_quantity=quantity,
+            marker_quantities=source_return_refund_quantities,
+            errors=source_return_refund_errors,
         )
+        items.append(item)
         previous_metric = metric_index
     return items
 
@@ -874,6 +913,8 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
             break
 
     name_parts: list[str] = []
+    source_return_refund_quantities: list[int] = []
+    source_return_refund_errors: list[str] = []
     variation = ""
     promotion = ""
     for index, line in enumerate(block[:-1]):
@@ -890,11 +931,17 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
             if candidate.lower().startswith("variation:"):
                 variation = candidate
             else:
-                name_parts.append(candidate)
+                candidate = _consume_source_return_refund_marker(
+                    candidate,
+                    source_return_refund_quantities,
+                    source_return_refund_errors,
+                )
+                if candidate:
+                    name_parts.append(candidate)
 
     product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
 
-    return {
+    item = {
         "product_name": product_name,
         "seller_sku": seller_sku,
         "quantity": quantity,
@@ -905,6 +952,13 @@ def _parse_text_item_block(block: list[str]) -> dict[str, Any] | None:
         "promotion": promotion,
         "evidence": "text",
     }
+    _attach_source_return_refund_evidence(
+        item,
+        ordered_quantity=quantity,
+        marker_quantities=source_return_refund_quantities,
+        errors=source_return_refund_errors,
+    )
+    return item
 
 
 def _parse_complete_rows(lines: list[str]) -> list[dict[str, Any]]:
@@ -917,8 +971,15 @@ def _parse_complete_rows(lines: list[str]) -> list[dict[str, Any]]:
             line,
         )
         if row:
+            marker_quantities: list[int] = []
+            marker_errors: list[str] = []
+            product_name = _consume_source_return_refund_marker(
+                normalize_whitespace(row.group("name")),
+                marker_quantities,
+                marker_errors,
+            )
             pending = {
-                "product_name": normalize_whitespace(row.group("name")),
+                "product_name": product_name,
                 "seller_sku": "",
                 "quantity": parse_quantity(row.group("qty")),
                 "unit_price": parse_decimal(row.group("unit")),
@@ -928,6 +989,12 @@ def _parse_complete_rows(lines: list[str]) -> list[dict[str, Any]]:
                 "promotion": "",
                 "evidence": "complete-row",
             }
+            _attach_source_return_refund_evidence(
+                pending,
+                ordered_quantity=pending["quantity"],
+                marker_quantities=marker_quantities,
+                errors=marker_errors,
+            )
             continue
         seller_sku = _extract_sku_value(line, trim_trailing_money=True)
         if seller_sku and pending:
@@ -1012,3 +1079,76 @@ def _has_product_anchor(item: dict[str, Any]) -> bool:
 
 def _is_complete_item(item: dict[str, Any]) -> bool:
     return bool(str(item.get("product_name", "")).strip() and _has_product_anchor(item))
+
+
+def _consume_source_return_refund_marker(
+    candidate: str,
+    marker_quantities: list[int],
+    errors: list[str],
+) -> str:
+    """Extract only a quantity-prefixed marker already scoped to one item block."""
+
+    match = _ITEM_RETURN_REFUND_PREFIX.match(candidate)
+    if match is None:
+        return candidate
+    source_quantity = int(match.group("quantity"))
+    if source_quantity <= 0:
+        errors.append("Return/Refund source quantity must be a positive integer.")
+    else:
+        marker_quantities.append(source_quantity)
+    return normalize_whitespace(match.group("product_name"))
+
+
+def _attach_source_return_refund_evidence(
+    item: dict[str, Any],
+    *,
+    ordered_quantity: int,
+    marker_quantities: list[int],
+    errors: list[str],
+) -> None:
+    distinct = tuple(dict.fromkeys(marker_quantities))
+    if len(distinct) > 1:
+        errors.append(
+            "One product block contains conflicting Return/Refund source quantities."
+        )
+    elif distinct:
+        source_quantity = distinct[0]
+        item[_SOURCE_RETURN_REFUND_QUANTITY] = source_quantity
+        if source_quantity > ordered_quantity:
+            errors.append(
+                "Return/Refund source quantity "
+                f"{source_quantity} exceeds ordered quantity {ordered_quantity}."
+            )
+    if errors:
+        item[_SOURCE_RETURN_REFUND_ERROR] = " ".join(dict.fromkeys(errors))
+
+
+def _reconcile_source_return_refund_evidence(
+    positioned: dict[str, Any],
+    text_item: dict[str, Any],
+) -> None:
+    """Require both candidate flows to agree before retaining marker evidence."""
+
+    positioned_quantity = positioned.get(_SOURCE_RETURN_REFUND_QUANTITY)
+    text_quantity = text_item.get(_SOURCE_RETURN_REFUND_QUANTITY)
+    errors = [
+        str(value).strip()
+        for value in (
+            positioned.get(_SOURCE_RETURN_REFUND_ERROR),
+            text_item.get(_SOURCE_RETURN_REFUND_ERROR),
+        )
+        if str(value or "").strip()
+    ]
+    if positioned_quantity != text_quantity:
+        errors.append(
+            "Positioned and text product candidates disagree about the "
+            "Return/Refund source quantity."
+        )
+    if positioned_quantity is None or positioned_quantity != text_quantity:
+        positioned.pop(_SOURCE_RETURN_REFUND_QUANTITY, None)
+    else:
+        positioned[_SOURCE_RETURN_REFUND_QUANTITY] = positioned_quantity
+    if errors:
+        positioned[_SOURCE_RETURN_REFUND_ERROR] = " ".join(
+            dict.fromkeys(errors)
+        )

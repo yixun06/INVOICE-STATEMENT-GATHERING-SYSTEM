@@ -72,8 +72,8 @@ def extract_shopee_data(
         positioned_items or [],
         parse_text_products(normalized_text),
     )
-
     product_items = resolve_promotion_group_totals(product_items, income.get("product_price"))
+    refund_amount = extract_refund_amount(normalized_text)
     return ShopeeExtractedData(
         source_pdf=source_pdf,
         normalized_text=normalized_text,
@@ -93,11 +93,12 @@ def extract_shopee_data(
         invoice_financial_layout=classify_invoice_financial_layout(
             normalized_text,
             label_presence=label_presence,
+            product_items=product_items,
         ),
         income_label_presence=label_presence,
         final_amount_source_state=("parsed" if income.get("final_amount") != "N/A" else "unparsed" if final_amount_label_present(normalized_text) else "absent"),
         product_items=tuple(product_items),
-        refund_amount=extract_refund_amount(normalized_text),
+        refund_amount=refund_amount,
         income=income,
         buyer_payment=parse_buyer_payment(normalized_text),
         voucher=parse_voucher_detail(normalized_text),

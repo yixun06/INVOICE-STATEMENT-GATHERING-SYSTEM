@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import re
-from typing import TYPE_CHECKING
+from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
 from ..utils.normalize import normalize_whitespace, parse_decimal
 
@@ -156,11 +156,16 @@ def classify_invoice_financial_layout(
     text: str,
     *,
     label_presence: frozenset[str] | None = None,
+    product_items: Iterable[Mapping[str, Any]] | None = None,
 ) -> str:
     """Classify only from independent, source-visible refund signals."""
     labels = label_presence if label_presence is not None else income_label_presence(text)
     return classify_invoice_financial_layout_from_signals(
-        invoice_financial_layout_signals(text, label_presence=labels)
+        invoice_financial_layout_signals(
+            text,
+            label_presence=labels,
+            product_items=product_items,
+        )
     )
 
 
@@ -168,14 +173,16 @@ def invoice_financial_layout_signals(
     text: str,
     *,
     label_presence: frozenset[str] | None = None,
+    product_items: Iterable[Mapping[str, Any]] | None = None,
 ) -> frozenset[str]:
     labels = label_presence if label_presence is not None else income_label_presence(text)
+    refund_amount = extract_refund_amount(text)
     signals = {
         name
         for name, present in {
-            "refund_amount": bool(re.search(r"\bRefund\s+Amount\b", text, flags=re.IGNORECASE)),
-            "return_refund_marker": bool(
-                re.search(r"^\s*Return\s*/\s*Refund(?:\s+product)?\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+            "refund_amount": refund_amount is not None and refund_amount != 0,
+            "return_refund_marker": _has_structured_return_refund_marker(
+                product_items or ()
             ),
             "reverse_shipping_fee": "reverse_shipping_fee" in labels,
             "reverse_shipping_fee_sst": "reverse_shipping_fee_sst" in labels,
@@ -186,12 +193,34 @@ def invoice_financial_layout_signals(
 
 
 def classify_invoice_financial_layout_from_signals(signals: frozenset[str]) -> str:
-    signal_count = len(signals)
-    if signal_count >= 2:
+    additional_direct_evidence = {
+        "return_refund_marker",
+        "reverse_shipping_fee",
+        "reverse_shipping_fee_sst",
+    }
+    if "refund_amount" in signals and signals.intersection(
+        additional_direct_evidence
+    ):
         return RETURN_REFUND
-    if signal_count == 1:
+    if signals:
         return UNKNOWN_OR_MIXED
     return NORMAL_ORDER
+
+
+def _has_structured_return_refund_marker(
+    product_items: Iterable[Mapping[str, Any]],
+) -> bool:
+    for item in product_items:
+        if str(item.get("_source_return_refund_error") or "").strip():
+            continue
+        quantity = item.get("source_return_refund_quantity")
+        if (
+            isinstance(quantity, int)
+            and not isinstance(quantity, bool)
+            and quantity > 0
+        ):
+            return True
+    return False
 
 
 def missing_income_detail_fields(

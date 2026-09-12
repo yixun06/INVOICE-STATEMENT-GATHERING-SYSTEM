@@ -77,6 +77,7 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "_financial_layout_signals": tuple(sorted(invoice_financial_layout_signals(
             data.normalized_text,
             label_presence=data.income_label_presence,
+            product_items=data.product_items,
         ))),
         "source_pdf": data.source_pdf,
         "gross_sales": _financial_value(income, "merchandise_subtotal"),
@@ -192,6 +193,14 @@ def map_shopee_products(
             "status": status,
         }
         product.update(_promotion_source_metadata(item))
+        if item.get("source_return_refund_quantity") is not None:
+            product["source_return_refund_quantity"] = int(
+                item["source_return_refund_quantity"]
+            )
+        if str(item.get("_source_return_refund_error") or "").strip():
+            product["_source_return_refund_error"] = str(
+                item["_source_return_refund_error"]
+            ).strip()
         products.append(product)
     return products
 

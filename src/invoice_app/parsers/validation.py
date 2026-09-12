@@ -27,6 +27,33 @@ def validate_product_items(
             errors.append(f"{label} is missing Product Name.")
         if parse_quantity(item.get("quantity")) <= 0:
             errors.append(f"{label} has missing or invalid Quantity.")
+        refund_marker_error = str(
+            item.get("_source_return_refund_error") or ""
+        ).strip()
+        if refund_marker_error:
+            errors.append(
+                f"{label} has invalid Return/Refund evidence: {refund_marker_error}"
+            )
+        source_refund_quantity = item.get("source_return_refund_quantity")
+        if source_refund_quantity is not None:
+            try:
+                parsed_refund_quantity = int(source_refund_quantity)
+            except (TypeError, ValueError):
+                parsed_refund_quantity = 0
+            ordered_quantity = parse_quantity(item.get("quantity"))
+            if (
+                isinstance(source_refund_quantity, bool)
+                or parsed_refund_quantity <= 0
+                or str(source_refund_quantity).strip() != str(parsed_refund_quantity)
+            ):
+                errors.append(
+                    f"{label} has a non-positive or non-integer Return/Refund source quantity."
+                )
+            elif ordered_quantity > 0 and parsed_refund_quantity > ordered_quantity:
+                errors.append(
+                    f"{label} Return/Refund source quantity {parsed_refund_quantity} "
+                    f"exceeds ordered quantity {ordered_quantity}."
+                )
         if (
             require_sku
             and not str(item.get("seller_sku", "")).strip()
