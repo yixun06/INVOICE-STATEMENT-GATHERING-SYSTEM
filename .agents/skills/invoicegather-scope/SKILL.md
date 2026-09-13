@@ -36,13 +36,242 @@ Current Confirmed Requirement > Historical Intermediate Design
 
 ---
 
+# V2.5 Current Handoff and Authoritative Delivery Scope
+
+This is the concise current handoff for a new InvoiceGather Codex session. It
+supersedes any conflicting V2.4/V2.3 wording below. Older sections remain only
+for non-conflicting parser, source-safety, and historical rationale; they are
+not current Statement readiness or commit behavior.
+
+## Purpose and operational source of truth - Locked
+
+InvoiceGather is a **reconciliation and evidence system**, not a general
+accounting/GL/CN product. Its core source flow is:
+
+```text
+Shopee / Lazada / ZENXIN source documents
+-> extraction / validation
+-> persisted Invoice-derived business data (operational "Zenxin DB")
+
+Shopee Weekly Statement
+<-> Zenxin DB
+```
+
+It proves what Zenxin invoiced/shipped, what Shopee settled, whether products
+and merchandise reconcile, why seller-settlement differences exist, and whether
+an unexplained residual remains. Source PDFs/XLSX files remain provenance
+evidence. Do not say that this workflow requires a separate ERP, warehouse, or
+shipment database before it can reconcile.
+
+## Reconciliation V2 contract - Locked
+
+Each order exposes independent evidence, not one overloaded pass/fail value:
+
+```text
+identity_scope           ITEM | GROUP | UNRESOLVED
+merchandise_reconciled   bool
+settlement_basis         EXACT | EXPLAINED | NONE
+allocation_resolved      bool
+settlement_reconciled    settlement_basis != NONE
+```
+
+- RM0.02 is the tolerance per order.
+- Missing money is not zero; never infer it or cancel residuals across orders.
+- Merchandise/Product Price reconciliation and final seller settlement are
+  distinct results.
+- `EXACT` means the Invoice basis and Statement release agree within tolerance.
+  `EXPLAINED` means authoritative Statement financial components fully explain
+  the difference within tolerance. It is a pass, not a failure. `NONE` means
+  unexplained or insufficient evidence remains.
+- Statement adjustments are separate from original-order settlement. Never use
+  a later adjustment to rewrite the original Invoice.
+
+## Product identity and allocation - Locked
+
+`ITEM` permits enrichment only for one exact selected Statement-member to
+Invoice-item relationship. The relationship must be unique and no Invoice item
+may be consumed twice.
+
+`GROUP` means that Statement and Invoice members form a complete compatible
+product group, but authoritative evidence cannot prove the physical
+row-to-item allocation. It is a valid reconciliation result, not an error. For
+`GROUP`:
+
+- persist authorized Statement/source/component evidence;
+- keep `matched_item_index` blank;
+- do not write unprovable `statement_product_price`, `statement_refund_amount`,
+  or `statement_net_selling_amount` to `Invoice_Items`;
+- never select by row order, first remaining candidate, fuzzy similarity,
+  amount ordering, proportional allocation, or arbitrary choice.
+
+Allocation-sensitive Billing remains deferred until separately approved.
+
+## Product Master, closure, and adjustment boundaries - Locked
+
+Resolve Product Master identity by Seller SKU, then Parent SKU, with required
+Product Name/Variation disambiguation. Exact Seller SKU wins where applicable;
+ambiguity is `PRICING_CONFLICT`. Never choose first/minimum/maximum price. NAV
+comes from the same resolved Product Master row, never an independent fuzzy
+lookup.
+
+Once the original transaction has legitimate CLOSED evidence, it is immutable.
+Original Income/Order View release to Seller Wallet is authoritative closure
+evidence. A changed Invoice/PDF after closure is a late source change/conflict,
+not automatically a Credit Note. It can support investigation, but a CN or
+adjustment requires its own authoritative settlement/adjustment evidence.
+Never reopen or rewrite original Order Income, Final Amount, or Refund.
+
+## Current Statement Validate path - Implemented and verified
+
+```text
+Statement upload
+-> review
+-> Reconciliation V2
+-> import-result adapter
+-> Streamlit UI
+```
+
+The former Validate defect is resolved. An unrelated Statement-level validation
+issue used to set `statement_controls_valid = false` and globally erase
+independently computable settlement evidence, incorrectly making all 296
+Golden orders `NONE`. Such source/batch issues remain visible and block commit
+where applicable, but no longer erase per-order settlement evidence. This did
+not change V2 money semantics, RM0.02 tolerance, missing-value rules, or
+financial formulas.
+
+`GROUP` and absent Statement quantity are informational source limitations, not
+reconciliation failures. The authoritative Statement does not provide quantity,
+so InvoiceGather makes no quantity-match claim.
+
+## V2-aware Statement Commit - Implemented
+
+Commit `d8cef87` implements:
+
+```text
+retain original uploaded XLSX bytes
+-> acquire shared commit lock
+-> fresh-read Invoice_Orders and Invoice_Items
+-> fresh-load authoritative Product Master
+-> rerun Reconciliation V2
+-> rebuild and compare reviewed evidence fingerprint
+-> build V2-aware commit plan
+-> one atomic Google write
+-> deterministic readback verification
+```
+
+If relevant evidence changed, make **zero writes** and require fresh Review.
+Relevant changes include Statement source/hash, Invoice or Product Master
+snapshot, V2 rule version, identity membership, `ITEM`/`GROUP` scope, selected
+ITEM pair, or reconciliation evidence/result. A `GROUP -> ITEM` improvement is
+also stale until reviewed again.
+
+`ITEM` enriches only the proven Invoice item. `GROUP` persists Statement/source
+and financial-component evidence but leaves Invoice items untouched. The legacy
+matcher may remain for compatibility but does not decide V2 commit readiness.
+`EXACT` and `EXPLAINED` are commit-capable; `NONE` blocks. Commit never rewrites
+Order Income, Final Amount, or Refund.
+
+## Golden acceptance benchmark - Test evidence only
+
+The only known complete end-to-end corpus is Statement period **2026-08-31 to
+2026-09-06**. These are acceptance/regression facts, never production rules:
+
+| Evidence | Accepted result |
+| --- | ---: |
+| Orders / Statement SKU rows | 296 / 442 |
+| Relationship identity members | 396 `ITEM`, 46 `GROUP`, 0 `UNRESOLVED` |
+| Order-level UI scope | 278 `ITEM`, 18 `GROUP` |
+| Merchandise reconciliation | 296 / 296 |
+| Invoice-derived / Statement Product Price | RM15,948.77 / RM15,948.77 |
+| Settlement | 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE` |
+| Unexplained residual | RM0.00 |
+| Separate Adjustment total | RM122.20 |
+| Commit-plan Statement_Data | 740 rows: 296 ORDER, 442 SKU, 2 ADJUSTMENT |
+| Financial component evidence | 15,965 rows |
+| Readback / GROUP protected fields | PASS / PASS |
+
+396/46 are relationship/member evidence; 278/18 are order-level UI summaries.
+This distinction is intentional.
+
+## Google Sheets persistence - Locked current state
+
+```text
+Invoice_Orders                    44 columns
+Invoice_Items                     22 columns
+Statement_Data                    40 columns
+Statement_Financial_Components    17 columns
+```
+
+The Statement writer uses one compact `values.batchUpdate` logical atomic
+write, not the former large `updateCells` encoding. Golden serialized size is
+5,445,750 bytes (about 5.19 MiB). Do not replace it with a multi-request,
+non-atomic workaround. The detailed component ledger is authoritative evidence
+for Product Price, Refund, Shipping, vouchers/rebates, fees, AMS, Ads Escrow,
+and other explicit components; it distinguishes an explained difference from
+an unexplained one.
+
+The Golden 15,965 component rows are acceptable UAT evidence storage. Billing
+and normal UI must consume clean reconciliation results rather than scan the
+full ledger for business truth. Consider storage optimization/PostgreSQL later;
+do not remove evidence or autonomously redesign it now.
+
+## Current progression, limitations, and tests
+
+```text
+1. Invoice accuracy and persistence                 established
+2. Statement extraction and Golden coverage          established
+3. Invoice <-> Statement Reconciliation V2           implemented
+4. Real Validate/UI integration                      implemented
+5. V2-aware Statement Commit                         implemented
+6. Real persistence/readback verification            current validation area
+7. Billing readiness gate                            next business layer
+8. Billing Summary and Analysis
+9. PostgreSQL/storage optimization                   later
+10. Advanced CN/accounting normalization             only if required
+```
+
+Do not claim full cross-week coverage: Golden is the only complete real
+Invoice/Statement corpus. Generalization remains data-driven and uses
+regression/negative/mutation coverage for missing rows, Product Master changes,
+money beyond tolerance, ambiguity/GROUP, semantic conflict, late refunds,
+missing components, duplicates, permutations, stale review, GROUP-to-ITEM,
+duplicate item targets, overlap, adjustment isolation, and `NONE` settlement.
+
+## Autonomous work and Git safety - Locked
+
+Autonomous testing and diagnosis are allowed. Fix a technical bug
+autonomously only when approved behavior determines the correct result. Do not
+autonomously change a business rule, schema, source interpretation, or make a
+workaround just to make reconciliation green.
+
+For a failure, report exact Order, row, item/group, expected and actual result,
+evidence, governing rule, and one classification:
+
+```text
+IMPLEMENTATION BUG | PARSER/SOURCE ISSUE | STALE DATA | PRODUCT MASTER GAP
+TRUE DISCREPANCY | SOURCE LIMITATION | BUSINESS RULE MISSING
+ARCHITECTURE LIMITATION
+```
+
+Use `SCHEMA DECISION REQUIRED` for a genuine schema need and `BUSINESS DECISION
+REQUIRED` for ambiguous source/business meaning. Never widen tolerance, turn
+missing into zero, add fuzzy fallback, fabricate GROUP allocation, use row
+order, or hide a residual through aggregate cancellation.
+
+Before work, inspect status/diffs; preserve unrelated changes; stage only task
+files. Never use `reset --hard`, `git clean`, force-push, or stage logs,
+temporary artifacts, source PDFs/XLSX, credentials, or service-account secrets.
+Many untracked audit/test artifacts may exist and are not a reason to clean.
+
+---
+
 # UAT2 V2.4 — Authoritative Current Delivery Scope
 
 ## V2.4 purpose, flow, and precedence — Confirmed
 
-V2.4 supersedes the V2.3 UAT2 delivery scope below wherever the two conflict.
-The V2.3 material is retained as historical context only; it is not authority
-for the current UAT2 implementation.
+This V2.4 material is retained as historical context. The V2.5 Current Handoff
+above is authoritative whenever it conflicts with V2.4 or V2.3, especially for
+Statement reconciliation, Validate/UI integration, and Statement Commit.
 
 InvoiceGather UAT2 now follows this operational flow:
 
