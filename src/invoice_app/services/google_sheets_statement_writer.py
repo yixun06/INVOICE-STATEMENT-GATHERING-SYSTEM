@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import Enum
+import json
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
@@ -25,6 +27,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     CommittedStatementReference,
     InvoiceItemStatementUpdate,
     InvoiceOrderStatementUpdate,
+    ProtectedInvoiceItemStatementFields,
     StatementCommitAttempt,
     StatementCommitBlocked,
     StatementCommitPlan,
@@ -59,6 +62,10 @@ class GoogleStatementGateway(Protocol):
 
     def batch_update(
         self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
+    def batch_update_values(
+        self, spreadsheet_id: str, data: Sequence[Mapping[str, Any]]
     ) -> None: ...
 
     def read_sheet_ids(
@@ -127,9 +134,9 @@ class GoogleSheetsStatementWriter:
             raise StatementCommitBlocked(
                 "Fresh Google Sheets writer preflight failed: " + ", ".join(reasons)
             )
-        requests = self._build_requests(plan, before)
+        data = self._build_value_ranges(plan, before)
         try:
-            self._gateway.batch_update(self._spreadsheet_id, requests)
+            self._gateway.batch_update_values(self._spreadsheet_id, data)
         except Exception as write_error:
             verification = self._verify_after_write(plan, before)
             if verification is StatementWriteVerification.ALL_APPLIED:
@@ -207,6 +214,11 @@ class GoogleSheetsStatementWriter:
                 if platform == "Shopee"
             },
             committed_statements=_committed_statement_references(persisted_statement_rows),
+            items=tuple(
+                target.item
+                for (platform, _, _), target in items.items()
+                if platform == "Shopee"
+            ),
         )
         return _WriterSnapshot(
             sheet_ids=sheet_ids,
@@ -224,20 +236,20 @@ class GoogleSheetsStatementWriter:
             commit_state=commit_state,
         )
 
-    def _build_requests(
+    def _build_value_ranges(
         self, plan: StatementCommitPlan, snapshot: _WriterSnapshot
     ) -> tuple[Mapping[str, Any], ...]:
         _validate_incoming_statement_identities(plan, snapshot)
         _validate_incoming_financial_component_identities(plan, snapshot)
-        requests: list[Mapping[str, Any]] = [
-            _update_rows_request(
-                snapshot.sheet_ids[STATEMENT_DATA_TAB],
+        data: list[Mapping[str, Any]] = [
+            _value_range(
+                STATEMENT_DATA_TAB,
                 snapshot.statement_append_row_index,
                 0,
                 plan.rows,
             ),
-            _update_rows_request(
-                snapshot.sheet_ids[STATEMENT_FINANCIAL_COMPONENTS_TAB],
+            _value_range(
+                STATEMENT_FINANCIAL_COMPONENTS_TAB,
                 snapshot.financial_component_append_row_index,
                 0,
                 plan.financial_component_rows,
@@ -252,10 +264,8 @@ class GoogleSheetsStatementWriter:
             target = snapshot.orders.get(key)
             if target is None:
                 raise StatementCommitBlocked(f"Invoice_Orders target is missing: {key!r}.")
-            requests.extend(
-                _order_update_requests(
-                    snapshot.sheet_ids[INVOICE_ORDERS_TAB], target, update
-                )
+            data.append(
+                _order_update_value_range(INVOICE_ORDERS_TAB, target, update)
             )
 
         seen_items: set[tuple[str, str, int]] = set()
@@ -267,12 +277,11 @@ class GoogleSheetsStatementWriter:
             target = snapshot.items.get(key)
             if target is None:
                 raise StatementCommitBlocked(f"Invoice_Items target is missing: {key!r}.")
-            requests.append(
-                _item_update_request(
-                    snapshot.sheet_ids[INVOICE_ITEMS_TAB], target, update
-                )
+            data.append(
+                _item_update_value_range(INVOICE_ITEMS_TAB, target, update)
             )
-        return tuple(requests)
+        _validate_group_protection(plan, snapshot, seen_items)
+        return tuple(data)
 
     def _verify_after_write(
         self, plan: StatementCommitPlan, before: _WriterSnapshot
@@ -435,6 +444,186 @@ def _validate_incoming_financial_component_identities(
         )
 
 
+def _order_update_value_range(
+    tab: str,
+    target: _OrderTarget,
+    update: InvoiceOrderStatementUpdate,
+) -> Mapping[str, Any]:
+    start = INVOICE_ORDERS_HEADERS.index("payment_status")
+    expected = (
+        "payment_status",
+        "payout_completed_date",
+        "difference",
+    )
+    if tuple(INVOICE_ORDERS_HEADERS[start : start + 3]) != expected:
+        raise StatementCommitBlocked(
+            "Invoice_Orders Statement enrichment columns are no longer contiguous."
+        )
+    return _value_range(
+        tab,
+        target.row_index,
+        start,
+        ((
+            _serialize(update.payment_status),
+            _serialize(update.payout_completed_date),
+            _serialize(update.difference),
+        ),),
+    )
+
+
+def _item_update_value_range(
+    tab: str,
+    target: _ItemTarget,
+    update: InvoiceItemStatementUpdate,
+) -> Mapping[str, Any]:
+    start = INVOICE_ITEMS_HEADERS.index("statement_product_price")
+    expected = (
+        "statement_product_price",
+        "statement_refund_amount",
+        "statement_net_selling_amount",
+    )
+    if tuple(INVOICE_ITEMS_HEADERS[start : start + 3]) != expected:
+        raise StatementCommitBlocked(
+            "Invoice_Items Statement enrichment columns are no longer contiguous."
+        )
+    return _value_range(
+        tab,
+        target.row_index,
+        start,
+        ((
+            _serialize(update.statement_product_price),
+            _serialize(update.statement_refund_amount),
+            _serialize(update.statement_net_selling_amount),
+        ),),
+    )
+
+
+def _value_range(
+    tab: str,
+    start_row_index: int,
+    start_column_index: int,
+    rows: Sequence[Sequence[str]],
+) -> Mapping[str, Any]:
+    if not rows:
+        raise StatementCommitBlocked(
+            "No rows were supplied for Statement update construction."
+        )
+    width = len(rows[0])
+    if width <= 0 or any(len(row) != width for row in rows):
+        raise StatementCommitBlocked(
+            "Statement update rows do not have one deterministic width."
+        )
+    return {
+        "range": _a1_range(
+            tab,
+            start_row_index,
+            start_column_index,
+            len(rows),
+            width,
+        ),
+        "majorDimension": "ROWS",
+        "values": [list(row) for row in rows],
+    }
+
+
+def _a1_range(
+    tab: str,
+    start_row_index: int,
+    start_column_index: int,
+    height: int,
+    width: int,
+) -> str:
+    if min(start_row_index, start_column_index) < 0 or min(height, width) <= 0:
+        raise StatementCommitBlocked("Invalid Statement write range.")
+    quoted_tab = "'" + tab.replace("'", "''") + "'"
+    start = f"{_column_name(start_column_index)}{start_row_index + 1}"
+    end = (
+        f"{_column_name(start_column_index + width - 1)}"
+        f"{start_row_index + height}"
+    )
+    return f"{quoted_tab}!{start}:{end}"
+
+
+def _column_name(column_index: int) -> str:
+    result = ""
+    value = column_index + 1
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        result = chr(ord("A") + remainder) + result
+    return result
+
+
+def values_batch_update_body(
+    data: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Return the exact compact, single-request Google values payload."""
+
+    return {"valueInputOption": "RAW", "data": list(data)}
+
+
+def values_batch_update_payload_size(
+    data: Sequence[Mapping[str, Any]],
+) -> int:
+    """Measure the UTF-8 JSON body submitted by the production gateway."""
+
+    return len(
+        json.dumps(
+            values_batch_update_body(data),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _validate_group_protection(
+    plan: StatementCommitPlan,
+    snapshot: _WriterSnapshot,
+    item_update_keys: set[tuple[str, str, int]],
+) -> None:
+    protected_keys: set[tuple[str, str, int]] = set()
+    for protected in plan.protected_invoice_items:
+        key = ("Shopee", _text(protected.order_id), protected.item_index)
+        if key in protected_keys:
+            raise StatementCommitBlocked(
+                f"Statement plan duplicates GROUP protected target {key!r}."
+            )
+        if key in item_update_keys:
+            raise StatementCommitBlocked(
+                f"Statement plan overlaps ITEM and GROUP target {key!r}."
+            )
+        protected_keys.add(key)
+        target = snapshot.items.get(key)
+        if target is None:
+            raise StatementCommitBlocked(
+                f"GROUP protected Invoice_Items target is missing: {key!r}."
+            )
+        if _protected_values(target) != _expected_protected_values(protected):
+            raise StatementCommitBlocked(
+                f"GROUP protected Invoice_Items state changed: {key!r}."
+            )
+
+
+def _protected_values(target: _ItemTarget) -> tuple[str, str, str]:
+    return tuple(
+        _text(target.values[INVOICE_ITEMS_HEADERS.index(field)])
+        for field in (
+            "statement_product_price",
+            "statement_refund_amount",
+            "statement_net_selling_amount",
+        )
+    )
+
+
+def _expected_protected_values(
+    protected: ProtectedInvoiceItemStatementFields,
+) -> tuple[str, str, str]:
+    return (
+        _serialize(protected.statement_product_price),
+        _serialize(protected.statement_refund_amount),
+        _serialize(protected.statement_net_selling_amount),
+    )
+
+
 def _order_update_requests(
     sheet_id: int, target: _OrderTarget, update: InvoiceOrderStatementUpdate
 ) -> tuple[Mapping[str, Any], ...]:
@@ -509,25 +698,26 @@ def _classify_write_result(
     before: _WriterSnapshot,
     after: _WriterSnapshot,
 ) -> StatementWriteVerification:
-    expected_rows = set(plan.rows)
-    after_rows = [
+    expected_rows = Counter(plan.rows)
+    after_rows = Counter(
         tuple(_cell_string(value) for value in target.values)
         for target in after.statement_rows
-    ]
-    statement_counts = [after_rows.count(row) for row in expected_rows]
-    all_statements = bool(expected_rows) and all(count == 1 for count in statement_counts)
-    no_statements = all(count == 0 for count in statement_counts)
+    )
+    all_statements = bool(expected_rows) and all(
+        after_rows[row] == count for row, count in expected_rows.items()
+    )
+    no_statements = all(after_rows[row] == 0 for row in expected_rows)
 
-    expected_components = set(plan.financial_component_rows)
-    after_components = [
+    expected_components = Counter(plan.financial_component_rows)
+    after_components = Counter(
         tuple(_cell_string(value) for value in target.values)
         for target in after.financial_component_rows
-    ]
-    component_counts = [after_components.count(row) for row in expected_components]
-    all_components = bool(expected_components) and all(
-        count == 1 for count in component_counts
     )
-    no_components = all(count == 0 for count in component_counts)
+    all_components = bool(expected_components) and all(
+        after_components[row] == count
+        for row, count in expected_components.items()
+    )
+    no_components = all(after_components[row] == 0 for row in expected_components)
 
     expected_targets = _expected_target_values(plan)
     all_enrichments = True
@@ -538,11 +728,42 @@ def _classify_write_result(
         expected_values = tuple(value for _, value in field_values)
         all_enrichments = all_enrichments and after_values == expected_values
         no_enrichments = no_enrichments and after_values == before_values
-    if all_statements and all_components and all_enrichments:
+    protected_unchanged = _protected_items_unchanged(plan, before, after)
+    if (
+        all_statements
+        and all_components
+        and all_enrichments
+        and protected_unchanged
+    ):
         return StatementWriteVerification.ALL_APPLIED
-    if no_statements and no_components and no_enrichments:
+    if (
+        no_statements
+        and no_components
+        and no_enrichments
+        and protected_unchanged
+    ):
         return StatementWriteVerification.NONE_APPLIED
     return StatementWriteVerification.MIXED
+
+
+def _protected_items_unchanged(
+    plan: StatementCommitPlan,
+    before: _WriterSnapshot,
+    after: _WriterSnapshot,
+) -> bool:
+    for protected in plan.protected_invoice_items:
+        key = ("Shopee", _text(protected.order_id), protected.item_index)
+        before_target = before.items.get(key)
+        after_target = after.items.get(key)
+        if before_target is None or after_target is None:
+            return False
+        expected = _expected_protected_values(protected)
+        if (
+            _protected_values(before_target) != expected
+            or _protected_values(after_target) != expected
+        ):
+            return False
+    return True
 
 
 def _expected_target_values(

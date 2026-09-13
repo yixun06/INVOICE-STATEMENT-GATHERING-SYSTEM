@@ -28,9 +28,12 @@ from src.invoice_app.domain.statement_reconciliation_v2 import (
     SettlementBasis,
     StatementReconciliationBatch,
 )
+from src.invoice_app.services.application_commit_lock import (
+    APPLICATION_COMMIT_LOCK,
+    ApplicationCommitLock,
+)
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
-    write_google_statement_plan_if_current,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_item_matching import (
@@ -47,7 +50,9 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitAttempt,
     StatementCommitBlocked,
     StatementCommitPlan,
-    prepare_statement_commit_plan,
+    StatementWriteNotApplied,
+    invoice_snapshot_sha256,
+    prepare_v2_statement_commit_plan,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
@@ -85,6 +90,7 @@ class StatementImportReview:
     blockers: tuple[str, ...]
     limitations: tuple[str, ...]
     persistence_blockers: tuple[str, ...]
+    source_bytes: bytes | None = None
 
     @property
     def ready(self) -> bool:
@@ -94,7 +100,7 @@ class StatementImportReview:
 
     @property
     def commit_ready(self) -> bool:
-        """Whether the unchanged legacy persistence contract can commit it."""
+        """Whether V2 business evidence has a safe persistence plan."""
 
         return (
             self.ready
@@ -118,9 +124,10 @@ def review_statement_upload(
     """Parse and review one upload against fresh authoritative UAT2 state."""
 
     uploaded_at = now()
+    source_bytes = _source_bytes(source)
     state = writer.reload_commit_state()
     stage = stage_shopee_weekly_statement(
-        source,
+        source_bytes,
         source_filename=source_filename,
         existing_orders=(asdict(order) for order in state.orders.values()),
         existing_statements=state.committed_statements,
@@ -130,11 +137,12 @@ def review_statement_upload(
         batch_id=batch_id,
         uploaded_at=uploaded_at,
         uploaded_by=uploaded_by,
-        repository=repository,
         invoice_orders=tuple(state.orders.values()),
+        invoice_items=_state_statement_items(stage.statement, state.items),
         product_master=product_master,
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
+        source_bytes=source_bytes,
     )
 
 
@@ -149,12 +157,12 @@ def refresh_statement_review(
 ) -> StatementImportReview:
     """Reconcile the parsed source again after authoritative state changes."""
 
-    statement = review.stage.statement
-    if statement is None:
+    if review.source_bytes is None:
         return review
     state = writer.reload_commit_state()
-    stage = stage_parsed_shopee_weekly_statement(
-        statement,
+    stage = stage_shopee_weekly_statement(
+        review.source_bytes,
+        source_filename=review.stage.source_filename,
         existing_orders=(asdict(order) for order in state.orders.values()),
         existing_statements=state.committed_statements,
     )
@@ -163,11 +171,12 @@ def refresh_statement_review(
         batch_id=review.batch_id,
         uploaded_at=review.uploaded_at,
         uploaded_by=review.uploaded_by,
-        repository=repository,
         invoice_orders=tuple(state.orders.values()),
+        invoice_items=_state_statement_items(stage.statement, state.items),
         product_master=product_master,
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
+        source_bytes=review.source_bytes,
     )
 
 
@@ -178,39 +187,90 @@ def commit_statement_review(
     writer: GoogleSheetsStatementWriter,
     load_product_master: Callable[[], ProductPriceMaster],
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
+    commit_lock: ApplicationCommitLock = APPLICATION_COMMIT_LOCK,
 ) -> StatementCommitAttempt:
-    """Commit through the existing lock/preflight writer boundary only."""
+    """Under one lock, rerun V2 and commit only exact reviewed evidence."""
 
-    if review.plan is None:
+    if not review.commit_ready or review.source_bytes is None:
         return StatementCommitAttempt(
             False,
             review.persistence_blockers
             or review.blockers
-            or ("STATEMENT_NOT_READY",),
+            or (
+                "REVIEW_SOURCE_UNAVAILABLE"
+                if review.source_bytes is None
+                else "STATEMENT_NOT_READY",
+            ),
         )
     repairs = tuple(verified_artifact_repairs)
-
-    def sku_matching_is_current() -> bool:
-        statement = review.stage.statement
+    with commit_lock.acquire():
+        state = writer.reload_commit_state()
+        stage = stage_shopee_weekly_statement(
+            review.source_bytes,
+            source_filename=review.stage.source_filename,
+            existing_orders=(asdict(order) for order in state.orders.values()),
+            existing_statements=state.committed_statements,
+        )
+        statement = stage.statement
         if statement is None:
-            return False
-        repository.refresh()
-        current_items = _statement_items(statement, repository)
-        current_matches = match_statement_sku_rows(
-            statement.sku_rows,
+            return StatementCommitAttempt(False, ("STATEMENT_SOURCE_CHANGED",))
+        if stage.duplicate_status is not None:
+            return StatementCommitAttempt(False, (stage.duplicate_status,))
+        if stage.rejection_reasons or stage.validation_issues:
+            return StatementCommitAttempt(
+                False,
+                tuple(stage.rejection_reasons)
+                + tuple(issue.message for issue in stage.validation_issues),
+            )
+
+        current_orders = _statement_orders(statement, state.orders.values())
+        current_items = _state_statement_items(statement, state.items)
+        current_reconciliation = evaluate_statement_reconciliation(
+            statement,
+            current_orders,
             current_items,
             product_families=product_family_resolver_from_price_master(
                 load_product_master()
             ),
             verified_artifact_repairs=repairs,
         )
-        return current_matches == review.sku_matches
+        current_version = _evidence_version(
+            statement,
+            current_orders,
+            current_items,
+            current_reconciliation,
+        )
+        changed = _changed_evidence(review.evidence_version, current_version)
+        if changed:
+            return StatementCommitAttempt(
+                False,
+                tuple(f"STALE_REVIEW:{reason}" for reason in changed),
+            )
+        blockers = _v2_blockers(
+            current_reconciliation,
+            {order.order_id for order in current_orders},
+        )
+        if blockers:
+            return StatementCommitAttempt(False, blockers)
 
-    return write_google_statement_plan_if_current(
-        review.plan,
-        writer=writer,
-        sku_matching_is_current=sku_matching_is_current,
-    )
+        try:
+            plan = prepare_v2_statement_commit_plan(
+                statement,
+                audit=StatementBatchAudit(
+                    statement_batch_id=review.batch_id,
+                    uploaded_at=review.uploaded_at,
+                    uploaded_by=review.uploaded_by,
+                    committed_at=datetime.now(timezone.utc),
+                ),
+                invoice_orders=current_orders,
+                invoice_items=current_items,
+                reconciliation=current_reconciliation,
+                validation_passed=True,
+            )
+            writer.write_statement_batch(plan)
+        except StatementWriteNotApplied:
+            return StatementCommitAttempt(False, ("WRITE_NOT_APPLIED",))
+        return StatementCommitAttempt(True, ())
 
 
 def check_statement_review_currency(
@@ -231,8 +291,7 @@ def check_statement_review_currency(
     if statement is None or review.evidence_version is None:
         return StatementReviewCurrency(False, ("REVIEW_EVIDENCE_UNAVAILABLE",))
     state = writer.reload_commit_state()
-    repository.refresh()
-    current_items = _statement_items(statement, repository)
+    current_items = _state_statement_items(statement, state.items)
     current_orders = _statement_orders(statement, state.orders.values())
     current_reconciliation = evaluate_statement_reconciliation(
         statement,
@@ -247,22 +306,8 @@ def check_statement_review_currency(
         current_items,
         current_reconciliation,
     )
-    previous = review.evidence_version
-    changed: list[str] = []
-    if current.statement_file_hash != previous.statement_file_hash:
-        changed.append("STATEMENT_FILE_CHANGED")
-    if current.invoice_snapshot_sha256 != previous.invoice_snapshot_sha256:
-        changed.append("INVOICE_SNAPSHOT_CHANGED")
-    if (
-        current.product_family_snapshot_sha256
-        != previous.product_family_snapshot_sha256
-    ):
-        changed.append("PRODUCT_MASTER_SNAPSHOT_CHANGED")
-    if current.rule_version != previous.rule_version:
-        changed.append("RECONCILIATION_RULE_CHANGED")
-    if current.reconciliation_sha256 != previous.reconciliation_sha256:
-        changed.append("RECONCILIATION_RESULT_CHANGED")
-    return StatementReviewCurrency(not changed, tuple(dict.fromkeys(changed)))
+    changed = _changed_evidence(review.evidence_version, current)
+    return StatementReviewCurrency(not changed, changed)
 
 
 def _build_review(
@@ -271,11 +316,12 @@ def _build_review(
     batch_id: str,
     uploaded_at: datetime,
     uploaded_by: str,
-    repository: HistoricalInvoiceRepository,
     invoice_orders: Iterable[CanonicalInvoiceOrder],
+    invoice_items: Iterable[CanonicalInvoiceItem],
     product_master: ProductPriceMaster,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair],
     now: Callable[[], datetime],
+    source_bytes: bytes,
 ) -> StatementImportReview:
     statement = stage.statement
     empty_matches = StatementItemMatchBatch((), False)
@@ -294,10 +340,10 @@ def _build_review(
             persistence_blockers=(
                 tuple(stage.rejection_reasons) or ("Statement parsing failed.",)
             ),
+            source_bytes=source_bytes,
         )
 
-    repository.refresh()
-    invoice_items = _statement_items(statement, repository)
+    invoice_items = tuple(invoice_items)
     invoice_orders = _statement_orders(statement, invoice_orders)
     repairs = tuple(verified_artifact_repairs)
     product_families = product_family_resolver_from_price_master(product_master)
@@ -314,16 +360,12 @@ def _build_review(
         product_families=product_families,
         verified_artifact_repairs=repairs,
     )
-    legacy_persistence_blockers = list(stage.rejection_reasons)
-    legacy_persistence_blockers.extend(
+    persistence_blockers = list(stage.rejection_reasons)
+    persistence_blockers.extend(
         issue.message for issue in stage.validation_issues
     )
-    legacy_persistence_blockers.extend(stage.review_reasons)
-    legacy_persistence_blockers.extend(
-        match.reason
-        for match in sku_matches.matches
-        if match.status.value == "NEEDS_REVIEW"
-    )
+    if stage.duplicate_status:
+        persistence_blockers.extend(stage.review_reasons)
     blockers = list(stage.rejection_reasons)
     blockers.extend(issue.message for issue in stage.validation_issues)
     if stage.duplicate_status:
@@ -337,12 +379,12 @@ def _build_review(
     limitations = _v2_limitations(reconciliation_v2)
     plan = None
     if (
-        not legacy_persistence_blockers
-        and stage.eligible_for_future_atomic_commit
-        and sku_matches.eligible_for_commit
+        not blockers
+        and not persistence_blockers
+        and stage.duplicate_status is None
     ):
         try:
-            plan = prepare_statement_commit_plan(
+            plan = prepare_v2_statement_commit_plan(
                 statement,
                 audit=StatementBatchAudit(
                     statement_batch_id=batch_id,
@@ -351,11 +393,12 @@ def _build_review(
                     committed_at=now(),
                 ),
                 invoice_orders=invoice_orders,
-                sku_matches=sku_matches,
+                invoice_items=invoice_items,
+                reconciliation=reconciliation_v2,
                 validation_passed=True,
             )
         except StatementCommitBlocked as error:
-            legacy_persistence_blockers.append(str(error))
+            persistence_blockers.append(str(error))
     return StatementImportReview(
         batch_id=batch_id,
         uploaded_at=uploaded_at,
@@ -372,7 +415,8 @@ def _build_review(
         plan=plan,
         blockers=tuple(dict.fromkeys(blockers)),
         limitations=limitations,
-        persistence_blockers=tuple(dict.fromkeys(legacy_persistence_blockers)),
+        persistence_blockers=tuple(dict.fromkeys(persistence_blockers)),
+        source_bytes=source_bytes,
     )
 
 
@@ -383,6 +427,20 @@ def _statement_items(
     order_ids = tuple(dict.fromkeys(row.order_id for row in statement.order_rows))
     by_order = repository.get_items_by_order_ids("Shopee", order_ids)
     return tuple(item for order_id in order_ids for item in by_order.get(order_id, ()))
+
+
+def _state_statement_items(
+    statement: ParsedShopeeWeeklyStatement | None,
+    invoice_items: Iterable[CanonicalInvoiceItem],
+) -> tuple[CanonicalInvoiceItem, ...]:
+    if statement is None:
+        return ()
+    order_ids = {row.order_id for row in statement.order_rows}
+    return tuple(
+        item
+        for item in invoice_items
+        if item.platform == "Shopee" and item.order_id in order_ids
+    )
 
 
 def _statement_orders(
@@ -458,18 +516,7 @@ def _evidence_version(
     invoice_items: Iterable[CanonicalInvoiceItem],
     reconciliation: StatementReconciliationBatch,
 ) -> StatementReviewEvidenceVersion:
-    order_payload = [
-        asdict(order)
-        for order in sorted(invoice_orders, key=lambda value: value.order_id)
-    ]
-    item_payload = [
-        asdict(item)
-        for item in sorted(
-            invoice_items,
-            key=lambda value: (value.order_id, value.item_index),
-        )
-    ]
-    invoice_hash = _stable_hash({"orders": order_payload, "items": item_payload})
+    invoice_hash = invoice_snapshot_sha256(invoice_orders, invoice_items)
     return StatementReviewEvidenceVersion(
         statement_file_hash=statement.file_hash,
         invoice_snapshot_sha256=invoice_hash,
@@ -479,6 +526,45 @@ def _evidence_version(
         rule_version=reconciliation.rule_version,
         reconciliation_sha256=_stable_hash(asdict(reconciliation)),
     )
+
+
+def _changed_evidence(
+    previous: StatementReviewEvidenceVersion | None,
+    current: StatementReviewEvidenceVersion,
+) -> tuple[str, ...]:
+    if previous is None:
+        return ("REVIEW_EVIDENCE_UNAVAILABLE",)
+    changed: list[str] = []
+    if current.statement_file_hash != previous.statement_file_hash:
+        changed.append("STATEMENT_FILE_CHANGED")
+    if current.invoice_snapshot_sha256 != previous.invoice_snapshot_sha256:
+        changed.append("INVOICE_SNAPSHOT_CHANGED")
+    if (
+        current.product_family_snapshot_sha256
+        != previous.product_family_snapshot_sha256
+    ):
+        changed.append("PRODUCT_MASTER_SNAPSHOT_CHANGED")
+    if current.rule_version != previous.rule_version:
+        changed.append("RECONCILIATION_RULE_CHANGED")
+    if current.reconciliation_sha256 != previous.reconciliation_sha256:
+        changed.append("RECONCILIATION_RESULT_CHANGED")
+    return tuple(dict.fromkeys(changed))
+
+
+def _source_bytes(source: str | Path | bytes | bytearray | BinaryIO) -> bytes:
+    """Retain the exact uploaded Statement bytes for commit-time reparse."""
+
+    if isinstance(source, (str, Path)):
+        return Path(source).read_bytes()
+    if isinstance(source, (bytes, bytearray)):
+        return bytes(source)
+    if hasattr(source, "getvalue"):
+        return bytes(source.getvalue())
+    position = source.tell() if hasattr(source, "tell") else None
+    data = source.read()
+    if position is not None and hasattr(source, "seek"):
+        source.seek(position)
+    return bytes(data)
 
 
 def _stable_hash(value: object) -> str:

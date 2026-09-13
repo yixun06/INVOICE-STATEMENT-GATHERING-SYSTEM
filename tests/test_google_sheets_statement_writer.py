@@ -6,6 +6,7 @@ from decimal import Decimal
 from threading import Event, Thread
 
 import pytest
+from openpyxl.utils.cell import range_boundaries
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
@@ -24,6 +25,8 @@ from src.invoice_app.services.application_commit_lock import (
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
     StatementWriteIntegrityError,
+    values_batch_update_body,
+    values_batch_update_payload_size,
     write_google_statement_plan_if_current,
 )
 from src.invoice_app.services.shopee_statement_item_matching import (
@@ -34,6 +37,7 @@ from src.invoice_app.services.shopee_statement_item_matching import (
 from src.invoice_app.services.shopee_statement_persistence import (
     StatementBatchAudit,
     StatementCommitBlocked,
+    ProtectedInvoiceItemStatementFields,
     prepare_statement_commit_plan,
 )
 from src.invoice_app.services.uat2_persistence_schema import (
@@ -102,6 +106,42 @@ class InMemoryStatementGateway:
             self._apply_update(request["updateCells"])
         if self.fail_mode in {"after", "mixed"}:
             raise OSError("synthetic uncertain response")
+
+    def batch_update_values(self, _spreadsheet_id, data):
+        self.batch_calls.append(tuple(data))
+        if self.fail_mode == "before":
+            raise OSError("synthetic failure before apply")
+        if self.fail_mode == "mixed":
+            selected = data[:1]
+        elif self.fail_mode == "ledger_missing":
+            selected = tuple(
+                value_range
+                for value_range in data
+                if not value_range["range"].startswith(
+                    f"'{STATEMENT_FINANCIAL_COMPONENTS_TAB}'!"
+                )
+            )
+        else:
+            selected = data
+        for value_range in selected:
+            self._apply_value_range(value_range)
+        if self.fail_mode in {"after", "mixed"}:
+            raise OSError("synthetic uncertain response")
+
+    def _apply_value_range(self, value_range):
+        tab_part, cells = value_range["range"].split("!", 1)
+        tab = tab_part[1:-1].replace("''", "'")
+        min_col, min_row, _, _ = range_boundaries(cells)
+        start_row = min_row - 1
+        start_column = min_col - 1
+        for offset, values in enumerate(value_range["values"]):
+            row_index = start_row + offset
+            while len(self.tabs[tab]) <= row_index:
+                self.tabs[tab].append([])
+            target = self.tabs[tab][row_index]
+            if len(target) < start_column + len(values):
+                target.extend([""] * (start_column + len(values) - len(target)))
+            target[start_column : start_column + len(values)] = values
 
     def _apply_update(self, update):
         grid_range = update["range"]
@@ -242,8 +282,16 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
 
     assert result.committed is True
     assert len(gateway.batch_calls) == 1
-    requests = gateway.batch_calls[0]
-    assert {request["updateCells"]["range"]["sheetId"] for request in requests} == {11, 12, 13, 14}
+    data = gateway.batch_calls[0]
+    assert {
+        value_range["range"].split("!", 1)[0].strip("'")
+        for value_range in data
+    } == {
+        INVOICE_ORDERS_TAB,
+        INVOICE_ITEMS_TAB,
+        STATEMENT_DATA_TAB,
+        STATEMENT_FINANCIAL_COMPONENTS_TAB,
+    }
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["payment_status"] == "RELEASED"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["income_type"] == "Estimated"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["order_income"] == "9.00"
@@ -281,6 +329,91 @@ def test_missing_or_duplicate_item_target_produces_zero_write(duplicate):
     assert gateway.batch_calls == []
 
 
+def test_duplicate_item_update_target_fails_closed_before_atomic_write():
+    plan = _plan()
+    duplicate = replace(
+        plan,
+        invoice_item_updates=(
+            plan.invoice_item_updates[0],
+            plan.invoice_item_updates[0],
+        ),
+    )
+    gateway = InMemoryStatementGateway()
+
+    with pytest.raises(StatementCommitBlocked, match="duplicates Invoice_Items"):
+        _commit(gateway, duplicate)
+
+    assert gateway.batch_calls == []
+
+
+def test_group_protected_item_remains_unchanged_after_positive_readback():
+    protected = ProtectedInvoiceItemStatementFields(
+        order_id="ORDER-1",
+        item_index=1,
+        statement_product_price=None,
+        statement_refund_amount=None,
+        statement_net_selling_amount=None,
+    )
+    plan = replace(
+        _plan(),
+        invoice_item_updates=(),
+        protected_invoice_items=(protected,),
+    )
+    gateway = InMemoryStatementGateway()
+
+    result = _commit(gateway, plan)
+
+    assert result.committed is True
+    item = _row_values(gateway, INVOICE_ITEMS_TAB)
+    assert item["statement_product_price"] == ""
+    assert item["statement_refund_amount"] == ""
+    assert item["statement_net_selling_amount"] == ""
+
+
+def test_group_protected_item_change_makes_readback_mixed():
+    protected = ProtectedInvoiceItemStatementFields(
+        order_id="ORDER-1",
+        item_index=1,
+        statement_product_price=None,
+        statement_refund_amount=None,
+        statement_net_selling_amount=None,
+    )
+    plan = replace(
+        _plan(),
+        invoice_item_updates=(),
+        protected_invoice_items=(protected,),
+    )
+
+    class CorruptingGateway(InMemoryStatementGateway):
+        def batch_update_values(self, spreadsheet_id, data):
+            super().batch_update_values(spreadsheet_id, data)
+            position = INVOICE_ITEMS_HEADERS.index("statement_product_price")
+            self.tabs[INVOICE_ITEMS_TAB][1][position] = "99.99"
+
+    gateway = CorruptingGateway()
+
+    with pytest.raises(StatementWriteIntegrityError, match="manual recovery"):
+        _commit(gateway, plan)
+
+
+def test_item_and_group_target_overlap_fails_closed_before_write():
+    plan = _plan()
+    protected = ProtectedInvoiceItemStatementFields(
+        order_id="ORDER-1",
+        item_index=1,
+        statement_product_price=None,
+        statement_refund_amount=None,
+        statement_net_selling_amount=None,
+    )
+    overlap = replace(plan, protected_invoice_items=(protected,))
+    gateway = InMemoryStatementGateway()
+
+    with pytest.raises(StatementCommitBlocked, match="overlaps ITEM and GROUP"):
+        _commit(gateway, overlap)
+
+    assert gateway.batch_calls == []
+
+
 def test_statement_append_position_comes_from_writer_fresh_snapshot():
     gateway = InMemoryStatementGateway()
     prior_row = list(_plan(statement=_statement(file_hash="prior-hash")).rows[0])
@@ -295,11 +428,12 @@ def test_statement_append_position_comes_from_writer_fresh_snapshot():
     gateway.before_read_tabs = inject_after_outer_preflight
     _commit(gateway, _plan())
 
-    statement_request = next(
-        request for request in gateway.batch_calls[0]
-        if request["updateCells"]["range"]["sheetId"] == SHEET_IDS[STATEMENT_DATA_TAB]
+    statement_range = next(
+        value_range["range"]
+        for value_range in gateway.batch_calls[0]
+        if value_range["range"].startswith(f"'{STATEMENT_DATA_TAB}'!")
     )
-    assert statement_request["updateCells"]["range"]["startRowIndex"] == 2
+    assert statement_range.startswith(f"'{STATEMENT_DATA_TAB}'!A3:")
 
 
 @pytest.mark.parametrize(
@@ -341,8 +475,8 @@ def test_repeated_statement_rows_are_preserved_and_item_enrichment_is_omitted():
     assert persisted_types == ["ORDER", "SKU", "SKU"]
     assert plan.invoice_item_updates == ()
     assert not any(
-        request["updateCells"]["range"]["sheetId"] == SHEET_IDS[INVOICE_ITEMS_TAB]
-        for request in gateway.batch_calls[0]
+        value_range["range"].startswith(f"'{INVOICE_ITEMS_TAB}'!")
+        for value_range in gateway.batch_calls[0]
     )
 
 
@@ -367,10 +501,10 @@ def test_second_concurrent_commit_cannot_enter_writer():
     finish = Event()
 
     class BlockingGateway(InMemoryStatementGateway):
-        def batch_update(self, spreadsheet_id, requests):
+        def batch_update_values(self, spreadsheet_id, data):
             started.set()
             assert finish.wait(timeout=2)
-            return super().batch_update(spreadsheet_id, requests)
+            return super().batch_update_values(spreadsheet_id, data)
 
     gateway = BlockingGateway()
     first = {}
@@ -405,9 +539,9 @@ def test_preflight_and_all_writer_reads_are_after_lock_acquisition():
             self._assert_locked()
             return super().read_tabs(*args)
 
-        def batch_update(self, *args):
+        def batch_update_values(self, *args):
             self._assert_locked()
-            return super().batch_update(*args)
+            return super().batch_update_values(*args)
 
     result = _commit(LockCheckingGateway(), _plan(), lock=lock)
 
@@ -485,3 +619,54 @@ def test_google_api_gateway_submits_business_requests_in_one_batch_update():
     gateway.batch_update("synthetic-sheet", requests)
 
     assert sheets.batch_bodies == [{"requests": list(requests)}]
+
+
+def test_google_api_gateway_submits_compact_values_in_one_atomic_batch():
+    class Request:
+        def execute(self):
+            return {}
+
+    class ValuesApi:
+        def __init__(self):
+            self.batch_calls = []
+
+        def batchUpdate(self, **kwargs):
+            self.batch_calls.append(kwargs)
+            return Request()
+
+    class SheetsApi:
+        def __init__(self):
+            self.values_api = ValuesApi()
+
+        def values(self):
+            return self.values_api
+
+    class Service:
+        def __init__(self, sheets):
+            self.sheets = sheets
+
+        def spreadsheets(self):
+            return self.sheets
+
+    sheets = SheetsApi()
+    gateway = GoogleApiHistoricalInvoiceGateway({"private_key": "placeholder"})
+    gateway._service = Service(sheets)
+    data = (
+        {
+            "range": "'Statement_Data'!A2:B2",
+            "majorDimension": "ROWS",
+            "values": [["ORDER", "1"]],
+        },
+    )
+
+    gateway.batch_update_values("synthetic-sheet", data)
+
+    assert sheets.values_api.batch_calls == [
+        {
+            "spreadsheetId": "synthetic-sheet",
+            "body": values_batch_update_body(data),
+        }
+    ]
+    assert values_batch_update_payload_size(data) == len(
+        b'{"valueInputOption":"RAW","data":[{"range":"\'Statement_Data\'!A2:B2","majorDimension":"ROWS","values":[["ORDER","1"]]}]}'
+    )

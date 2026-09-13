@@ -80,6 +80,10 @@ class GoogleSheetsHistoricalInvoiceGateway(Protocol):
         self, spreadsheet_id: str, requests: Sequence[Mapping[str, Any]]
     ) -> None: ...
 
+    def batch_update_values(
+        self, spreadsheet_id: str, data: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
     def read_sheet_ids(
         self, spreadsheet_id: str, tabs: Sequence[str]
     ) -> Mapping[str, int]: ...
@@ -192,6 +196,27 @@ class GoogleApiHistoricalInvoiceGateway:
         try:
             self._service_client().spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id, body={"requests": list(requests)}
+            ).execute()
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "UAT2 Google Sheets business write failed; the outcome must be verified before any retry."
+            ) from error
+
+    def batch_update_values(
+        self,
+        spreadsheet_id: str,
+        data: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Submit one compact, atomic batch containing only authoritative values."""
+
+        from src.invoice_app.services.google_sheets_statement_writer import (
+            values_batch_update_body,
+        )
+
+        try:
+            self._service_client().spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=values_batch_update_body(data),
             ).execute()
         except Exception as error:
             raise HistoricalInvoiceStorageError(

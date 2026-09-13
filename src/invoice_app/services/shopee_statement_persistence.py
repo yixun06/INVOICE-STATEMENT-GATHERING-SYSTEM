@@ -8,12 +8,23 @@ contract against authoritative persisted state.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from hashlib import sha256
+import json
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
-from src.invoice_app.domain.historical_invoice import CanonicalInvoiceOrder
+from src.invoice_app.domain.historical_invoice import (
+    CanonicalInvoiceItem,
+    CanonicalInvoiceOrder,
+)
+from src.invoice_app.domain.statement_reconciliation_v2 import (
+    IdentityScope,
+    SettlementBasis,
+    StatementMemberRef,
+    StatementReconciliationBatch,
+)
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
@@ -91,6 +102,17 @@ class InvoiceItemStatementUpdate:
 
 
 @dataclass(frozen=True)
+class ProtectedInvoiceItemStatementFields:
+    """GROUP item fields which a Statement commit is forbidden to change."""
+
+    order_id: str
+    item_index: int
+    statement_product_price: Decimal | None
+    statement_refund_amount: Decimal | None
+    statement_net_selling_amount: Decimal | None
+
+
+@dataclass(frozen=True)
 class CommittedStatementReference:
     file_hash: str
     statement_period_from: date
@@ -107,12 +129,15 @@ class StatementCommitPlan:
     order_comparisons: tuple[StatementOrderComparison, ...]
     invoice_order_updates: tuple[InvoiceOrderStatementUpdate, ...]
     invoice_item_updates: tuple[InvoiceItemStatementUpdate, ...]
+    protected_invoice_items: tuple[ProtectedInvoiceItemStatementFields, ...] = ()
+    invoice_snapshot_sha256: str | None = None
 
 
 @dataclass(frozen=True)
 class StatementCommitState:
     orders: Mapping[str, CanonicalInvoiceOrder]
     committed_statements: Sequence[CommittedStatementReference]
+    items: tuple[CanonicalInvoiceItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,6 +260,298 @@ def prepare_statement_commit_plan(
     )
 
 
+GROUP_MATCH_METHOD = "Product Group Multiset (Unallocated)"
+
+
+def prepare_v2_statement_commit_plan(
+    statement: ParsedShopeeWeeklyStatement,
+    *,
+    audit: StatementBatchAudit,
+    invoice_orders: Iterable[CanonicalInvoiceOrder],
+    invoice_items: Iterable[CanonicalInvoiceItem],
+    reconciliation: StatementReconciliationBatch,
+    validation_passed: bool,
+) -> StatementCommitPlan:
+    """Build a fail-closed V2 plan without fabricating GROUP allocation."""
+
+    if not validation_passed:
+        raise StatementCommitBlocked("Statement internal validation has not passed.")
+    if not audit.statement_batch_id.strip():
+        raise ValueError("statement_batch_id is required.")
+    _validate_statement_row_identity(statement)
+    if reconciliation.statement_validation_issues:
+        raise StatementCommitBlocked("V2 Statement validation contains blocking issues.")
+    if not reconciliation.coverage.valid:
+        raise StatementCommitBlocked("V2 product coverage is incomplete or overlapping.")
+
+    invoice_orders = tuple(
+        order for order in invoice_orders if order.platform == "Shopee"
+    )
+    invoice_items = tuple(
+        item for item in invoice_items if item.platform == "Shopee"
+    )
+    orders_by_id = {order.order_id: order for order in invoice_orders}
+    items_by_key = {
+        (item.order_id, item.item_index): item for item in invoice_items
+    }
+    results_by_order = {
+        result.evidence.order_id: result for result in reconciliation.orders
+    }
+    statement_order_ids = {row.order_id for row in statement.order_rows}
+    if set(results_by_order) != statement_order_ids:
+        raise StatementCommitBlocked(
+            "V2 order coverage does not equal Statement order coverage."
+        )
+
+    comparisons: list[StatementOrderComparison] = []
+    for row in statement.order_rows:
+        result = results_by_order[row.order_id]
+        if row.order_id not in orders_by_id:
+            raise StatementCommitBlocked(
+                f"Statement target Order ID is missing: {row.order_id}"
+            )
+        if not result.evidence.coverage.valid:
+            raise StatementCommitBlocked(
+                f"{row.order_id}: V2 product coverage is invalid."
+            )
+        if result.summary.identity_scope is IdentityScope.UNRESOLVED:
+            raise StatementCommitBlocked(
+                f"{row.order_id}: V2 product identity is unresolved."
+            )
+        if not result.summary.merchandise_reconciled:
+            raise StatementCommitBlocked(
+                f"{row.order_id}: merchandise is not reconciled."
+            )
+        if result.summary.settlement_basis is SettlementBasis.NONE:
+            raise StatementCommitBlocked(
+                f"{row.order_id}: settlement is not reconciled."
+            )
+        settlement = result.evidence.settlement
+        if settlement.invoice_basis is None or settlement.raw_difference is None:
+            raise StatementCommitBlocked(
+                f"{row.order_id}: settlement source evidence is missing."
+            )
+        comparisons.append(
+            StatementOrderComparison(
+                order_id=row.order_id,
+                comparison_source="Order Income",
+                comparison_amount=settlement.invoice_basis,
+                difference=settlement.raw_difference,
+                # The legacy Matched/Different vocabulary cannot encode
+                # V2 EXACT/EXPLAINED without changing the locked schema.
+                reconciliation_status="",
+                payout_completed_date=row.payout_completed_date,
+            )
+        )
+
+    source_rows = {
+        StatementMemberRef(
+            statement.file_hash,
+            "Income",
+            row.source_row_number,
+            row.sequence_no,
+        ): row
+        for row in statement.sku_rows
+    }
+    if len(source_rows) != len(statement.sku_rows):
+        raise StatementCommitBlocked(
+            "Statement SKU source members are not uniquely identifiable."
+        )
+
+    planned_statement_members: set[StatementMemberRef] = set()
+    item_targets: set[tuple[str, int]] = set()
+    group_targets: dict[
+        tuple[str, int], ProtectedInvoiceItemStatementFields
+    ] = {}
+    serialized_sku_rows: dict[StatementMemberRef, tuple[str, ...]] = {}
+    item_updates: list[InvoiceItemStatementUpdate] = []
+
+    for result in reconciliation.orders:
+        for identity in result.evidence.identities:
+            if identity.identity_scope is IdentityScope.UNRESOLVED:
+                raise StatementCommitBlocked(
+                    f"{result.evidence.order_id}: unresolved V2 identity cannot commit."
+                )
+            for member in identity.statement_members:
+                if member in planned_statement_members:
+                    raise StatementCommitBlocked(
+                        "V2 Statement member is consumed more than once."
+                    )
+                if member not in source_rows:
+                    raise StatementCommitBlocked(
+                        "V2 Statement source member is missing: "
+                        f"{member.source_row_number}."
+                    )
+                planned_statement_members.add(member)
+
+            if identity.identity_scope is IdentityScope.ITEM:
+                if (
+                    len(identity.statement_members) != 1
+                    or len(identity.invoice_members) != 1
+                    or len(identity.selected_pairs) != 1
+                    or not identity.allocation_resolved
+                ):
+                    raise StatementCommitBlocked(
+                        "V2 ITEM requires exactly one resolved source pair."
+                    )
+                statement_member, invoice_member = identity.selected_pairs[0]
+                if statement_member != identity.statement_members[0]:
+                    raise StatementCommitBlocked(
+                        "V2 ITEM selected Statement member is outside its identity."
+                    )
+                if invoice_member != identity.invoice_members[0]:
+                    raise StatementCommitBlocked(
+                        "V2 ITEM selected Invoice member is outside its identity."
+                    )
+                key = (invoice_member.order_id, invoice_member.item_index)
+                if key in item_targets:
+                    raise StatementCommitBlocked(
+                        f"V2 ITEM duplicates Invoice target {key!r}."
+                    )
+                if key not in items_by_key:
+                    raise StatementCommitBlocked(
+                        f"V2 ITEM target is missing: {key!r}."
+                    )
+                edge = next(
+                    (
+                        edge
+                        for edge in identity.compatible_edges
+                        if edge.statement_member == statement_member
+                        and edge.invoice_member == invoice_member
+                    ),
+                    None,
+                )
+                if edge is None:
+                    raise StatementCommitBlocked(
+                        "V2 ITEM selected pair has no compatible edge evidence."
+                    )
+                source_row = source_rows[statement_member]
+                product_price, refund_amount = _required_sku_money(source_row)
+                serialized_sku_rows[statement_member] = _v2_sku_row(
+                    statement,
+                    audit,
+                    source_row,
+                    matched_item_index=invoice_member.item_index,
+                    match_method=_v2_item_match_method(edge.match_method),
+                    product_price=product_price,
+                    refund_amount=refund_amount,
+                )
+                item_targets.add(key)
+                item_updates.append(
+                    InvoiceItemStatementUpdate(
+                        order_id=invoice_member.order_id,
+                        item_index=invoice_member.item_index,
+                        statement_product_price=product_price,
+                        statement_refund_amount=refund_amount,
+                        statement_net_selling_amount=product_price + refund_amount,
+                    )
+                )
+                continue
+
+            if identity.identity_scope is not IdentityScope.GROUP:
+                raise StatementCommitBlocked("Unsupported V2 identity scope.")
+            if identity.selected_pairs or identity.allocation_resolved:
+                raise StatementCommitBlocked(
+                    "V2 GROUP must remain physically unallocated."
+                )
+            if (
+                identity.perfect_matching_count < 2
+                or not identity.statement_members
+                or len(identity.statement_members) != len(identity.invoice_members)
+            ):
+                raise StatementCommitBlocked(
+                    "V2 GROUP lacks multiple complete valid allocations."
+                )
+            for invoice_member in identity.invoice_members:
+                key = (invoice_member.order_id, invoice_member.item_index)
+                if key in group_targets:
+                    raise StatementCommitBlocked(
+                        f"V2 GROUP duplicates protected target {key!r}."
+                    )
+                item = items_by_key.get(key)
+                if item is None:
+                    raise StatementCommitBlocked(
+                        f"V2 GROUP protected target is missing: {key!r}."
+                    )
+                group_targets[key] = ProtectedInvoiceItemStatementFields(
+                    order_id=item.order_id,
+                    item_index=item.item_index,
+                    statement_product_price=item.statement_product_price,
+                    statement_refund_amount=item.statement_refund_amount,
+                    statement_net_selling_amount=item.statement_net_selling_amount,
+                )
+            for member in identity.statement_members:
+                source_row = source_rows[member]
+                product_price, refund_amount = _required_sku_money(source_row)
+                serialized_sku_rows[member] = _v2_sku_row(
+                    statement,
+                    audit,
+                    source_row,
+                    matched_item_index=None,
+                    match_method=GROUP_MATCH_METHOD,
+                    product_price=product_price,
+                    refund_amount=refund_amount,
+                )
+
+    if planned_statement_members != set(source_rows):
+        raise StatementCommitBlocked(
+            "V2 plan does not cover every Statement SKU source member exactly once."
+        )
+    overlap = item_targets & set(group_targets)
+    if overlap:
+        raise StatementCommitBlocked(
+            f"V2 ITEM and GROUP targets overlap: {sorted(overlap)!r}."
+        )
+
+    comparison_tuple = tuple(comparisons)
+    rows = [
+        _order_row(statement, audit, row, comparison)
+        for row, comparison in zip(statement.order_rows, comparison_tuple)
+    ]
+    for source_row in statement.sku_rows:
+        member = StatementMemberRef(
+            statement.file_hash,
+            "Income",
+            source_row.source_row_number,
+            source_row.sequence_no,
+        )
+        rows.append(serialized_sku_rows[member])
+    rows.extend(
+        _adjustment_row(statement, audit, adjustment)
+        for adjustment in statement.adjustments
+    )
+    order_updates = tuple(
+        InvoiceOrderStatementUpdate(
+            order_id=comparison.order_id,
+            payout_completed_date=comparison.payout_completed_date,
+            payment_status="RELEASED",
+            difference=comparison.difference,
+        )
+        for comparison in comparison_tuple
+        if comparison.difference is not None
+    )
+    if len(order_updates) != len(comparison_tuple):
+        raise StatementCommitBlocked(
+            "V2 order update lacks a settlement difference."
+        )
+    return StatementCommitPlan(
+        statement=statement,
+        audit=audit,
+        rows=tuple(rows),
+        financial_component_rows=_financial_component_rows(statement, audit),
+        order_comparisons=comparison_tuple,
+        invoice_order_updates=order_updates,
+        invoice_item_updates=tuple(item_updates),
+        protected_invoice_items=tuple(
+            group_targets[key] for key in sorted(group_targets)
+        ),
+        invoice_snapshot_sha256=invoice_snapshot_sha256(
+            invoice_orders,
+            invoice_items,
+        ),
+    )
+
+
 def validate_current_statement_state(
     plan: StatementCommitPlan,
     state: StatementCommitState,
@@ -258,24 +575,42 @@ def validate_current_statement_state(
     ):
         reasons.append("POSSIBLE_REVISION")
 
-    for comparison in plan.order_comparisons:
-        current_order = state.orders.get(comparison.order_id)
-        if current_order is None:
-            reasons.append(f"UNMATCHED_ORDER:{comparison.order_id}")
-            continue
-        current = _compare_order_by_id(
-            comparison.order_id,
-            plan.statement.order_rows,
-            current_order,
+    if plan.invoice_snapshot_sha256 is not None:
+        order_ids = {row.order_id for row in plan.statement.order_rows}
+        current_orders = tuple(
+            state.orders[order_id]
+            for order_id in sorted(order_ids)
+            if order_id in state.orders
         )
-        if (
-            current.comparison_source != comparison.comparison_source
-            or current.comparison_amount != comparison.comparison_amount
-            or current.difference != comparison.difference
-            or current.reconciliation_status != comparison.reconciliation_status
-        ):
-            reasons.append(f"COMPARISON_STATE_CHANGED:{comparison.order_id}")
-    if not sku_matching_is_current:
+        current_items = tuple(
+            item
+            for item in state.items
+            if item.platform == "Shopee" and item.order_id in order_ids
+        )
+        if len(current_orders) != len(order_ids):
+            missing = sorted(order_ids - set(state.orders))
+            reasons.extend(f"UNMATCHED_ORDER:{order_id}" for order_id in missing)
+        elif invoice_snapshot_sha256(current_orders, current_items) != plan.invoice_snapshot_sha256:
+            reasons.append("INVOICE_SNAPSHOT_CHANGED")
+    else:
+        for comparison in plan.order_comparisons:
+            current_order = state.orders.get(comparison.order_id)
+            if current_order is None:
+                reasons.append(f"UNMATCHED_ORDER:{comparison.order_id}")
+                continue
+            current = _compare_order_by_id(
+                comparison.order_id,
+                plan.statement.order_rows,
+                current_order,
+            )
+            if (
+                current.comparison_source != comparison.comparison_source
+                or current.comparison_amount != comparison.comparison_amount
+                or current.difference != comparison.difference
+                or current.reconciliation_status != comparison.reconciliation_status
+            ):
+                reasons.append(f"COMPARISON_STATE_CHANGED:{comparison.order_id}")
+    if plan.invoice_snapshot_sha256 is None and not sku_matching_is_current:
         reasons.append("SKU_MATCHING_STATE_CHANGED")
     return tuple(reasons)
 
@@ -416,6 +751,71 @@ def _sku_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit,
         "matched_item_index": match.invoice_item_index, "match_method": _required_business_match_method(match.match_method),
     })
     return _serialize_statement_row(values)
+
+
+def _v2_sku_row(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    row: SettlementIncomeRow,
+    *,
+    matched_item_index: int | None,
+    match_method: str,
+    product_price: Decimal,
+    refund_amount: Decimal,
+) -> tuple[str, ...]:
+    values = _common(
+        statement,
+        audit,
+        "SKU",
+        row.sequence_no,
+        row.source_row_number,
+    )
+    values.update({
+        "order_id": row.order_id,
+        "order_creation_date": row.order_creation_date,
+        "payout_completed_date": row.payout_completed_date,
+        "release_channel": row.release_channel,
+        "order_type": row.order_type,
+        "total_released_amount": row.total_released_amount,
+        "statement_product_id": row.product_id,
+        "statement_product_name": row.product_name,
+        "statement_product_price": product_price,
+        "statement_refund_amount": refund_amount,
+        "statement_net_selling_amount": product_price + refund_amount,
+        "matched_item_index": matched_item_index,
+        "match_method": match_method,
+    })
+    return _serialize_statement_row(values)
+
+
+def _required_sku_money(row: SettlementIncomeRow) -> tuple[Decimal, Decimal]:
+    product_price = row.financial_components.get("Product Price")
+    refund_amount = row.financial_components.get("Refund Amount")
+    if product_price is None or refund_amount is None:
+        raise StatementCommitBlocked(
+            f"Statement SKU source row {row.source_row_number} lacks Product Price "
+            "or Refund Amount."
+        )
+    return product_price, refund_amount
+
+
+def _v2_item_match_method(method: str) -> str:
+    labels = {
+        "PRODUCT_MASTER_SKU": "Product Master SKU",
+        "PRODUCT_MASTER_PARENT_SKU": "Product Master Parent SKU",
+        "PRODUCT_MASTER_NAME_VARIATION": "Product Master Name + Variation",
+        "EXACT_SELLER_SKU": "Exact Seller SKU",
+        "EXACT_PRODUCT_NAME": "Product Name",
+        "SAFE_NAME_NORMALIZATION": "Safe Product Name Normalization",
+        "VERIFIED_ARTIFACT_REPAIR": "Verified Source Artifact Repair",
+        "PRODUCT_MASTER_NAME_CONFIRMATION": "Product Master Name Confirmation",
+    }
+    tokens = tuple(token for token in method.split("|") if token)
+    if not tokens or any(token not in labels for token in tokens):
+        raise StatementCommitBlocked(
+            f"Unsupported V2 ITEM match method: {method!r}."
+        )
+    return " + ".join(labels[token] for token in tokens)
 
 
 def _adjustment_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit, adjustment: SettlementAdjustment) -> tuple[str, ...]:
@@ -683,3 +1083,30 @@ def _serialize(value: object | None) -> str:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return str(value)
+
+
+def invoice_snapshot_sha256(
+    invoice_orders: Iterable[CanonicalInvoiceOrder],
+    invoice_items: Iterable[CanonicalInvoiceItem],
+) -> str:
+    """Hash the exact persisted Invoice evidence used by a V2 review/plan."""
+
+    order_payload = [
+        asdict(order)
+        for order in sorted(invoice_orders, key=lambda value: value.order_id)
+    ]
+    item_payload = [
+        asdict(item)
+        for item in sorted(
+            invoice_items,
+            key=lambda value: (value.order_id, value.item_index),
+        )
+    ]
+    payload = json.dumps(
+        {"orders": order_payload, "items": item_payload},
+        default=str,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()

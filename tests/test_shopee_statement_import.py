@@ -32,6 +32,7 @@ from src.invoice_app.services.import_result_adapters import (
 from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitState,
 )
+from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
 from src.invoice_app.services.shopee_weekly_statement_service import (
     stage_parsed_shopee_weekly_statement,
 )
@@ -50,6 +51,8 @@ def _income(
     refund: str = "0.00",
     fees: str | None = "0.00",
     sequence: str | None = None,
+    product_id: str = "PRODUCT-1",
+    product_name: str = "Green Tea",
 ) -> SettlementIncomeRow:
     components = {name: Decimal("0.00") for name in INCOME_COMPONENT_COLUMNS}
     components["Product Price"] = Decimal(product)
@@ -59,8 +62,8 @@ def _income(
         sequence_no=sequence or str(row_number),
         view_by=view_by,
         order_id="ORDER-1",
-        product_id="PRODUCT-1",
-        product_name="Green Tea",
+        product_id=product_id,
+        product_name=product_name,
         order_creation_date=date(2026, 8, 10),
         payout_completed_date=date(2026, 8, 16),
         release_channel="Seller Wallet",
@@ -145,6 +148,8 @@ def _item(
     item_index: int = 0,
     seller_sku: str = "SKU-1",
     subtotal: str = "10.00",
+    promotion_group_id: str | None = None,
+    source_group_total: str | None = None,
 ) -> CanonicalInvoiceItem:
     return CanonicalInvoiceItem(
         platform="Shopee",
@@ -156,6 +161,10 @@ def _item(
         quantity=1,
         actual_selling_unit_price=Decimal(subtotal),
         line_subtotal=Decimal(subtotal),
+        promotion_group_id=promotion_group_id,
+        source_group_total=(
+            Decimal(source_group_total) if source_group_total is not None else None
+        ),
         source_pdf="invoice.pdf",
     )
 
@@ -187,6 +196,37 @@ def _master(*, include_second_candidate: bool = False) -> ProductPriceMaster:
     )
 
 
+def _mixed_master() -> ProductPriceMaster:
+    return ProductPriceMaster.from_rows(
+        (
+            {
+                "product_id": "PRODUCT-1",
+                "seller_sku": "SKU-1",
+                "parent_sku": "PARENT-1",
+                "product_name": "Green Tea",
+                "variation_name": "Original",
+                "unit_selling_price": "12.00",
+            },
+            {
+                "product_id": "PRODUCT-1",
+                "seller_sku": "SKU-2",
+                "parent_sku": "PARENT-2",
+                "product_name": "Green Tea",
+                "variation_name": "Original",
+                "unit_selling_price": "12.00",
+            },
+            {
+                "product_id": "PRODUCT-2",
+                "seller_sku": "SKU-B",
+                "parent_sku": "PARENT-B",
+                "product_name": "Blue Tea",
+                "variation_name": "Original",
+                "unit_selling_price": "6.00",
+            },
+        )
+    )
+
+
 class _Repository(InMemoryHistoricalInvoiceRepository):
     def __init__(self, items=(_item(),)):
         super().__init__()
@@ -201,13 +241,18 @@ class _Repository(InMemoryHistoricalInvoiceRepository):
 
 
 class _Writer:
-    def __init__(self, order=None):
+    def __init__(self, order=None, items=(_item(),)):
         self.order = order
+        self.items = tuple(items)
         self.writes = 0
 
     def reload_commit_state(self):
         orders = {} if self.order is None else {"ORDER-1": self.order}
-        return StatementCommitState(orders=orders, committed_statements=())
+        return StatementCommitState(
+            orders=orders,
+            committed_statements=(),
+            items=self.items,
+        )
 
     def write_statement_batch(self, plan):
         self.writes += 1
@@ -233,7 +278,10 @@ def _review(
         ),
     )
     repository = _Repository(items)
-    writer = _Writer(_order() if order is _DEFAULT_ORDER else order)
+    writer = _Writer(
+        _order() if order is _DEFAULT_ORDER else order,
+        items,
+    )
     review = review_statement_upload(
         b"synthetic",
         source_filename="statement.xlsx",
@@ -329,7 +377,10 @@ def test_commit_uses_guarded_boundary_and_stale_order_state_produces_zero_write(
     )
 
     assert attempt.committed is False
-    assert attempt.reasons == ("COMPARISON_STATE_CHANGED:ORDER-1",)
+    assert attempt.reasons == (
+        "STALE_REVIEW:INVOICE_SNAPSHOT_CHANGED",
+        "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED",
+    )
     assert writer.writes == 0
 
 
@@ -425,6 +476,131 @@ def test_v2_group_is_valid_review_with_unresolved_allocation_but_no_fake_mapping
     assert any("individual Statement row allocation" in item for item in review.limitations)
 
 
+def test_v2_group_plan_persists_source_rows_with_blank_item_index_and_zero_enrichment(
+    monkeypatch,
+):
+    review, _, _ = _group_review(monkeypatch)
+    plan = review.plan
+    assert plan is not None
+
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    sku_rows = [
+        row
+        for row in plan.rows
+        if row[positions["record_type"]] == "SKU"
+    ]
+    assert len(sku_rows) == 2
+    assert {row[positions["matched_item_index"]] for row in sku_rows} == {""}
+    assert {
+        row[positions["match_method"]] for row in sku_rows
+    } == {"Product Group Multiset (Unallocated)"}
+    assert plan.invoice_item_updates == ()
+    assert len(plan.protected_invoice_items) == 2
+
+
+def test_v2_mixed_item_and_group_order_updates_only_the_exact_item(monkeypatch):
+    statement = _statement(
+        sku_rows=(
+            _income(
+                "Sku",
+                3,
+                product="5.00",
+                sequence="1",
+                product_id="PRODUCT-2",
+                product_name="Blue Tea",
+            ),
+            _income("Sku", 4, product="10.00", sequence="2"),
+            _income("Sku", 5, product="10.00", sequence="3"),
+        )
+    )
+    review, _, _ = _review(
+        monkeypatch,
+        order=_order("25.00", product="25.00"),
+        items=(
+            _item("Blue Tea", item_index=0, seller_sku="SKU-B", subtotal="5.00"),
+            _item(item_index=1, seller_sku="SKU-1"),
+            _item(item_index=2, seller_sku="SKU-2"),
+        ),
+        statement=statement,
+        product_master=_mixed_master(),
+    )
+    plan = review.plan
+    assert plan is not None
+
+    assert [(item.order_id, item.item_index) for item in plan.invoice_item_updates] == [
+        ("ORDER-1", 0)
+    ]
+    assert {
+        (item.order_id, item.item_index) for item in plan.protected_invoice_items
+    } == {("ORDER-1", 1), ("ORDER-1", 2)}
+
+
+def test_refund_sensitive_group_preserves_source_without_item_allocation(monkeypatch):
+    statement = _statement(
+        sku_rows=(
+            _income("Sku", 3, refund="-2.00", sequence="1"),
+            _income("Sku", 4, sequence="2"),
+        )
+    )
+    review, _, _ = _review(
+        monkeypatch,
+        order=_order(
+            "18.00",
+            income="18.00",
+            product="20.00",
+            refund="-2.00",
+        ),
+        items=(_item(item_index=0), _item(item_index=1)),
+        statement=statement,
+    )
+    plan = review.plan
+    assert plan is not None
+
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    sku_rows = [
+        row for row in plan.rows if row[positions["record_type"]] == "SKU"
+    ]
+    assert [row[positions["statement_refund_amount"]] for row in sku_rows] == [
+        "-2.00",
+        "0.00",
+    ]
+    assert all(not row[positions["matched_item_index"]] for row in sku_rows)
+    assert plan.invoice_item_updates == ()
+
+
+def test_promotion_group_never_allocates_statement_money_to_members(monkeypatch):
+    review, _, _ = _review(
+        monkeypatch,
+        order=_order("18.00", product="18.00"),
+        items=(
+            _item(
+                item_index=0,
+                subtotal="10.00",
+                promotion_group_id="PROMO-1",
+                source_group_total="18.00",
+            ),
+            _item(
+                item_index=1,
+                subtotal="12.00",
+                promotion_group_id="PROMO-1",
+                source_group_total="18.00",
+            ),
+        ),
+        statement=_statement(
+            sku_rows=(
+                _income("Sku", 3, product="9.00", sequence="1"),
+                _income("Sku", 4, product="9.00", sequence="2"),
+            )
+        ),
+    )
+
+    assert review.plan is not None
+    assert review.plan.invoice_item_updates == ()
+    assert review.reconciliation_v2.orders[0].evidence.promotion.promotion_group_ids == (
+        "PROMO-1",
+    )
+
+
 def test_legacy_matcher_disagreement_is_not_exposed_as_v2_business_blocker(monkeypatch):
     review, _, _ = _group_review(monkeypatch)
     result = adapt_shopee_weekly_statement_import_result(
@@ -434,10 +610,12 @@ def test_legacy_matcher_disagreement_is_not_exposed_as_v2_business_blocker(monke
     )
 
     assert review.sku_matches.eligible_for_commit is False
-    assert review.plan is None
+    assert review.plan is not None
+    assert review.plan.invoice_item_updates == ()
+    assert len(review.plan.protected_invoice_items) == 2
     assert result.validation.blocking_issues == ()
-    assert result.batch_status == "Review Complete"
-    assert result.commit_readiness.database_commit_available is False
+    assert result.batch_status == "Ready to Commit"
+    assert result.commit_readiness.database_commit_available is True
     assert all(
         "exactly one" not in issue.reason.casefold()
         for issue in (*result.validation.blocking_issues, *result.validation.warnings)
@@ -501,7 +679,7 @@ def test_v2_none_settlement_is_a_real_fail_closed_blocker(monkeypatch):
     assert review.reconciliation_v2.orders[0].summary.merchandise_reconciled is True
     assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "NONE"
     assert review.ready is False
-    assert review.plan is not None
+    assert review.plan is None
     assert review.commit_ready is False
     assert any("settlement" in reason for reason in review.blockers)
 
@@ -580,6 +758,114 @@ def test_product_master_snapshot_change_marks_existing_review_stale(monkeypatch)
     assert "PRODUCT_MASTER_SNAPSHOT_CHANGED" in stale.changed_evidence
 
 
+def test_product_master_change_after_review_blocks_commit_with_zero_write(monkeypatch):
+    review, repository, writer = _review(monkeypatch)
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=lambda: _master(include_second_candidate=True),
+    )
+
+    assert attempt.committed is False
+    assert "STALE_REVIEW:PRODUCT_MASTER_SNAPSHOT_CHANGED" in attempt.reasons
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
+    assert writer.writes == 0
+
+
+def test_statement_source_change_after_review_blocks_commit_with_zero_write(
+    monkeypatch,
+):
+    review, repository, writer = _review(monkeypatch)
+    changed_statement = replace(_statement(), file_hash="changed-statement-hash")
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                changed_statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert "STALE_REVIEW:STATEMENT_FILE_CHANGED" in attempt.reasons
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
+    assert writer.writes == 0
+
+
+def test_statement_row_order_permutation_after_review_is_stale(monkeypatch):
+    review, repository, writer = _group_review(monkeypatch)
+    original = review.stage.statement
+    assert original is not None
+    changed = replace(
+        original,
+        file_hash="permuted-statement-hash",
+        income_rows=(original.order_rows[0], *reversed(original.sku_rows)),
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                changed,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert "STALE_REVIEW:STATEMENT_FILE_CHANGED" in attempt.reasons
+    assert writer.writes == 0
+
+
+def test_missing_statement_row_after_review_fails_before_write(monkeypatch):
+    review, repository, writer = _group_review(monkeypatch)
+    original = review.stage.statement
+    assert original is not None
+    changed = replace(
+        original,
+        file_hash="missing-row-statement-hash",
+        income_rows=(original.order_rows[0], original.sku_rows[0]),
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                changed,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert writer.writes == 0
+
+
 def test_invoice_snapshot_change_marks_existing_review_stale(monkeypatch):
     review, repository, writer = _review(monkeypatch)
     writer.order = _order("9.00")
@@ -593,6 +879,43 @@ def test_invoice_snapshot_change_marks_existing_review_stale(monkeypatch):
 
     assert stale.is_current is False
     assert "INVOICE_SNAPSHOT_CHANGED" in stale.changed_evidence
+
+
+def test_group_improving_to_item_after_review_is_stale_and_writes_nothing(
+    monkeypatch,
+):
+    statement = _statement(
+        sku_rows=(
+            _income("Sku", 3, product="9.00", sequence="1"),
+            _income("Sku", 4, product="11.00", sequence="2"),
+        )
+    )
+    review, repository, writer = _review(
+        monkeypatch,
+        order=_order("20.00", product="20.00"),
+        items=(
+            _item(item_index=0, subtotal="10.00"),
+            _item(item_index=1, subtotal="10.00"),
+        ),
+        statement=statement,
+    )
+    assert review.reconciliation_v2.orders[0].summary.identity_scope.value == "GROUP"
+    writer.items = (
+        _item(item_index=0, subtotal="9.00"),
+        _item(item_index=1, subtotal="11.00"),
+    )
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert "STALE_REVIEW:INVOICE_SNAPSHOT_CHANGED" in attempt.reasons
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
+    assert writer.writes == 0
 
 
 def test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index(
@@ -628,7 +951,7 @@ def test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index(
         for caption in app.caption
     )
     assert any(
-        button.label == "Commit Statement" and button.disabled
+        button.label == "Commit Statement" and not button.disabled
         for button in app.button
     )
 
