@@ -751,6 +751,11 @@ def show_sidebar(pdf_count: int) -> str:
                     f"Product Master refreshed from {source_label} "
                     f"({len(price_master.records)} records)."
                 )
+                if st.session_state.get("weekly_statement_review") is not None:
+                    st.session_state.weekly_statement_review_stale_reason = (
+                        "Product Master was refreshed after this Statement review. "
+                        "Refresh validation before continuing."
+                    )
             st.rerun()
 
         st.html('<p class="sidebar-section-label">Current batch</p>')

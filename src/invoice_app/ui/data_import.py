@@ -39,6 +39,7 @@ from ..services.shopee_weekly_statement_service import (
 )
 from ..services.shopee_statement_import import (
     StatementImportReview,
+    check_statement_review_currency,
     commit_statement_review,
     refresh_statement_review,
     review_statement_upload,
@@ -47,7 +48,7 @@ from ..services.shopee_statement_persistence import (
     StatementCommitBlocked,
     StatementWriteIntegrityError,
 )
-from ..services.shopee_statement_item_matching import business_match_method
+from ..domain.statement_reconciliation_v2 import IdentityScope, SettlementBasis
 from ..services.manual_review_resolution import (
     MISSING_INCOME,
     FINAL_AMOUNT,
@@ -87,6 +88,7 @@ _WORKFLOW_KEYS = (
     "import_source_type",
     "weekly_statement_stage",
     "weekly_statement_review",
+    "weekly_statement_review_stale_reason",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
     "uat2_historical_commit_entries",
@@ -260,6 +262,7 @@ def _render_weekly_statement_upload() -> None:
             )
             st.session_state.weekly_statement_review = review
             st.session_state.weekly_statement_stage = review.stage
+            st.session_state.pop("weekly_statement_review_stale_reason", None)
         except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
             st.error(f"Statement validation is unavailable: {error}")
         finally:
@@ -287,7 +290,10 @@ def _render_validation_step(
     else:
         _render_statement_review_tables()
     _render_recovery_area()
-    _render_next_step("Continue to reconcile", 4)
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        _render_statement_next_step("Continue to reconcile", 4)
+    else:
+        _render_next_step("Continue to reconcile", 4)
 
 
 def _render_contract_validation(result: ImportResult) -> None:
@@ -693,7 +699,9 @@ def _render_reconciliation_step() -> None:
     _render_representative_contract_exceptions(reconciliation.exceptions)
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
         _render_statement_review_tables()
-    _render_next_step("Continue to review & commit", 5)
+        _render_statement_next_step("Continue to review & commit", 5)
+    else:
+        _render_next_step("Continue to review & commit", 5)
 
 
 def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationException, ...]) -> None:
@@ -729,8 +737,23 @@ def _render_review_and_commit_step() -> None:
         _render_historical_invoice_commit()
         return
     _render_statement_review_tables()
-    if readiness.ready:
-        st.success("Ready to Commit — current batch review is complete.", icon=":material/check_circle:")
+    review = _weekly_review()
+    if review is not None and review.ready and not _statement_review_stale():
+        st.success(
+            "Reconciliation review complete — V2 found no business blockers.",
+            icon=":material/check_circle:",
+        )
+        if not review.commit_ready:
+            st.info(
+                "Formal V2 Statement persistence is not available in this phase. "
+                "No row-to-item allocation has been invented for GROUP evidence.",
+                icon=":material/info:",
+            )
+    elif _statement_review_stale():
+        st.warning(
+            str(st.session_state.get("weekly_statement_review_stale_reason")),
+            icon=":material/refresh:",
+        )
     else:
         st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
     _render_statement_commit(readiness.ready)
@@ -757,7 +780,7 @@ def _current_import_result() -> ImportResult:
         return adapt_shopee_weekly_statement_import_result(
             _weekly_stage(),
             batch_id=batch_id,
-            sku_matches=review.sku_matches if review is not None else None,
+            review=review,
         )
     return adapt_platform_orders_import_result(
         batch_id=batch_id,
@@ -932,53 +955,77 @@ def _weekly_review() -> StatementImportReview | None:
 
 def _render_statement_review_tables() -> None:
     review = _weekly_review()
-    if review is None or review.stage.statement is None:
+    if (
+        review is None
+        or review.stage.statement is None
+        or review.reconciliation_v2 is None
+    ):
         return
-    statement = review.stage.statement
-    st.subheader("Order ID Coverage and Amount Reconciliation")
+    batch = review.reconciliation_v2
+    st.subheader("Reconciliation V2 review")
+    stale_reason = st.session_state.get("weekly_statement_review_stale_reason")
+    if stale_reason:
+        st.warning(str(stale_reason), icon=":material/refresh:")
     st.caption(
-        "Covered means the Statement Order ID exists in Invoice data; it does not mean the amount matched."
+        "Identity, merchandise, and seller settlement are evaluated separately. "
+        "GROUP is valid source-level reconciliation, not a failed item match."
     )
     st.dataframe(
         [
             {
-                "Order ID": item.order_id,
-                "Released Amount": item.released_amount,
-                "Comparison Source": item.comparison_source,
-                "Comparison Amount": item.comparison_amount,
-                "Difference": item.difference,
-                "Status": item.status,
+                "Order ID": result.evidence.order_id,
+                "Identity": result.summary.identity_scope.value,
+                "Merchandise": (
+                    "Reconciled"
+                    if result.summary.merchandise_reconciled
+                    else "Unresolved"
+                ),
+                "Invoice Product Price": _order_merchandise_value(
+                    result, "invoice_value"
+                ),
+                "Statement Product Price": _order_merchandise_value(
+                    result, "statement_value"
+                ),
+                "Settlement": result.summary.settlement_basis.value.title(),
+                "Unexplained Residual": (
+                    result.evidence.settlement.unexplained_residual
+                ),
+                "Allocation": (
+                    "Resolved"
+                    if result.summary.allocation_resolved
+                    else (
+                        "Group only"
+                        if result.summary.identity_scope is IdentityScope.GROUP
+                        else "Unresolved"
+                    )
+                ),
+                "Source note": _order_review_note(result),
             }
-            for item in review.stage.order_reconciliations
+            for result in batch.orders
         ],
         hide_index=True,
     )
-    sku_by_row = {row.source_row_number: row for row in statement.sku_rows}
-    st.subheader("SKU review")
-    st.dataframe(
-        [
-            {
-                "Order ID": match.order_id,
-                "Product ID": match.product_id,
-                "Product Name": match.product_name,
-                "Product Price": (
-                    sku_by_row[match.statement_source_row].financial_components.get("Product Price")
-                    if match.statement_source_row in sku_by_row
-                    else None
-                ),
-                "Refund": (
-                    sku_by_row[match.statement_source_row].financial_components.get("Refund Amount")
-                    if match.statement_source_row in sku_by_row
-                    else None
-                ),
-                "Matched Item": match.invoice_item_index,
-                "Match Method": business_match_method(match.match_method),
-                "Status": match.status.value,
-            }
-            for match in review.sku_matches.matches
-        ],
-        hide_index=True,
+    for limitation in review.limitations:
+        st.warning(limitation, icon=":material/info:")
+    st.caption(
+        "Quantity evidence — Invoice quantity: available where captured. "
+        "Statement quantity: not provided by source. No quantity-match claim is made."
     )
+    with st.container(border=True):
+        st.write("**Statement Adjustment evidence (separate)**")
+        st.write(f"RM {batch.statement_adjustment_total:.2f}")
+        st.caption(
+            "This is not included in original merchandise or seller-settlement reconciliation."
+        )
+    with st.expander("Technical reconciliation evidence"):
+        st.caption(
+            f"Rule {batch.rule_version} · Product Master snapshot "
+            f"{batch.product_family_snapshot.sha256}"
+        )
+        st.dataframe(_identity_evidence_rows(batch), hide_index=True)
+        settlement_rows = _settlement_evidence_rows(batch)
+        if settlement_rows:
+            st.dataframe(settlement_rows, hide_index=True)
 
 
 def _render_statement_commit(ready: bool) -> None:
@@ -996,7 +1043,11 @@ def _render_statement_commit(ready: bool) -> None:
             "Commit Statement",
             type="primary",
             icon=":material/upload:",
-            disabled=not ready or not review.ready,
+            disabled=(
+                not ready
+                or not review.commit_ready
+                or _statement_review_stale()
+            ),
             key="statement_commit",
         )
     if refresh_clicked:
@@ -1006,6 +1057,22 @@ def _render_statement_commit(ready: bool) -> None:
         return
     settings = configured_uat2_data_settings()
     try:
+        master, _label = load_configured_product_price_master()
+        currency = check_statement_review_currency(
+            review,
+            repository=settings.create_repository(),
+            writer=settings.create_statement_writer(),
+            product_master=master,
+        )
+        if not currency.is_current:
+            st.warning(
+                "Statement review evidence changed and must be evaluated again: "
+                + ", ".join(currency.changed_evidence)
+            )
+            if _refresh_statement_review(review):
+                _set_step(3)
+                st.rerun()
+            return
         attempt = commit_statement_review(
             review,
             repository=settings.create_repository(),
@@ -1048,7 +1115,118 @@ def _refresh_statement_review(review: StatementImportReview) -> bool:
         return False
     st.session_state.weekly_statement_review = refreshed
     st.session_state.weekly_statement_stage = refreshed.stage
+    st.session_state.pop("weekly_statement_review_stale_reason", None)
     return True
+
+
+def _render_statement_next_step(label: str, step: int) -> None:
+    """Re-evaluate current evidence before moving to the next review step."""
+
+    if not st.button(label, type="primary", icon=":material/arrow_forward:"):
+        return
+    review = _weekly_review()
+    if review is None:
+        st.warning("Validate the Statement before continuing.")
+        return
+    if _refresh_statement_review(review):
+        _set_step(step)
+        st.rerun()
+
+
+def _statement_review_stale() -> bool:
+    return bool(st.session_state.get("weekly_statement_review_stale_reason"))
+
+
+def _order_merchandise_value(result: Any, field: str) -> Any:
+    control = next(
+        (
+            evidence
+            for evidence in result.evidence.merchandise
+            if evidence.scope_key == "ORDER_CONTROL"
+        ),
+        None,
+    )
+    return getattr(control, field, None) if control is not None else None
+
+
+def _order_review_note(result: Any) -> str:
+    summary = result.summary
+    if summary.identity_scope is IdentityScope.UNRESOLVED:
+        return "Product identity requires authoritative source evidence."
+    if summary.identity_scope is IdentityScope.GROUP:
+        return (
+            "Product group reconciled; individual Statement row allocation "
+            "cannot be proven from source evidence."
+        )
+    if "LATE_STATEMENT_REFUND_EFFECT" in result.evidence.settlement.internal_effects:
+        return (
+            "Later authoritative Statement refund explains settlement; the "
+            "earlier Invoice source remains unchanged."
+        )
+    if summary.settlement_basis is SettlementBasis.EXPLAINED:
+        return "Statement components fully explain the final settlement difference."
+    return "Item identity and financial evidence reconcile."
+
+
+def _identity_evidence_rows(batch: Any) -> list[dict[str, Any]]:
+    rows = []
+    for result in batch.orders:
+        for identity in result.evidence.identities:
+            selected = (
+                ", ".join(
+                    f"row {statement.source_row_number} → item {invoice.item_index}"
+                    for statement, invoice in identity.selected_pairs
+                )
+                if identity.identity_scope is IdentityScope.ITEM
+                else "Not assigned"
+            )
+            rows.append(
+                {
+                    "Order ID": result.evidence.order_id,
+                    "Product ID": identity.product_id or "Not provided",
+                    "Identity scope": identity.identity_scope.value,
+                    "Statement members": len(identity.statement_members),
+                    "Invoice members": len(identity.invoice_members),
+                    "Physical allocation": selected,
+                    "Evidence": identity.diagnostic,
+                }
+            )
+    return rows
+
+
+def _settlement_evidence_rows(batch: Any) -> list[dict[str, Any]]:
+    rows = []
+    for result in batch.orders:
+        settlement = result.evidence.settlement
+        if settlement.basis is SettlementBasis.EXACT and not settlement.internal_effects:
+            continue
+        material_components = tuple(
+            component
+            for component in settlement.component_deltas
+            if component.delta not in (None, 0)
+            or component.treatment
+            in {"LATE_STATEMENT_REFUND_EFFECT", "INVOICE_SOURCE_EVIDENCE_MISSING"}
+        )
+        for component in material_components or (None,):
+            rows.append(
+                {
+                    "Order ID": result.evidence.order_id,
+                    "Basis": settlement.basis.value,
+                    "Component": component.component if component else "Residual control",
+                    "Invoice component": component.invoice_value if component else None,
+                    "Statement component": component.statement_value if component else None,
+                    "Component delta": component.delta if component else None,
+                    "Treatment": (
+                        component.treatment
+                        if component
+                        else ", ".join(settlement.internal_effects) or "CONTROL"
+                    ),
+                    "Invoice basis": settlement.invoice_basis,
+                    "Statement settlement": settlement.statement_total,
+                    "Unexplained residual": settlement.unexplained_residual,
+                }
+            )
+    return rows
 
 
 def _historical_commit_signature() -> str:

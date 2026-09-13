@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from src.invoice_app.domain.statement_reconciliation_v2 import (
+    IdentityScope,
+    SettlementBasis,
+)
+
+if TYPE_CHECKING:
+    from .shopee_statement_import import StatementImportReview
 
 from .batch_service import is_manual_review_record
 from .validation_recovery import (
@@ -175,8 +183,12 @@ def adapt_shopee_weekly_statement_import_result(
     *,
     batch_id: str | None,
     sku_matches: StatementItemMatchBatch | None = None,
+    review: StatementImportReview | None = None,
 ) -> ImportResult:
     """Project weekly-statement staging output without changing its semantics."""
+
+    if review is not None:
+        return _adapt_v2_statement_review(review, batch_id=batch_id)
 
     validation_blockers: list[ValidationIssue] = []
     warnings: list[ValidationIssue] = []
@@ -372,6 +384,266 @@ def adapt_shopee_weekly_statement_import_result(
         session_state=SessionState(
             applied_to_current_session=bool(stage and batch_id),
             label="Applied to Current Session" if stage and batch_id else "No Active Session Batch",
+            batch_id=batch_id,
+        ),
+        source_specific_details=source_details,
+    )
+
+
+def _adapt_v2_statement_review(
+    review: StatementImportReview,
+    *,
+    batch_id: str | None,
+) -> ImportResult:
+    """Project the single authoritative V2 review without legacy matcher claims."""
+
+    stage = review.stage
+    statement = stage.statement
+    batch = review.reconciliation_v2
+    source = stage.source_filename
+    recovery_actions = recovery_actions_for_source(
+        source=source,
+        action_type=REMOVE_STAGED_SOURCE,
+        remove_label="Remove staged source",
+    )
+    validation_blockers: list[ValidationIssue] = []
+    represented_reasons: set[str] = set()
+    for issue in stage.validation_issues:
+        represented_reasons.add(issue.message)
+        validation_blockers.append(
+            ValidationIssue(
+                layer="statement_validation",
+                severity="error",
+                blocking=True,
+                reason=issue.message,
+                affected_item=source,
+                evidence={"code": issue.code, "source_filename": source},
+                suggested_action=(
+                    "Review the Statement source evidence or remove the staged "
+                    "source before uploading a replacement."
+                ),
+                recovery_actions=recovery_actions,
+            )
+        )
+    for reason in stage.rejection_reasons:
+        reason = str(reason)
+        represented_reasons.add(reason)
+        validation_blockers.append(
+            ValidationIssue(
+                layer="statement_validation",
+                severity="error",
+                blocking=True,
+                reason=reason,
+                affected_item=source,
+                evidence={"source_filename": source},
+                suggested_action="Remove the rejected source and upload a valid Statement.",
+                recovery_actions=recovery_actions,
+            )
+        )
+    for reason in review.blockers:
+        if reason in represented_reasons:
+            continue
+        validation_blockers.append(
+            ValidationIssue(
+                layer="statement_reconciliation_v2",
+                severity="error",
+                blocking=True,
+                reason=reason,
+                affected_item=source,
+                suggested_action=(
+                    "Review the exact Statement, persisted Invoice, and Product "
+                    "Master source evidence; no force match is available."
+                ),
+                recovery_actions=recovery_actions,
+            )
+        )
+    warnings = tuple(
+        ValidationIssue(
+            layer="statement_reconciliation_v2",
+            severity="warning",
+            blocking=False,
+            reason=limitation,
+            affected_item=source,
+            suggested_action="Treat this as a source-evidence limitation, not a mismatch.",
+        )
+        for limitation in review.limitations
+    )
+
+    summary: tuple[SummaryItem, ...] = ()
+    exceptions: list[ReconciliationException] = []
+    source_details: dict[str, Any] = {
+        "stage": stage,
+        "statement": statement,
+        "review": review,
+        "reconciliation_v2": batch,
+        "legacy_sku_matches": review.sku_matches,
+        "adjustment_reconciliations": tuple(stage.adjustment_reconciliations),
+        "shipping_fee_discrepancies": (
+            tuple(statement.shipping_fee_discrepancies) if statement else ()
+        ),
+    }
+    if batch is not None:
+        identity_members = {
+            scope: sum(
+                len(identity.statement_members)
+                for result in batch.orders
+                for identity in result.evidence.identities
+                if identity.identity_scope is scope
+            )
+            for scope in IdentityScope
+        }
+        statement_members = len(batch.coverage.expected_statement_members)
+        covered_members = len(batch.coverage.covered_statement_members)
+        reconciled_orders = sum(
+            result.summary.identity_scope is not IdentityScope.UNRESOLVED
+            for result in batch.orders
+        )
+        merchandise_orders = sum(
+            result.summary.merchandise_reconciled for result in batch.orders
+        )
+        settlement_counts = {
+            basis: sum(
+                result.summary.settlement_basis is basis for result in batch.orders
+            )
+            for basis in SettlementBasis
+        }
+        summary = (
+            SummaryItem("Orders", f"{reconciled_orders} / {len(batch.orders)}"),
+            SummaryItem("Products", f"{covered_members} / {statement_members}"),
+            SummaryItem(
+                "Identity",
+                (
+                    f"{identity_members[IdentityScope.ITEM]} ITEM · "
+                    f"{identity_members[IdentityScope.GROUP]} GROUP · "
+                    f"{identity_members[IdentityScope.UNRESOLVED]} unresolved"
+                ),
+            ),
+            SummaryItem(
+                "Merchandise", f"{merchandise_orders} / {len(batch.orders)}"
+            ),
+            SummaryItem(
+                "Settlement",
+                (
+                    f"{settlement_counts[SettlementBasis.EXACT]} Exact · "
+                    f"{settlement_counts[SettlementBasis.EXPLAINED]} Explained · "
+                    f"{settlement_counts[SettlementBasis.NONE]} unexplained"
+                ),
+            ),
+            SummaryItem("Adjustment (separate)", batch.statement_adjustment_total),
+        )
+        for result in batch.orders:
+            order_id = result.evidence.order_id
+            order_summary = result.summary
+            if order_summary.identity_scope is IdentityScope.UNRESOLVED:
+                exceptions.append(
+                    ReconciliationException(
+                        status="Product identity unresolved",
+                        affected_item=order_id,
+                        evidence={
+                            "identity_scope": order_summary.identity_scope.value,
+                            "reasons": tuple(
+                                reason.value for reason in order_summary.reasons
+                            ),
+                        },
+                    )
+                )
+            if not order_summary.merchandise_reconciled:
+                exceptions.append(
+                    ReconciliationException(
+                        status="Merchandise not reconciled",
+                        affected_item=order_id,
+                    )
+                )
+            if order_summary.settlement_basis is SettlementBasis.NONE:
+                exceptions.append(
+                    ReconciliationException(
+                        status="Settlement unexplained",
+                        affected_item=order_id,
+                        evidence={
+                            "unexplained_residual": (
+                                result.evidence.settlement.unexplained_residual
+                            )
+                        },
+                    )
+                )
+        source_details.update(
+            {
+                "identity_member_counts": identity_members,
+                "settlement_counts": settlement_counts,
+                "statement_quantity_available": all(
+                    result.evidence.quantity.statement_quantity_available
+                    for result in batch.orders
+                ),
+            }
+        )
+
+    commit_reasons: tuple[str, ...]
+    if review.blockers:
+        commit_reasons = review.blockers
+    elif not review.commit_ready:
+        commit_reasons = (
+            "V2 review is complete, but formal V2 Statement persistence is not "
+            "available in this phase.",
+        )
+    else:
+        commit_reasons = ()
+    if review.commit_ready:
+        batch_status = "Ready to Commit"
+    elif review.ready:
+        batch_status = "Review Complete"
+    else:
+        batch_status = "Not Ready"
+    source_items = (
+        SummaryItem(
+            "Statement Period",
+            (
+                f"{statement.statement_period_from:%d/%m/%Y} – "
+                f"{statement.statement_period_to:%d/%m/%Y}"
+                if statement is not None
+                else "—"
+            ),
+        ),
+        SummaryItem("Review status", batch_status),
+        SummaryItem("Order Rows", len(statement.order_rows) if statement else 0),
+        SummaryItem("SKU Rows", len(statement.sku_rows) if statement else 0),
+        SummaryItem(
+            "Total Released", statement.summary_total_released if statement else "—"
+        ),
+        SummaryItem(
+            "Adjustment Total",
+            statement.adjustment_control_total if statement else "—",
+        ),
+    )
+    return ImportResult(
+        source_type=SHOPEE_WEEKLY_STATEMENT,
+        batch_status=batch_status,
+        source_summary=SourceSummary(
+            title="Shopee Weekly Statement result",
+            items=source_items,
+            empty_message=(
+                "Upload a native Shopee Weekly Statement .xlsx file to begin validation."
+            ),
+        ),
+        validation=ValidationResult(
+            blocking_issues=tuple(validation_blockers),
+            warnings=warnings,
+        ),
+        reconciliation=ReconciliationResult(
+            available=batch is not None,
+            status="Available" if batch is not None else "Not Available",
+            summary=summary,
+            exceptions=tuple(exceptions),
+            source_specific_details=source_details,
+        ),
+        commit_readiness=CommitReadiness(
+            ready=review.commit_ready,
+            status="Ready to Commit" if review.commit_ready else "Not Ready",
+            reasons=commit_reasons,
+            database_commit_available=review.commit_ready,
+        ),
+        session_state=SessionState(
+            applied_to_current_session=bool(batch_id),
+            label="Applied to Current Session" if batch_id else "No Active Session Batch",
             batch_id=batch_id,
         ),
         source_specific_details=source_details,
