@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +15,7 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
     SettlementIncomeRow,
+    SourceValueIssue,
 )
 from src.invoice_app.repositories.historical_invoice_repository import (
     InMemoryHistoricalInvoiceRepository,
@@ -263,6 +265,37 @@ def test_legacy_different_is_v2_explained_and_does_not_block_review(monkeypatch)
     assert review.stage.order_reconciliations[0].status == "Different"
     assert review.ready is True
     assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXPLAINED"
+
+
+def test_unrelated_source_issue_stays_blocking_without_blanketing_settlement(monkeypatch):
+    statement = replace(
+        _statement(),
+        source_value_issues=(
+            SourceValueIssue(
+                code="unrecognized_income_row",
+                sheet="Income",
+                row_number=742,
+                column="View By",
+                message="Income row 742 has invalid or missing View By: ''.",
+            ),
+        ),
+    )
+
+    review, _, _ = _review(monkeypatch, statement=statement)
+    presentation = adapt_shopee_weekly_statement_import_result(
+        review.stage,
+        batch_id=review.batch_id,
+        review=review,
+    )
+    settlement = {
+        item.label: item.value for item in presentation.reconciliation.summary
+    }["Settlement"]
+
+    assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXACT"
+    assert review.reconciliation_v2.orders[0].evidence.settlement.unexplained_residual == Decimal("0.00")
+    assert len(presentation.validation.blocking_issues) == 1
+    assert "Income row 742" in presentation.validation.blocking_issues[0].reason
+    assert settlement == "1 Exact · 0 Explained · 0 unexplained"
 
 
 def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):

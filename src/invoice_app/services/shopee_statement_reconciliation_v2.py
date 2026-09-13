@@ -176,7 +176,6 @@ def evaluate_statement_reconciliation(
         settlement = _evaluate_settlement(
             order,
             order_rows.get(order_id),
-            statement_controls_valid=not validation,
             tolerance=tolerance,
         )
         refund = _refund_evidence(order, order_rows.get(order_id), contexts, identities)
@@ -938,11 +937,10 @@ def _evaluate_settlement(
     order: CanonicalInvoiceOrder | None,
     order_row: SettlementIncomeRow | None,
     *,
-    statement_controls_valid: bool,
     tolerance: Decimal,
 ) -> SettlementEvidence:
     source_state = (order.income_type or "").strip() if order is not None else ""
-    if order is None or order_row is None or not statement_controls_valid:
+    if order is None or order_row is None:
         return _empty_settlement(order, order_row, tolerance, source_state)
     if source_state.casefold() not in {"final", "estimated"}:
         return _empty_settlement(order, order_row, tolerance, source_state)

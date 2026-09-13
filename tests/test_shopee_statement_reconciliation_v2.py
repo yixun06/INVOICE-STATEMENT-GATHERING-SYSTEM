@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -18,6 +19,7 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
     SettlementIncomeRow,
+    SourceValueIssue,
 )
 from src.invoice_app.services.shopee_statement_item_matching import (
     MappingProductFamilyResolver,
@@ -395,6 +397,34 @@ def test_estimated_component_difference_fully_explained():
 
     assert result.summary.settlement_basis is SettlementBasis.EXPLAINED
     assert result.evidence.settlement.unexplained_residual == ZERO
+
+
+def test_unrelated_statement_source_issue_does_not_erase_valid_order_settlement():
+    statement = replace(
+        _statement((_sku_row(),)),
+        source_value_issues=(
+            SourceValueIssue(
+                code="unrecognized_income_row",
+                sheet="Income",
+                row_number=742,
+                column="View By",
+                message="Income row 742 has invalid or missing View By: ''.",
+            ),
+        ),
+    )
+
+    batch = evaluate_statement_reconciliation(
+        statement,
+        (_order(),),
+        (_item(0),),
+        product_families=_resolver(_family()),
+    )
+    result = batch.orders[0]
+
+    assert batch.statement_validation_issues
+    assert result.summary.settlement_basis is SettlementBasis.EXACT
+    assert result.evidence.settlement.unexplained_residual == ZERO
+    assert ReconciliationReason.SOURCE_EVIDENCE_INSUFFICIENT in result.summary.reasons
 
 
 def test_late_statement_refund_explains_estimated_settlement_without_mutation():
