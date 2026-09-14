@@ -7,6 +7,7 @@ INVOICE_ORDERS_TAB = "Invoice_Orders"
 INVOICE_ITEMS_TAB = "Invoice_Items"
 STATEMENT_DATA_TAB = "Statement_Data"
 STATEMENT_FINANCIAL_COMPONENTS_TAB = "Statement_Financial_Components"
+STATEMENT_SUMMARY_TAB = "Statement_Summary"
 
 # This is retained only for the one-time, explicitly approved schema migration.
 LEGACY_INVOICE_ORDERS_HEADERS = (
@@ -56,6 +57,14 @@ STATEMENT_FINANCIAL_COMPONENT_HEADERS = (
     "commit_status",
 )
 
+STATEMENT_SUMMARY_HEADERS = (
+    "statement_batch_id", "statement_file_hash", "platform",
+    "statement_period_from", "statement_period_to", "statement_source_sheet",
+    "statement_source_row_number", "native_label", "line_type",
+    "parent_source_row_number", "component_amount", "currency", "committed_at",
+    "commit_status",
+)
+
 
 assert len(LEGACY_INVOICE_ORDERS_HEADERS) == 39
 assert len(PRE_FINANCIAL_INVOICE_ORDERS_HEADERS) == 40
@@ -65,3 +74,4 @@ assert len(PRE_FINANCIAL_INVOICE_ITEMS_HEADERS) == 19
 assert len(INVOICE_ITEMS_HEADERS) == 22
 assert len(STATEMENT_DATA_HEADERS) == 40
 assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
+assert len(STATEMENT_SUMMARY_HEADERS) == 14

@@ -43,6 +43,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_SUMMARY_HEADERS,
 )
 
 
@@ -354,6 +355,7 @@ def test_runtime_refund_quantity_is_not_persisted_or_fingerprinted(
     assert len(INVOICE_ITEMS_HEADERS) == 22
     assert len(STATEMENT_DATA_HEADERS) == 40
     assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
+    assert len(STATEMENT_SUMMARY_HEADERS) == 14
 
 
 def test_parsed_refund_source_cannot_rewrite_a_closed_invoice(

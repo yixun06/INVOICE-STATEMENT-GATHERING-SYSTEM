@@ -11,12 +11,14 @@ from xml.etree import ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+from openpyxl import load_workbook
 
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     INCOME_REQUIRED_COLUMNS,
     _parse_income_rows,
     parse_shopee_weekly_statement,
+    WeeklyStatementParseError,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     NEEDS_REVIEW,
@@ -74,6 +76,59 @@ def test_native_shopee_export_dimension_fallback_and_contract(parsed_sample):
     assert parsed_sample.adjustment_control_total == Decimal("-126.63")
     assert parsed_sample.source_value_issues == ()
     assert parsed_sample.file_hash == sha256(SAMPLE.read_bytes()).hexdigest()
+
+
+def test_native_summary_preserves_approved_lines_hierarchy_currency_and_money(parsed_sample):
+    lines = {line.native_label: line for line in parsed_sample.summary_lines}
+
+    assert len(parsed_sample.summary_lines) == 32
+    assert "Income Summary" not in lines
+    assert lines["1. Total Revenue"].line_type == "TOTAL"
+    assert lines["Merchandise Subtotal"].line_type == "SUBTOTAL"
+    assert lines["Original product price"].line_type == "DETAIL"
+    assert lines["Other Reference Values"].line_type == "SECTION_HEADER"
+    assert lines["Shipping Fee Promotion by Seller"].line_type == "REFERENCE"
+    assert lines["Original product price"].parent_source_row_number == lines["Merchandise Subtotal"].statement_source_row_number
+    assert lines["Shipping Fee Promotion by Seller"].parent_source_row_number == lines["Other Reference Values"].statement_source_row_number
+    assert lines["Other Reference Values"].component_amount is None
+    assert lines["Rebate Provided by Shopee"].component_amount == Decimal("0.00")
+    assert lines["Your Seller product promotion"].component_amount < 0
+    assert all(line.currency == "RM" for line in parsed_sample.summary_lines)
+
+
+def _summary_mutation(mutator):
+    workbook = load_workbook(BytesIO(SAMPLE.read_bytes()))
+    mutator(workbook["Summary"])
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "mutator, message",
+    [
+        (lambda sheet: setattr(sheet["C16"], "value", None), "must contain exactly one amount"),
+        (lambda sheet: setattr(sheet["B16"], "value", "Unknown Seller Charge"), "Unsupported meaningful Summary line"),
+        (lambda sheet: setattr(sheet["B16"], "value", None), "Unsupported meaningful Summary line"),
+        (lambda sheet: (setattr(sheet["A16"], "value", sheet["B16"].value), setattr(sheet["B16"], "value", None)), "hierarchy is unsupported"),
+    ],
+)
+def test_native_summary_unsupported_or_missing_source_fails_closed(mutator, message):
+    with pytest.raises(WeeklyStatementParseError, match=message):
+        parse_shopee_weekly_statement(
+            _summary_mutation(mutator), source_filename=SAMPLE.name
+        )
+
+
+def test_native_summary_allows_row_shift_and_blank_spacers_without_fixed_coordinates():
+    shifted = _summary_mutation(lambda sheet: sheet.insert_rows(14, 2))
+    parsed = parse_shopee_weekly_statement(shifted, source_filename=SAMPLE.name)
+
+    assert len(parsed.summary_lines) == 32
+    assert next(
+        line for line in parsed.summary_lines
+        if line.native_label == "1. Total Revenue"
+    ).statement_source_row_number == 16
 
 
 def test_native_sample_requires_review_when_target_orders_are_unmatched(

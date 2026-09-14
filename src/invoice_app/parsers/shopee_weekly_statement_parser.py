@@ -53,6 +53,50 @@ ADJUSTMENT_REQUIRED_COLUMNS = (
 
 
 @dataclass(frozen=True)
+class _SummaryLineSpec:
+    native_label: str
+    line_type: str
+    parent_label: str | None
+    label_column_index: int
+
+
+_SUMMARY_LINE_SPECS = (
+    _SummaryLineSpec("1. Total Revenue", "TOTAL", None, 0),
+    _SummaryLineSpec("Merchandise Subtotal", "SUBTOTAL", "1. Total Revenue", 0),
+    _SummaryLineSpec("Original product price", "DETAIL", "Merchandise Subtotal", 1),
+    _SummaryLineSpec("Your Seller product promotion", "DETAIL", "Merchandise Subtotal", 1),
+    _SummaryLineSpec("Refund Amount", "DETAIL", "Merchandise Subtotal", 1),
+    _SummaryLineSpec("Voucher & Rebates", "SUBTOTAL", "1. Total Revenue", 0),
+    _SummaryLineSpec("Rebate Provided by Shopee", "DETAIL", "Voucher & Rebates", 1),
+    _SummaryLineSpec("Voucher Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
+    _SummaryLineSpec("Cofund Voucher Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
+    _SummaryLineSpec("Coin Cashback Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
+    _SummaryLineSpec("Cofund Coin Cashback Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
+    _SummaryLineSpec("2. Total Expenses", "TOTAL", None, 0),
+    _SummaryLineSpec("Shipping Subtotal", "SUBTOTAL", "2. Total Expenses", 0),
+    _SummaryLineSpec("Shipping Fee Paid by Buyer (excl. SST)", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Shipping Fee Discount from 3PL", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Shipping Rebate From Shopee", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Seller Paid Shipping Fee SST", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Actual Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Reverse Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Reverse Shipping Fee SST", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Saver Programme Shipping Fee Savings", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Return to Seller Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
+    _SummaryLineSpec("Fees & Charges", "SUBTOTAL", "2. Total Expenses", 0),
+    _SummaryLineSpec("AMS Commission Fee", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("Commission Fee (incl. SST)", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("Service Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("Saver Programme Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("Transaction Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("Ads Escrow Top Up Fee", "DETAIL", "Fees & Charges", 1),
+    _SummaryLineSpec("3. Total Released Amount", "TOTAL", None, 0),
+    _SummaryLineSpec("Other Reference Values", "SECTION_HEADER", None, 0),
+    _SummaryLineSpec("Shipping Fee Promotion by Seller", "REFERENCE", "Other Reference Values", 0),
+)
+
+
+@dataclass(frozen=True)
 class SourceValueIssue:
     code: str
     sheet: str
@@ -109,6 +153,19 @@ class SettlementAdjustment:
 
 
 @dataclass(frozen=True)
+class StatementSummaryLine:
+    """One meaningful native line from the Shopee Statement Summary sheet."""
+
+    statement_source_sheet: str
+    statement_source_row_number: int
+    native_label: str
+    line_type: str
+    parent_source_row_number: int | None
+    component_amount: Decimal | None
+    currency: str
+
+
+@dataclass(frozen=True)
 class ParsedShopeeWeeklyStatement:
     source_filename: str
     file_hash: str
@@ -123,6 +180,7 @@ class ParsedShopeeWeeklyStatement:
     adjustments: tuple[SettlementAdjustment, ...]
     source_value_issues: tuple[SourceValueIssue, ...]
     dimension_fallback_sheets: tuple[str, ...]
+    summary_lines: tuple[StatementSummaryLine, ...] = ()
 
     @property
     def order_rows(self) -> tuple[SettlementIncomeRow, ...]:
@@ -194,9 +252,8 @@ def parse_shopee_weekly_statement(
         )
         period_from = _required_label_date(summary_rows, "From", "Summary")
         period_to = _required_label_date(summary_rows, "to", "Summary")
-        summary_total = _required_label_decimal(
-            summary_rows, "3. Total Released Amount", "Summary"
-        )
+        summary_lines = _parse_summary_lines(summary_rows)
+        summary_total = _summary_amount(summary_lines, "3. Total Released Amount")
         adjustment_control = _required_label_decimal(
             adjustment_rows, "Total Adjustment Amount", "Adjustment"
         )
@@ -229,6 +286,7 @@ def parse_shopee_weekly_statement(
         adjustments=tuple(parsed_adjustments),
         source_value_issues=tuple(issues),
         dimension_fallback_sheets=tuple(fallback_sheets),
+        summary_lines=tuple(summary_lines),
     )
 
 
@@ -393,6 +451,139 @@ def _required_label_decimal(
 
 def _optional_label_decimal(rows: list[tuple[Any, ...]], label: str) -> Decimal | None:
     return _parse_decimal(_find_label_value(rows, label))
+
+
+def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLine]:
+    """Parse only the reviewed native Summary hierarchy, preserving its labels."""
+
+    anchor_matches = [
+        (row_number, column_number)
+        for row_number, row in enumerate(rows, start=1)
+        for column_number, value in enumerate(row)
+        if _normalize_header(value) == _normalize_header("Income Summary")
+    ]
+    if len(anchor_matches) != 1:
+        raise WeeklyStatementParseError(
+            "Summary must contain exactly one 'Income Summary' anchor."
+        )
+    anchor_row, anchor_column = anchor_matches[0]
+    anchor_values = rows[anchor_row - 1]
+    currency_values = [
+        _text(value)
+        for value in anchor_values[anchor_column + 1:]
+        if _text(value)
+    ]
+    if len(currency_values) != 1:
+        raise WeeklyStatementParseError(
+            "Summary Income Summary anchor must contain exactly one source currency."
+        )
+    currency = currency_values[0]
+
+    specs_by_label = {
+        _normalize_header(spec.native_label): spec for spec in _SUMMARY_LINE_SPECS
+    }
+    found: dict[str, tuple[_SummaryLineSpec, int, str, Decimal | None]] = {}
+    for row_number, row in enumerate(rows[anchor_row:], start=anchor_row + 1):
+        populated = [
+            (column_number, value)
+            for column_number, value in enumerate(row)
+            if _text(value)
+        ]
+        if not populated:
+            continue
+        matched = [
+            (column_number, value, specs_by_label.get(_normalize_header(value)))
+            for column_number, value in populated
+            if specs_by_label.get(_normalize_header(value)) is not None
+        ]
+        if not matched:
+            raise WeeklyStatementParseError(
+                f"Unsupported meaningful Summary line at row {row_number}."
+            )
+        if len(matched) != 1:
+            raise WeeklyStatementParseError(
+                f"Summary row {row_number} contains more than one supported financial meaning."
+            )
+        label_column, raw_label, spec = matched[0]
+        assert spec is not None
+        normalized_label = _normalize_header(spec.native_label)
+        if normalized_label in found:
+            raise WeeklyStatementParseError(
+                f"Summary contains a contradictory duplicate line: {spec.native_label!r}."
+            )
+        if label_column != spec.label_column_index:
+            raise WeeklyStatementParseError(
+                f"Summary hierarchy is unsupported for {spec.native_label!r} at row {row_number}."
+            )
+        remaining = [
+            value for column_number, value in populated if column_number != label_column
+        ]
+        if spec.line_type == "SECTION_HEADER":
+            if remaining:
+                raise WeeklyStatementParseError(
+                    f"Summary section header {spec.native_label!r} must not contain an amount."
+                )
+            amount = None
+        else:
+            if len(remaining) != 1:
+                raise WeeklyStatementParseError(
+                    f"Summary monetary line {spec.native_label!r} must contain exactly one amount."
+                )
+            amount = _parse_decimal(remaining[0])
+            if amount is None:
+                raise WeeklyStatementParseError(
+                    f"Summary monetary line {spec.native_label!r} has no valid amount."
+                )
+        found[normalized_label] = (spec, row_number, _text(raw_label), amount)
+
+    expected_labels = tuple(_normalize_header(spec.native_label) for spec in _SUMMARY_LINE_SPECS)
+    missing = [
+        spec.native_label
+        for spec in _SUMMARY_LINE_SPECS
+        if _normalize_header(spec.native_label) not in found
+    ]
+    if missing:
+        raise WeeklyStatementParseError(
+            "Summary is missing required native line(s): " + ", ".join(missing)
+        )
+    positions = [found[label][1] for label in expected_labels]
+    if positions != sorted(positions):
+        raise WeeklyStatementParseError("Summary native line order is unsupported.")
+
+    result: list[StatementSummaryLine] = []
+    for spec in _SUMMARY_LINE_SPECS:
+        normalized_label = _normalize_header(spec.native_label)
+        _, row_number, native_label, amount = found[normalized_label]
+        parent_row = (
+            found[_normalize_header(spec.parent_label)][1]
+            if spec.parent_label is not None
+            else None
+        )
+        result.append(StatementSummaryLine(
+            statement_source_sheet="Summary",
+            statement_source_row_number=row_number,
+            native_label=native_label,
+            line_type=spec.line_type,
+            parent_source_row_number=parent_row,
+            component_amount=amount,
+            currency=currency,
+        ))
+    return result
+
+
+def _summary_amount(
+    summary_lines: list[StatementSummaryLine], native_label: str
+) -> Decimal:
+    matches = [
+        line.component_amount
+        for line in summary_lines
+        if _normalize_header(line.native_label) == _normalize_header(native_label)
+    ]
+    if len(matches) != 1 or matches[0] is None:
+        raise WeeklyStatementParseError(
+            f"Cannot read required Summary amount {native_label!r}."
+        )
+    return matches[0]
 
 
 def _parse_date(value: Any) -> date | None:

@@ -23,8 +23,8 @@ Shopee Weekly Statement
 
 - Deterministic Shopee, Lazada, and ZENXIN Invoice PDF extraction and
   validation, Product Master enrichment, and Invoice persistence.
-- Shopee Weekly Statement native-XLSX ingestion, source validation, detailed
-  financial-component evidence, and Reconciliation V2.
+- Shopee Weekly Statement native-XLSX ingestion, source validation, native
+  Summary and detailed financial-component evidence, and Reconciliation V2.
 - The real Streamlit path: Statement upload → review → V2 evaluator → adapter
   → UI.
 - V2-aware Statement Commit: fresh authoritative reads under the shared commit
@@ -62,7 +62,7 @@ not production logic:
 | Settlement | 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE` |
 | Unexplained residual | RM0.00 |
 | Separate Adjustment total | RM122.20 |
-| Commit plan | 740 `Statement_Data` rows; 15,965 component rows |
+| Commit plan | 740 `Statement_Data` rows; 15,965 component rows; 32 native Summary rows |
 
 Statement quantity is absent from the authoritative source, so the benchmark
 makes no quantity-match claim.
@@ -70,11 +70,14 @@ makes no quantity-match claim.
 ## Persistence
 
 Approved schema widths remain unchanged: `Invoice_Orders` 44,
-`Invoice_Items` 22, `Statement_Data` 40, and
-`Statement_Financial_Components` 17 columns. The Golden Statement write is one
-atomic `values.batchUpdate` request (known serialized size: 5,445,750 bytes,
-about 5.19 MiB), followed by readback. `ITEM` enriches only the proven item;
-`GROUP` persists Statement evidence without Invoice-item enrichment.
+`Invoice_Items` 22, `Statement_Data` 40,
+`Statement_Financial_Components` 17, and `Statement_Summary` 14 columns.
+`Statement_Summary` preserves native Summary label, hierarchy reference, money,
+and currency without reconstructing financial semantics. The Golden Statement
+write is one atomic `values.batchUpdate` request (expected serialized size:
+5,453,516 bytes, about 5.20 MiB), followed by readback. `ITEM` enriches only
+the proven item; `GROUP` persists Statement evidence without Invoice-item
+enrichment.
 
 ## Current Priorities
 

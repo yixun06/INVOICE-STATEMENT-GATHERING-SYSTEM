@@ -17,6 +17,7 @@ from src.invoice_app.domain.statement_reconciliation_v2 import (
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
+    StatementSummaryLine,
     SettlementAdjustment,
     SettlementIncomeRow,
     SourceValueIssue,
@@ -122,6 +123,12 @@ def _statement(
         adjustments=adjustments,
         source_value_issues=(),
         dimension_fallback_sheets=(),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "3. Total Released Amount", "TOTAL", None,
+                total, "RM",
+            ),
+        ),
     )
 
 

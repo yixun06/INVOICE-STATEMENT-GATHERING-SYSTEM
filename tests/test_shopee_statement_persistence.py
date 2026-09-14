@@ -15,6 +15,7 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
     SettlementIncomeRow,
+    StatementSummaryLine,
 )
 from src.invoice_app.services.shopee_statement_item_matching import (
     StatementItemMatch,
@@ -37,6 +38,9 @@ from src.invoice_app.services.application_commit_lock import (
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     stage_parsed_shopee_weekly_statement,
+)
+from src.invoice_app.services.uat2_persistence_schema import (
+    STATEMENT_SUMMARY_HEADERS,
 )
 
 
@@ -68,6 +72,12 @@ def _statement(*, sku_rows=1, adjustments=True):
         adjustment_footer_total=None, income_rows=(order, *skus), service_fee_details=(),
         shipping_fee_discrepancies=(), adjustments=adjustment_rows,
         source_value_issues=(), dimension_fallback_sheets=(),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "3. Total Released Amount", "TOTAL", None,
+                Decimal("10.00"), "RM",
+            ),
+        ),
     )
 
 
@@ -113,6 +123,41 @@ def test_statement_data_headers_are_exact_approved_40_column_order():
     assert STATEMENT_DATA_HEADERS[-4:] == (
         "difference", "reconciliation_status", "matched_item_index", "match_method"
     )
+
+
+def test_native_summary_rows_use_the_exact_approved_14_column_schema():
+    plan = _plan()
+    positions = {name: index for index, name in enumerate(STATEMENT_SUMMARY_HEADERS)}
+
+    assert len(STATEMENT_SUMMARY_HEADERS) == 14
+    assert len(plan.summary_rows) == 1
+    assert len(plan.summary_rows[0]) == 14
+    assert plan.summary_rows[0][positions["native_label"]] == "3. Total Released Amount"
+    assert plan.summary_rows[0][positions["line_type"]] == "TOTAL"
+    assert plan.summary_rows[0][positions["component_amount"]] == "10.00"
+    assert plan.summary_rows[0][positions["currency"]] == "RM"
+    assert plan.summary_rows[0][positions["commit_status"]] == "COMMITTED"
+
+
+def test_native_summary_serialization_preserves_zero_and_section_header_null():
+    statement = replace(
+        _statement(),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "Rebate Provided by Shopee", "DETAIL", 20,
+                Decimal("0.00"), "RM",
+            ),
+            StatementSummaryLine(
+                "Summary", 41, "Other Reference Values", "SECTION_HEADER",
+                None, None, "RM",
+            ),
+        ),
+    )
+    plan = _plan(statement=statement)
+    positions = {name: index for index, name in enumerate(STATEMENT_SUMMARY_HEADERS)}
+
+    assert plan.summary_rows[0][positions["component_amount"]] == "0.00"
+    assert plan.summary_rows[1][positions["component_amount"]] == ""
 
 
 def test_order_sku_adjustment_rows_serialize_in_schema_order():

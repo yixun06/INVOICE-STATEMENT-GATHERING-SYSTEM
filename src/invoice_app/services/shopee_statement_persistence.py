@@ -32,6 +32,7 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ShippingFeeDiscrepancy,
     ServiceFeeDetail,
     SettlementIncomeRow,
+    StatementSummaryLine,
 )
 from src.invoice_app.services.shopee_statement_item_matching import (
     StatementItemMatch,
@@ -46,6 +47,7 @@ from src.invoice_app.services.application_commit_lock import (
 from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_DATA_HEADERS,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_SUMMARY_HEADERS,
 )
 from src.invoice_app.services.statement_reconciliation import (
     MISSING_COMPARISON_EVIDENCE,
@@ -129,6 +131,7 @@ class StatementCommitPlan:
     order_comparisons: tuple[StatementOrderComparison, ...]
     invoice_order_updates: tuple[InvoiceOrderStatementUpdate, ...]
     invoice_item_updates: tuple[InvoiceItemStatementUpdate, ...]
+    summary_rows: tuple[tuple[str, ...], ...] = ()
     protected_invoice_items: tuple[ProtectedInvoiceItemStatementFields, ...] = ()
     invoice_snapshot_sha256: str | None = None
 
@@ -220,6 +223,7 @@ def prepare_statement_commit_plan(
     rows.extend(sku_rows)
     rows.extend(_adjustment_row(statement, audit, adjustment) for adjustment in statement.adjustments)
     financial_component_rows = _financial_component_rows(statement, audit)
+    summary_rows = _summary_rows(statement, audit)
 
     duplicate_keys = {key for key, count in Counter(matched_item_keys).items() if count > 1}
     item_updates = []
@@ -257,6 +261,7 @@ def prepare_statement_commit_plan(
         order_comparisons=comparisons,
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
+        summary_rows=summary_rows,
     )
 
 
@@ -542,6 +547,7 @@ def prepare_v2_statement_commit_plan(
         order_comparisons=comparison_tuple,
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
+        summary_rows=_summary_rows(statement, audit),
         protected_invoice_items=tuple(
             group_targets[key] for key in sorted(group_targets)
         ),
@@ -840,6 +846,86 @@ def _required_business_match_method(method: str | None) -> str:
 
 def _serialize_statement_row(values: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(_serialize(values.get(header)) for header in STATEMENT_DATA_HEADERS)
+
+
+_SUMMARY_LINE_TYPES = {
+    "TOTAL", "SUBTOTAL", "DETAIL", "REFERENCE", "SECTION_HEADER",
+}
+
+
+def _summary_rows(
+    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+) -> tuple[tuple[str, ...], ...]:
+    if not statement.summary_lines:
+        raise StatementCommitBlocked("Statement has no parsed native Summary lines.")
+    rows = tuple(
+        _summary_row(statement, audit, line)
+        for line in statement.summary_lines
+    )
+    _validate_summary_rows(rows)
+    return rows
+
+
+def _summary_row(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    line: StatementSummaryLine,
+) -> tuple[str, ...]:
+    values = {
+        "statement_batch_id": audit.statement_batch_id,
+        "statement_file_hash": statement.file_hash,
+        "platform": "Shopee",
+        "statement_period_from": statement.statement_period_from,
+        "statement_period_to": statement.statement_period_to,
+        "statement_source_sheet": line.statement_source_sheet,
+        "statement_source_row_number": line.statement_source_row_number,
+        "native_label": line.native_label,
+        "line_type": line.line_type,
+        "parent_source_row_number": line.parent_source_row_number,
+        "component_amount": line.component_amount,
+        "currency": line.currency,
+        "committed_at": audit.committed_at,
+        "commit_status": "COMMITTED",
+    }
+    return tuple(_serialize(values.get(header)) for header in STATEMENT_SUMMARY_HEADERS)
+
+
+def _validate_summary_rows(rows: Sequence[tuple[str, ...]]) -> None:
+    positions = {
+        header: index for index, header in enumerate(STATEMENT_SUMMARY_HEADERS)
+    }
+    identities: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if len(row) != len(STATEMENT_SUMMARY_HEADERS):
+            raise StatementCommitBlocked(
+                "Statement Summary rows do not match the exact approved schema."
+            )
+        identity = tuple(
+            row[positions[header]]
+            for header in (
+                "statement_batch_id", "statement_source_sheet",
+                "statement_source_row_number",
+            )
+        )
+        if not all(identity):
+            raise StatementCommitBlocked("Statement Summary row has incomplete stable identity.")
+        if identity in identities:
+            raise StatementCommitBlocked(
+                "Statement Summary plan contains duplicate stable identity: "
+                + "/".join(identity)
+            )
+        identities.add(identity)
+        line_type = row[positions["line_type"]]
+        amount = row[positions["component_amount"]]
+        if line_type not in _SUMMARY_LINE_TYPES:
+            raise StatementCommitBlocked(f"Unsupported Statement Summary line type: {line_type!r}.")
+        if line_type == "SECTION_HEADER":
+            if amount:
+                raise StatementCommitBlocked("Statement Summary section header must not contain an amount.")
+        elif not amount:
+            raise StatementCommitBlocked("Statement Summary monetary row is missing an amount.")
+        if not row[positions["native_label"]] or not row[positions["currency"]]:
+            raise StatementCommitBlocked("Statement Summary row lacks native label or currency.")
 
 
 _COMPONENT_RECORD_TYPES = {

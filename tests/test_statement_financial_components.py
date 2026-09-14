@@ -8,6 +8,7 @@ from src.invoice_app.domain.historical_invoice import CanonicalInvoiceOrder
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
+    StatementSummaryLine,
     ServiceFeeDetail,
     SettlementIncomeRow,
     ShippingFeeDiscrepancy,
@@ -100,6 +101,12 @@ def _statement(*, sku_rows: int = 1) -> ParsedShopeeWeeklyStatement:
         adjustments=(),
         source_value_issues=(),
         dimension_fallback_sheets=(),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "3. Total Released Amount", "TOTAL", None,
+                Decimal("10.00"), "RM",
+            ),
+        ),
     )
 
 

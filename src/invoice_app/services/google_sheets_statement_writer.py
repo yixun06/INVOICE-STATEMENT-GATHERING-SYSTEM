@@ -46,6 +46,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_DATA_TAB,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
     STATEMENT_FINANCIAL_COMPONENTS_TAB,
+    STATEMENT_SUMMARY_HEADERS,
+    STATEMENT_SUMMARY_TAB,
 )
 
 
@@ -100,6 +102,12 @@ class _FinancialComponentTarget:
 
 
 @dataclass(frozen=True)
+class _StatementSummaryTarget:
+    row_index: int
+    values: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class _WriterSnapshot:
     sheet_ids: Mapping[str, int]
     orders: Mapping[tuple[str, str], _OrderTarget]
@@ -108,6 +116,8 @@ class _WriterSnapshot:
     statement_append_row_index: int
     financial_component_rows: tuple[_FinancialComponentTarget, ...]
     financial_component_append_row_index: int
+    summary_rows: tuple[_StatementSummaryTarget, ...]
+    summary_append_row_index: int
     commit_state: StatementCommitState
 
 
@@ -161,6 +171,7 @@ class GoogleSheetsStatementWriter:
                 INVOICE_ITEMS_TAB,
                 STATEMENT_DATA_TAB,
                 STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                STATEMENT_SUMMARY_TAB,
             )
             sheet_ids = self._gateway.read_sheet_ids(
                 self._spreadsheet_id, required_tabs
@@ -182,6 +193,9 @@ class GoogleSheetsStatementWriter:
             tabs,
             STATEMENT_FINANCIAL_COMPONENTS_TAB,
             STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+        )
+        summary_rows = _rows_with_positions(
+            tabs, STATEMENT_SUMMARY_TAB, STATEMENT_SUMMARY_HEADERS
         )
 
         orders: dict[tuple[str, str], _OrderTarget] = {}
@@ -233,6 +247,11 @@ class GoogleSheetsStatementWriter:
             financial_component_append_row_index=_append_row_index(
                 tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]
             ),
+            summary_rows=tuple(
+                _StatementSummaryTarget(row_index, values)
+                for row_index, values in summary_rows
+            ),
+            summary_append_row_index=_append_row_index(tabs[STATEMENT_SUMMARY_TAB]),
             commit_state=commit_state,
         )
 
@@ -241,6 +260,7 @@ class GoogleSheetsStatementWriter:
     ) -> tuple[Mapping[str, Any], ...]:
         _validate_incoming_statement_identities(plan, snapshot)
         _validate_incoming_financial_component_identities(plan, snapshot)
+        _validate_incoming_summary_identities(plan, snapshot)
         data: list[Mapping[str, Any]] = [
             _value_range(
                 STATEMENT_DATA_TAB,
@@ -253,6 +273,12 @@ class GoogleSheetsStatementWriter:
                 snapshot.financial_component_append_row_index,
                 0,
                 plan.financial_component_rows,
+            ),
+            _value_range(
+                STATEMENT_SUMMARY_TAB,
+                snapshot.summary_append_row_index,
+                0,
+                plan.summary_rows,
             ),
         ]
         seen_orders: set[tuple[str, str]] = set()
@@ -375,7 +401,7 @@ def _committed_statement_references(
 def _append_row_index(rows: Sequence[Sequence[Any]]) -> int:
     populated = [index for index, row in enumerate(rows) if any(_text(value) for value in row)]
     if not populated:
-        raise StatementCommitBlocked("Statement_Data header is missing.")
+        raise StatementCommitBlocked("Statement persistence tab header is missing.")
     return max(populated) + 1
 
 
@@ -440,6 +466,37 @@ def _validate_incoming_financial_component_identities(
     if collisions:
         raise StatementCommitBlocked(
             "Statement_Financial_Components already contains planned stable identity: "
+            + ", ".join("/".join(identity) for identity in collisions[:5])
+        )
+
+
+def _validate_incoming_summary_identities(
+    plan: StatementCommitPlan, snapshot: _WriterSnapshot
+) -> None:
+    positions = {
+        header: index for index, header in enumerate(STATEMENT_SUMMARY_HEADERS)
+    }
+    identity_fields = (
+        "statement_batch_id", "statement_source_sheet", "statement_source_row_number",
+    )
+    existing = {
+        tuple(_text(target.values[positions[field]]) for field in identity_fields)
+        for target in snapshot.summary_rows
+    }
+    incoming = [
+        tuple(_text(row[positions[field]]) for field in identity_fields)
+        for row in plan.summary_rows
+    ]
+    if not incoming:
+        raise StatementCommitBlocked("Statement plan has no native Summary rows.")
+    if any(not all(identity) for identity in incoming):
+        raise StatementCommitBlocked("Statement Summary plan has incomplete stable identity.")
+    if len(set(incoming)) != len(incoming):
+        raise StatementCommitBlocked("Statement Summary plan contains duplicate stable identity.")
+    collisions = sorted(set(incoming) & existing)
+    if collisions:
+        raise StatementCommitBlocked(
+            "Statement_Summary already contains planned stable identity: "
             + ", ".join("/".join(identity) for identity in collisions[:5])
         )
 
@@ -719,6 +776,16 @@ def _classify_write_result(
     )
     no_components = all(after_components[row] == 0 for row in expected_components)
 
+    expected_summary = Counter(plan.summary_rows)
+    after_summary = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.summary_rows
+    )
+    all_summary = bool(expected_summary) and all(
+        after_summary[row] == count for row, count in expected_summary.items()
+    )
+    no_summary = all(after_summary[row] == 0 for row in expected_summary)
+
     expected_targets = _expected_target_values(plan)
     all_enrichments = True
     no_enrichments = True
@@ -732,6 +799,7 @@ def _classify_write_result(
     if (
         all_statements
         and all_components
+        and all_summary
         and all_enrichments
         and protected_unchanged
     ):
@@ -739,6 +807,7 @@ def _classify_write_result(
     if (
         no_statements
         and no_components
+        and no_summary
         and no_enrichments
         and protected_unchanged
     ):

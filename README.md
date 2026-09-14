@@ -18,8 +18,9 @@ database.
 - Shopee / Lazada / ZENXIN independent tabs with platform-specific columns
 - Platform-level Excel export with `Summary`, `Orders`, and `Products` sheets
 - Batch-specific archive storage and review handling
-- Shopee Weekly Statement native-XLSX ingestion, financial-component evidence,
-  Reconciliation V2, guarded Commit, and readback verification
+- Shopee Weekly Statement native-XLSX ingestion, native Summary and
+  financial-component evidence, Reconciliation V2, guarded Commit, and
+  readback verification
 - Committed-period Weekly Billing Product Summary preview and Excel export
 
 ## Current Shopee reconciliation model
@@ -89,9 +90,11 @@ no quantity-match claim is made.
 - Manual review is generated only for non-deterministic or failed parsing cases.
 - Manual review items are exported in a separate review report.
 - Google Sheets UAT schemas are locked at 44 `Invoice_Orders`, 22
-  `Invoice_Items`, 40 `Statement_Data`, and 17
-  `Statement_Financial_Components` columns. Do not change schemas or business
-  rules merely to make a reconciliation pass.
+  `Invoice_Items`, 40 `Statement_Data`, 17
+  `Statement_Financial_Components`, and 14 `Statement_Summary` columns.
+  `Statement_Summary` preserves one native Shopee Summary line per row; it is
+  source evidence, not a Billing calculation. Do not change schemas or
+  business rules merely to make a reconciliation pass.
 - Weekly Billing currently provides the Finance Product Summary only. UOM and
   Dis% are blank until authoritative rules exist. Statement Financial Summary,
   bank-receipt reconciliation, automatic CN/accounting normalization, and final

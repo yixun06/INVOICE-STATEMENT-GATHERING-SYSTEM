@@ -12,6 +12,7 @@ from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, Cano
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementIncomeRow,
+    StatementSummaryLine,
 )
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     GoogleApiHistoricalInvoiceGateway,
@@ -49,6 +50,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_DATA_TAB,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
     STATEMENT_FINANCIAL_COMPONENTS_TAB,
+    STATEMENT_SUMMARY_HEADERS,
+    STATEMENT_SUMMARY_TAB,
 )
 
 
@@ -57,6 +60,7 @@ SHEET_IDS = {
     INVOICE_ITEMS_TAB: 12,
     STATEMENT_DATA_TAB: 13,
     STATEMENT_FINANCIAL_COMPONENTS_TAB: 14,
+    STATEMENT_SUMMARY_TAB: 15,
 }
 
 
@@ -70,6 +74,7 @@ class InMemoryStatementGateway:
             STATEMENT_FINANCIAL_COMPONENTS_TAB: [
                 list(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
             ],
+            STATEMENT_SUMMARY_TAB: [list(STATEMENT_SUMMARY_HEADERS)],
         }
         self.read_calls = 0
         self.sheet_id_calls = 0
@@ -100,6 +105,13 @@ class InMemoryStatementGateway:
                 if request["updateCells"]["range"]["sheetId"]
                 != SHEET_IDS[STATEMENT_FINANCIAL_COMPONENTS_TAB]
             )
+        elif self.fail_mode == "summary_missing":
+            selected = tuple(
+                request
+                for request in requests
+                if request["updateCells"]["range"]["sheetId"]
+                != SHEET_IDS[STATEMENT_SUMMARY_TAB]
+            )
         else:
             selected = requests
         for request in selected:
@@ -119,6 +131,14 @@ class InMemoryStatementGateway:
                 for value_range in data
                 if not value_range["range"].startswith(
                     f"'{STATEMENT_FINANCIAL_COMPONENTS_TAB}'!"
+                )
+            )
+        elif self.fail_mode == "summary_missing":
+            selected = tuple(
+                value_range
+                for value_range in data
+                if not value_range["range"].startswith(
+                    f"'{STATEMENT_SUMMARY_TAB}'!"
                 )
             )
         else:
@@ -224,6 +244,12 @@ def _statement(*, sku_rows=1, file_hash="hash-1", released="10.00"):
         adjustments=(),
         source_value_issues=(),
         dimension_fallback_sheets=(),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "3. Total Released Amount", "TOTAL", None,
+                Decimal(released), "RM",
+            ),
+        ),
     )
 
 
@@ -291,6 +317,7 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
         INVOICE_ITEMS_TAB,
         STATEMENT_DATA_TAB,
         STATEMENT_FINANCIAL_COMPONENTS_TAB,
+        STATEMENT_SUMMARY_TAB,
     }
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["payment_status"] == "RELEASED"
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["income_type"] == "Estimated"
@@ -298,6 +325,7 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     assert _row_values(gateway, INVOICE_ORDERS_TAB)["final_amount"] == "10.00"
     assert _row_values(gateway, INVOICE_ITEMS_TAB)["statement_net_selling_amount"] == "10.00"
     assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 5
+    assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 2
 
 
 def test_missing_or_duplicate_order_target_produces_zero_write():
@@ -344,6 +372,20 @@ def test_duplicate_item_update_target_fails_closed_before_atomic_write():
         _commit(gateway, duplicate)
 
     assert gateway.batch_calls == []
+
+
+def test_statement_summary_header_mismatch_or_identity_collision_blocks_zero_write():
+    header_mismatch = InMemoryStatementGateway()
+    header_mismatch.tabs[STATEMENT_SUMMARY_TAB][0][-1] = "wrong"
+    with pytest.raises(StatementCommitBlocked, match="does not exactly match"):
+        _commit(header_mismatch, _plan())
+    assert header_mismatch.batch_calls == []
+
+    collision = InMemoryStatementGateway()
+    collision.tabs[STATEMENT_SUMMARY_TAB].append(list(_plan().summary_rows[0]))
+    with pytest.raises(StatementCommitBlocked, match="already contains planned stable identity"):
+        _commit(collision, _plan())
+    assert collision.batch_calls == []
 
 
 def test_group_protected_item_remains_unchanged_after_positive_readback():
@@ -588,6 +630,18 @@ def test_uncertain_result_with_everything_except_ledger_requires_manual_recovery
 
     assert len(gateway.tabs[STATEMENT_DATA_TAB]) > 1
     assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 1
+    assert len(gateway.batch_calls) == 1
+
+
+def test_uncertain_result_with_missing_summary_requires_manual_recovery():
+    gateway = InMemoryStatementGateway()
+    gateway.fail_mode = "summary_missing"
+
+    with pytest.raises(StatementWriteIntegrityError, match="manual recovery"):
+        _commit(gateway, _plan())
+
+    assert len(gateway.tabs[STATEMENT_DATA_TAB]) > 1
+    assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 1
     assert len(gateway.batch_calls) == 1
 
 
