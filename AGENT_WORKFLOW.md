@@ -115,6 +115,76 @@ widen tolerance to pass, turn missing into zero, add fuzzy matching without
 approval, change source authority, guess financial meaning, or bypass atomicity
 for convenience.
 
++### UX scope control and user confirmation
+
+Antigravity is not authorized to optimize InvoiceGather toward its own idea of
+"perfect UX." Its goal is to make the approved workflow clearer, faster,
+safer, and easier to use while preserving real staff habits, approved scope,
+engineering contracts, and implementation proportionality.
+
+Apply the proportional UX rule: make the smallest change that solves the
+highest-impact user problem. Do not redesign usable areas for aesthetic
+consistency, introduce a new interaction paradigm, or expand scope because a
+theoretical UX may be better. InvoiceGather is an internal productivity tool:
+success means fewer mistakes, faster completion, clearer system state, lower
+cognitive load, easier exception recovery, stronger confidence, and preserved
+auditability—not visual novelty or an Apple-like, Linear-like, modern-SaaS, or
+maximally animated aesthetic.
+
+Before each UX implementation, Antigravity must state:
+
+```text
+PRIMARY UX PROBLEM:
+APPROVED SCOPE:
+FILES EXPECTED TO CHANGE:
+USER-VISIBLE BEHAVIOR EXPECTED TO CHANGE:
+USER-VISIBLE BEHAVIOR THAT MUST NOT CHANGE:
+OUT-OF-SCOPE AREAS:
+```
+
+Classify proposed work as `REQUIRED` (directly solves the approved usability
+problem), `OPTIONAL` (low-risk polish clearly within scope), or `OUT OF SCOPE`.
+Implement REQUIRED work; implement OPTIONAL work only under those conditions;
+do not implement OUT OF SCOPE work. Record it as `FUTURE UX OPPORTUNITIES` for
+later review.
+
+The following require user UX approval before implementation: major page or
+navigation restructuring; moving workflows between pages; combining or
+splitting screens; replacing tabs; new wizards; hiding information or removing
+controls; materially changing action priority; ambiguous business terminology;
+persistent drawers/side panels; major table interactions; new filters/search
+models; significant animation; global style changes; unrequested dashboards or
+charts; large mobile redesigns; new user journeys; or new UX concepts.
+
+For one of those decisions, stop and provide:
+
+```text
+UX DECISION REQUIRED
+
+1. Current behavior
+2. Observed problem
+3. Option A
+4. Option B
+5. Optional recommended option
+6. Trade-offs
+7. Engineering impact
+8. What will remain unchanged
+```
+
+Wait for user approval. Do not redesign first and ask afterward. Likewise, if
+multiple reasonable choices depend on staff, Finance, Operations, information
+visibility, terminology, or other user preference, report `UX DECISION
+REQUIRED`; do not choose the more fashionable or technically elegant option.
+
+Antigravity may decide obvious, low-risk refinements that remain within an
+approved task: spacing/alignment/typography, table-width and wrapping fixes,
+RM alignment, icon and contrast consistency, clearer loading or empty wording,
+accessibility labels, minor button spacing, an already-approved technical
+disclosure, or visual distinction between locked TOTAL/SUBTOTAL/DETAIL rows.
+It is expected to ask user UX questions whenever this boundary is reached.
+Completion means that the approved usability problem is solved, not that no
+further polish can be imagined.
+
 ## 5. Contract priority and InvoiceGather example
 
 Resolve conflicts in this order:
