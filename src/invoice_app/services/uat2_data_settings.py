@@ -18,6 +18,9 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
+from src.invoice_app.services.weekly_billing import (
+    GoogleSheetsWeeklyBillingReader,
+)
 
 
 DEFAULT_UAT2_DATA_SPREADSHEET_ID = "1sZHYrmL9KuxhIdlZUN-EIy5tedmlbY62fOPxP22hsF8"
@@ -40,6 +43,12 @@ class UAT2DataSettings:
 
     def create_statement_writer(self) -> GoogleSheetsStatementWriter:
         return GoogleSheetsStatementWriter(
+            spreadsheet_id=self.google_spreadsheet_id,
+            gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+        )
+
+    def create_weekly_billing_reader(self) -> GoogleSheetsWeeklyBillingReader:
+        return GoogleSheetsWeeklyBillingReader(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )

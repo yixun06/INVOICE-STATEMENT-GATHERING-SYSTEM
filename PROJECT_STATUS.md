@@ -79,14 +79,16 @@ about 5.19 MiB), followed by readback. `ITEM` enriches only the proven item;
 ## Current Priorities
 
 1. Validate real persistence/readback with authoritative UAT data.
-2. Define and implement the Billing readiness gate.
-3. Build Billing Summary, then database-backed Analysis.
+2. Finance-test the committed-period Weekly Billing Product Summary MVP.
+3. Define the separate Statement-period Financial Summary, then database-backed Analysis.
 4. Consider storage optimization / PostgreSQL later; do not prematurely remove
    financial evidence or introduce CN/accounting normalization.
 
 ## Deferred / Guardrails
 
-- Billing is not yet implemented.
+- Weekly Billing Product Summary is implemented from committed Statement Order
+  population and persisted Invoice Items. UOM and Dis% remain intentionally
+  blank; the separate Statement-period Financial Summary is deferred.
 - Do not treat Statement release as bank receipt or conclude Shopee underpayment
   without an unexplained, governed residual.
 - Do not fabricate GROUP allocation, fuzzy-match products, infer missing money,

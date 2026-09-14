@@ -20,6 +20,7 @@ database.
 - Batch-specific archive storage and review handling
 - Shopee Weekly Statement native-XLSX ingestion, financial-component evidence,
   Reconciliation V2, guarded Commit, and readback verification
+- Committed-period Weekly Billing Product Summary preview and Excel export
 
 ## Current Shopee reconciliation model
 
@@ -27,7 +28,8 @@ database.
 Invoice PDF → Validate → Commit Zenxin DB
 Shopee Statement → Upload → Reconcile → Review → V2-aware Commit → Readback
 
-Later: Billing readiness → Billing Summary → Analysis
+Weekly Billing Product Summary → Finance testing
+Later: Statement Financial Summary → Analysis
 ```
 
 Reconciliation V2 keeps product identity, merchandise value, final seller
@@ -90,5 +92,7 @@ no quantity-match claim is made.
   `Invoice_Items`, 40 `Statement_Data`, and 17
   `Statement_Financial_Components` columns. Do not change schemas or business
   rules merely to make a reconciliation pass.
-- Billing, bank-receipt reconciliation, automatic CN/accounting normalization,
-  and final underpayment classification are deferred.
+- Weekly Billing currently provides the Finance Product Summary only. UOM and
+  Dis% are blank until authoritative rules exist. Statement Financial Summary,
+  bank-receipt reconciliation, automatic CN/accounting normalization, and final
+  underpayment classification remain deferred.

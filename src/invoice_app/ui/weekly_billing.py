@@ -1,160 +1,140 @@
-"""UAT2 Weekly Billing workspace with Phase 3 historical Invoice intake."""
+"""Business-facing Weekly Billing Product Summary over committed UAT2 data."""
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
-from src.invoice_app.services.workflow_navigation import request_navigation
-from src.invoice_app.ui.data_import import DATA_IMPORT_PAGE
-
-
-WEEKLY_BILLING_PAGE = "Weekly Billing"
-WEEKLY_BILLING_TABS = (
-    "Overview",
-    "Invoice Intake",
-    "Weekly Statement",
-    "Missing Sources",
-    "Verification",
-    "Billing Preview",
-    "Export",
+from src.invoice_app.domain.weekly_billing import WeeklyBillingSummary
+from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
+    HistoricalInvoiceStorageError,
+)
+from src.invoice_app.services.uat2_data_settings import (
+    configured_uat2_data_settings,
+)
+from src.invoice_app.services.weekly_billing import (
+    WeeklyBillingDataset,
+    WeeklyBillingError,
+    build_weekly_billing_summary,
+)
+from src.invoice_app.services.weekly_billing_export import (
+    export_weekly_billing_summary,
 )
 
 
-def render_weekly_billing() -> None:
-    """Render UAT2; storage is accessed only by explicit Invoice Intake actions."""
+WEEKLY_BILLING_PAGE = "Weekly Billing"
+PRODUCT_SUMMARY_COLUMNS = (
+    "No.",
+    "Item/Barcode",
+    "Description",
+    "Qty",
+    "UOM",
+    "Unit Price",
+    "Dis%",
+    "Disc Amt",
+    "Amount",
+)
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def _load_weekly_billing_dataset() -> WeeklyBillingDataset:
+    settings = configured_uat2_data_settings()
+    return settings.create_weekly_billing_reader().load_dataset()
+
+
+def render_weekly_billing(
+    dataset: WeeklyBillingDataset | None = None,
+) -> None:
+    """Render one summary model for both preview and downloadable Excel."""
+
     st.title(WEEKLY_BILLING_PAGE)
-    st.caption("Statement-driven weekly billing workspace for Shopee UAT2.")
-    st.info(
-        "Historical Invoice documents are processed through Data Import. "
-        "The remaining billing workflow is delivered in later UAT2 phases.",
-        icon=":material/info:",
+    st.caption(
+        "Product Summary from an existing committed Shopee Statement period."
+    )
+    try:
+        source = dataset if dataset is not None else _load_weekly_billing_dataset()
+    except (HistoricalInvoiceStorageError, WeeklyBillingError) as error:
+        st.error(f"Weekly Billing is unavailable: {error}")
+        return
+    if not source.periods:
+        st.info("No committed Statement period is available for Weekly Billing.")
+        return
+
+    period = st.selectbox(
+        "Statement Period",
+        source.periods,
+        format_func=lambda value: value.label,
+        key="weekly_billing_statement_period",
+    )
+    try:
+        summary = build_weekly_billing_summary(source, period)
+    except WeeklyBillingError as error:
+        st.error(f"Weekly Billing controls failed: {error}")
+        return
+
+    _render_metrics(summary)
+    st.subheader("Product Summary")
+    st.dataframe(
+        _summary_frame(summary),
+        hide_index=True,
+        key="weekly_billing_product_summary",
+        column_config={
+            "No.": st.column_config.NumberColumn("No.", format="%d"),
+            "Item/Barcode": st.column_config.TextColumn("Item/Barcode"),
+            "Description": st.column_config.TextColumn("Description"),
+            "Qty": st.column_config.NumberColumn("Qty", format="%d"),
+            "UOM": st.column_config.TextColumn("UOM"),
+            "Unit Price": st.column_config.NumberColumn(
+                "Unit Price", format="RM %.2f"
+            ),
+            "Dis%": st.column_config.TextColumn("Dis%"),
+            "Disc Amt": st.column_config.NumberColumn("Disc Amt", format="RM %.2f"),
+            "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
+        },
+    )
+    export_bytes = export_weekly_billing_summary(summary)
+    st.download_button(
+        "Export Excel",
+        export_bytes,
+        file_name=(
+            "weekly-billing-product-summary-"
+            f"{period.statement_period_from.isoformat()}-to-"
+            f"{period.statement_period_to.isoformat()}.xlsx"
+        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="weekly_billing_export",
+        icon=":material/download:",
+        type="primary",
     )
 
-    (
-        overview_tab,
-        invoice_intake_tab,
-        weekly_statement_tab,
-        missing_sources_tab,
-        verification_tab,
-        billing_preview_tab,
-        export_tab,
-    ) = st.tabs(WEEKLY_BILLING_TABS)
 
-    with overview_tab:
-        _render_overview()
-    with invoice_intake_tab:
-        _render_invoice_intake()
-    with weekly_statement_tab:
-        _render_weekly_statement()
-    with missing_sources_tab:
-        _render_missing_sources()
-    with verification_tab:
-        _render_verification()
-    with billing_preview_tab:
-        _render_billing_preview()
-    with export_tab:
-        _render_export()
-
-
-def _render_overview() -> None:
-    st.subheader("Billing readiness")
-    st.caption("Readiness will be evaluated after later UAT2 intake and verification phases.")
-    first_row = st.container(horizontal=True, gap="small")
-    with first_row:
-        st.metric("Statement Orders", "—", border=True)
-        st.metric("Invoice Source Found", "—", border=True)
-        st.metric("Missing Source", "—", border=True)
-        st.metric("Order Verification", "Not available yet", border=True)
-    second_row = st.container(horizontal=True, gap="small")
-    with second_row:
-        st.metric("Refund Verification", "Not available yet", border=True)
-        st.metric("Product Reconciliation", "Not available yet", border=True)
-        st.metric("Merchandise Difference", "—", border=True)
-        st.metric("Billing Status", "Not evaluated", border=True)
-
-    with st.container(border=True):
-        st.subheader("Planned workflow")
-        st.markdown(
-            "1. Invoice source intake\n"
-            "2. Weekly Statement\n"
-            "3. Source coverage\n"
-            "4. Invoice ↔ Statement verification\n"
-            "5. Billing preview\n"
-            "6. Readiness gate\n"
-            "7. Export"
+def _render_metrics(summary: WeeklyBillingSummary) -> None:
+    with st.container(horizontal=True, gap="small"):
+        st.metric("Orders", f"{summary.order_count:,}", border=True)
+        st.metric("Products", f"{len(summary.product_rows):,}", border=True)
+        st.metric("Total Quantity", f"{summary.total_quantity:,}", border=True)
+        st.metric(
+            "Total Amount",
+            f"RM {summary.total_amount:,.2f}",
+            border=True,
         )
 
 
-def _render_invoice_intake() -> None:
-    with st.container(border=True):
-        st.subheader("Historical Invoice Sources")
-        st.write(
-            "Historical Invoice PDFs are processed and committed through Data Import. "
-            "Weekly Billing uses persisted Shopee historical sources."
-        )
-        if st.button("Go to Data Import", icon=":material/arrow_forward:", key="uat2_go_to_data_import"):
-            if request_navigation(st.session_state, DATA_IMPORT_PAGE):
-                st.rerun()
-
-
-def _render_weekly_statement() -> None:
-    with st.container(border=True):
-        st.subheader("Weekly Statement")
-        st.write(
-            "Weekly Statement upload and persistence will be connected in Phase 4. "
-            "The statement will define target Order IDs for one payout or settlement period."
-        )
-        st.caption("No Statement file is read, parsed, or persisted here.")
-
-
-def _render_missing_sources() -> None:
-    with st.container(border=True):
-        st.subheader("Source coverage")
-        st.write(
-            "Statement target Order IDs → historical Invoice lookup → Found / Missing → "
-            "request missing Invoice PDFs → reload/recheck."
-        )
-        st.caption("Coverage has not been calculated yet.")
-
-
-def _render_verification() -> None:
-    st.subheader("Future verification")
-    for label in (
-        "Source Coverage",
-        "Order Verification",
-        "Refund Verification",
-        "Product Reconciliation",
-        "Financial Reconciliation",
-    ):
-        with st.container(border=True):
-            st.write(label)
-            st.caption("Not available yet")
-
-
-def _render_billing_preview() -> None:
-    with st.container(border=True):
-        st.subheader("Consolidated product output")
-        st.caption("Seller SKU · Product Name · Variation · Total Quantity · Unit Price · Total Sold Amount")
-        st.write("No billing rows are available until later UAT2 verification phases.")
-    with st.container(border=True):
-        st.subheader("Future field authority")
-        st.markdown(
-            "- **Total Quantity** = reliable Invoice quantity\n"
-            "- **Unit Price** = Product Master normal/POS Unit Price\n"
-            "- **Total Sold Amount** = Weekly Statement SKU net sold amount"
-        )
-    with st.container(border=True):
-        st.subheader("Weekly Statement financial summary")
-        st.caption("Not available yet; no financial values are calculated in this shell.")
-
-
-def _render_export() -> None:
-    with st.container(border=True):
-        st.subheader("Consolidated billing export")
-        st.write("Export becomes available only after all required billing readiness gates pass.")
-        st.button(
-            "Export Billing Dataset",
-            icon=":material/download:",
-            disabled=True,
-            key="weekly_billing_export_disabled",
-        )
+def _summary_frame(summary: WeeklyBillingSummary) -> pd.DataFrame:
+    return pd.DataFrame(
+        (
+            {
+                "No.": row.number,
+                "Item/Barcode": row.nav,
+                "Description": row.product_name,
+                "Qty": row.quantity,
+                "UOM": row.uom,
+                "Unit Price": float(row.unit_price),
+                "Dis%": row.discount_percent,
+                "Disc Amt": float(row.discount_amount),
+                "Amount": float(row.amount),
+            }
+            for row in summary.product_rows
+        ),
+        columns=PRODUCT_SUMMARY_COLUMNS,
+    )
