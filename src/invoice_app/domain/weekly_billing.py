@@ -85,3 +85,43 @@ class WeeklyBillingSummary:
     promotion_group_count: int
     same_price_promotion_count: int
     mixed_price_promotion_count: int
+
+
+@dataclass(frozen=True)
+class FinancialSummaryRow:
+    """One native Shopee Summary line, ready for Billing display/export."""
+
+    statement_source_row_number: int
+    native_label: str
+    line_type: str
+    parent_source_row_number: int | None
+    amount: Decimal | None
+    currency: str
+
+
+@dataclass(frozen=True)
+class FinancialControl:
+    """One independently-derived ORDER-ledger control against native Summary."""
+
+    name: str
+    derived_amount: Decimal
+    native_amount: Decimal
+    passed: bool
+
+
+@dataclass(frozen=True)
+class WeeklyBillingFinancialSummary:
+    period: BillingPeriod
+    currency: str
+    rows: tuple[FinancialSummaryRow, ...]
+    controls: tuple[FinancialControl, ...]
+    export_ready: bool
+    validation_failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WeeklyBillingReport:
+    """The one selected committed Statement batch rendered by Billing."""
+
+    product_summary: WeeklyBillingSummary
+    financial_summary: WeeklyBillingFinancialSummary

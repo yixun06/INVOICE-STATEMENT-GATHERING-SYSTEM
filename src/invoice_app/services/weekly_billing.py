@@ -16,7 +16,11 @@ from src.invoice_app.domain.weekly_billing import (
     ActualSellingAmountBasis,
     BillingPeriod,
     BillingSourceItem,
+    FinancialControl,
+    FinancialSummaryRow,
     ProductSummaryRow,
+    WeeklyBillingFinancialSummary,
+    WeeklyBillingReport,
     WeeklyBillingSummary,
 )
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
@@ -31,6 +35,10 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
+    STATEMENT_SUMMARY_HEADERS,
+    STATEMENT_SUMMARY_TAB,
 )
 
 
@@ -53,10 +61,12 @@ class WeeklyBillingDataset:
     order_ids_by_batch: Mapping[str, tuple[str, ...]]
     orders: Mapping[str, CanonicalInvoiceOrder]
     items: tuple[CanonicalInvoiceItem, ...]
+    statement_summary_rows: tuple[tuple[int, tuple[Any, ...]], ...] = ()
+    financial_component_rows: tuple[tuple[int, tuple[Any, ...]], ...] = ()
 
 
 class GoogleSheetsWeeklyBillingReader:
-    """Load the three existing source tabs without mutating UAT2."""
+    """Load Billing facts from existing source tabs without mutating UAT2."""
 
     def __init__(
         self, *, spreadsheet_id: str, gateway: WeeklyBillingGateway
@@ -71,6 +81,8 @@ class GoogleSheetsWeeklyBillingReader:
             INVOICE_ORDERS_TAB,
             INVOICE_ITEMS_TAB,
             STATEMENT_DATA_TAB,
+            STATEMENT_FINANCIAL_COMPONENTS_TAB,
+            STATEMENT_SUMMARY_TAB,
         )
         try:
             values = self._gateway.read_tabs(self._spreadsheet_id, tabs)
@@ -89,6 +101,14 @@ def build_weekly_billing_dataset(
     statement_rows = _tab_rows(tabs, STATEMENT_DATA_TAB, STATEMENT_DATA_HEADERS)
     order_rows = _tab_rows(tabs, INVOICE_ORDERS_TAB, INVOICE_ORDERS_HEADERS)
     item_rows = _tab_rows(tabs, INVOICE_ITEMS_TAB, INVOICE_ITEMS_HEADERS)
+    summary_rows = _optional_tab_rows(
+        tabs, STATEMENT_SUMMARY_TAB, STATEMENT_SUMMARY_HEADERS
+    )
+    component_rows = _optional_tab_rows(
+        tabs,
+        STATEMENT_FINANCIAL_COMPONENTS_TAB,
+        STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    )
 
     periods, order_ids_by_batch = _committed_periods(statement_rows)
 
@@ -123,6 +143,8 @@ def build_weekly_billing_dataset(
         order_ids_by_batch=order_ids_by_batch,
         orders=orders,
         items=tuple(items),
+        statement_summary_rows=summary_rows,
+        financial_component_rows=component_rows,
     )
 
 
@@ -207,6 +229,239 @@ def build_weekly_billing_summary(
         same_price_promotion_count=promotion_counts[1],
         mixed_price_promotion_count=promotion_counts[2],
     )
+
+
+_CONTROL_COMPONENTS = {
+    "Product Price": ("Product Price",),
+    "Refund": ("Refund Amount",),
+    "Voucher & Rebates": (
+        "Rebate Provided by Shopee",
+        "Voucher Sponsored by Seller",
+        "Cofund Voucher Sponsored by Seller",
+        "Coin Cashback Sponsored by Seller",
+        "Cofund Coin Cashback Sponsored by Seller",
+    ),
+    "Shipping Subtotal": (
+        "Shipping Fee Paid by Buyer (excl. SST)",
+        "Shipping Fee Charged by Logistic Provider",
+        "Seller Paid Shipping Fee SST",
+        "Shipping Rebate From Shopee",
+        "Reverse Shipping Fee",
+        "Reverse Shipping Fee SST",
+        "Saver Programme Shipping Fee Savings",
+        "Return to Seller Fee",
+    ),
+    "Fees & Charges": (
+        "Commission Fee (incl. SST)",
+        "Service Fee (Incl. SST)",
+        "Transaction Fee (Incl. SST)",
+        "AMS Commission Fee",
+        "Saver Programme Fee (Incl. SST)",
+        "Ads Escrow Top Up Fee",
+    ),
+}
+
+_NATIVE_CONTROL_LABELS = {
+    "Merchandise Subtotal": "Merchandise Subtotal",
+    "Total Revenue": "1. Total Revenue",
+    "Total Expenses": "2. Total Expenses",
+    "Total Released Amount": "3. Total Released Amount",
+}
+
+
+def build_weekly_billing_financial_summary(
+    dataset: WeeklyBillingDataset,
+    period: BillingPeriod,
+) -> WeeklyBillingFinancialSummary:
+    """Build a fail-closed Billing view from native Summary plus ORDER controls."""
+
+    _require_available_period(dataset, period)
+    rows = _native_summary_rows(dataset.statement_summary_rows, period)
+    components = _order_components(dataset.financial_component_rows, period)
+    native_by_label = {row.native_label: row.amount for row in rows}
+    product_price = _component_total(components, "Product Price")
+    refund = _component_total(components, "Refund")
+    vouchers = _component_total(components, "Voucher & Rebates")
+    shipping = _component_total(components, "Shipping Subtotal")
+    fees = _component_total(components, "Fees & Charges")
+    controls = (
+        _financial_control(
+            "Merchandise Subtotal",
+            product_price + refund,
+            native_by_label,
+        ),
+        _financial_control(
+            "Total Revenue",
+            product_price + refund + vouchers,
+            native_by_label,
+        ),
+        _financial_control(
+            "Total Expenses", shipping + fees, native_by_label
+        ),
+        _financial_control(
+            "Total Released Amount",
+            product_price + refund + vouchers + shipping + fees,
+            native_by_label,
+        ),
+    )
+    failures = tuple(
+        f"{control.name} control failed: derived {control.derived_amount:.2f} "
+        f"does not equal native {control.native_amount:.2f}."
+        for control in controls
+        if not control.passed
+    )
+    return WeeklyBillingFinancialSummary(
+        period=period,
+        currency=rows[0].currency,
+        rows=rows,
+        controls=controls,
+        export_ready=not failures,
+        validation_failures=failures,
+    )
+
+
+def build_weekly_billing_report(
+    dataset: WeeklyBillingDataset,
+    period: BillingPeriod,
+) -> WeeklyBillingReport:
+    """Build preview/export inputs once and prove their shared batch identity."""
+
+    product_summary = build_weekly_billing_summary(dataset, period)
+    financial_summary = build_weekly_billing_financial_summary(dataset, period)
+    if product_summary.period != financial_summary.period:
+        raise WeeklyBillingError("Billing Product and Financial Summary batches differ.")
+    if not financial_summary.export_ready:
+        raise WeeklyBillingError("Financial Summary is not export-ready: " + " ".join(
+            financial_summary.validation_failures
+        ))
+    return WeeklyBillingReport(product_summary, financial_summary)
+
+
+def _require_available_period(dataset: WeeklyBillingDataset, period: BillingPeriod) -> None:
+    if period not in dataset.periods:
+        raise WeeklyBillingError(
+            "The requested period is not an existing COMMITTED Statement batch."
+        )
+
+
+def _native_summary_rows(
+    source_rows: Sequence[tuple[int, tuple[Any, ...]]], period: BillingPeriod
+) -> tuple[FinancialSummaryRow, ...]:
+    positions = {name: index for index, name in enumerate(STATEMENT_SUMMARY_HEADERS)}
+    selected: list[FinancialSummaryRow] = []
+    for row_number, row in source_rows:
+        if _text(row[positions["commit_status"]]) != "COMMITTED":
+            continue
+        if _text(row[positions["statement_batch_id"]]) != period.statement_batch_id:
+            continue
+        if _text(row[positions["statement_file_hash"]]) != period.statement_file_hash:
+            raise WeeklyBillingError("Statement_Summary batch hash does not match selected period.")
+        if _iso_date(row[positions["statement_period_from"]], row_number, "statement_period_from") != period.statement_period_from or _iso_date(row[positions["statement_period_to"]], row_number, "statement_period_to") != period.statement_period_to:
+            raise WeeklyBillingError("Statement_Summary period does not match selected batch.")
+        line_type = _required_text(row[positions["line_type"]], row_number, "line_type")
+        if line_type not in {"TOTAL", "SUBTOTAL", "DETAIL", "REFERENCE", "SECTION_HEADER"}:
+            raise WeeklyBillingError(f"Statement_Summary row {row_number} has unsupported line_type.")
+        amount_text = _text(row[positions["component_amount"]])
+        amount = None if not amount_text else _decimal_money(amount_text, "Statement_Summary", row_number)
+        if (line_type == "SECTION_HEADER") != (amount is None):
+            raise WeeklyBillingError(
+                f"Statement_Summary row {row_number} has invalid amount for {line_type}."
+            )
+        parent_text = _text(row[positions["parent_source_row_number"]])
+        try:
+            source_row_number = int(_required_text(
+                row[positions["statement_source_row_number"]],
+                row_number,
+                "statement_source_row_number",
+            ))
+            parent = int(parent_text) if parent_text else None
+        except ValueError as error:
+            raise WeeklyBillingError(
+                f"Statement_Summary row {row_number} has invalid source hierarchy."
+            ) from error
+        selected.append(FinancialSummaryRow(
+            statement_source_row_number=source_row_number,
+            native_label=_required_text(row[positions["native_label"]], row_number, "native_label"),
+            line_type=line_type,
+            parent_source_row_number=parent,
+            amount=amount,
+            currency=_required_text(row[positions["currency"]], row_number, "currency"),
+        ))
+    if len(selected) != 32:
+        raise WeeklyBillingError(
+            f"Statement_Summary is incomplete for selected batch: expected 32 native lines, found {len(selected)}."
+        )
+    ordered = tuple(sorted(selected, key=lambda value: value.statement_source_row_number))
+    source_rows_seen = {row.statement_source_row_number for row in ordered}
+    if len(source_rows_seen) != len(ordered):
+        raise WeeklyBillingError("Statement_Summary has duplicate source row identities.")
+    if len({row.native_label for row in ordered}) != len(ordered):
+        raise WeeklyBillingError("Statement_Summary has duplicate native labels.")
+    if len({row.currency for row in ordered}) != 1:
+        raise WeeklyBillingError("Statement_Summary has conflicting currencies.")
+    for row in ordered:
+        if row.parent_source_row_number is not None and row.parent_source_row_number not in source_rows_seen:
+            raise WeeklyBillingError("Statement_Summary parent hierarchy is incomplete.")
+    return ordered
+
+
+def _order_components(
+    source_rows: Sequence[tuple[int, tuple[Any, ...]]], period: BillingPeriod
+) -> Mapping[str, Decimal]:
+    positions = {name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)}
+    results: dict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
+    seen: set[tuple[str, str]] = set()
+    for row_number, row in source_rows:
+        if _text(row[positions["commit_status"]]) != "COMMITTED":
+            continue
+        if _text(row[positions["statement_batch_id"]]) != period.statement_batch_id:
+            continue
+        if _text(row[positions["statement_file_hash"]]) != period.statement_file_hash:
+            raise WeeklyBillingError("Statement_Financial_Components batch hash does not match selected period.")
+        if _iso_date(row[positions["statement_period_from"]], row_number, "statement_period_from") != period.statement_period_from or _iso_date(row[positions["statement_period_to"]], row_number, "statement_period_to") != period.statement_period_to:
+            raise WeeklyBillingError("Statement_Financial_Components period does not match selected batch.")
+        if _text(row[positions["record_type"]]) != "ORDER":
+            continue
+        source_row = _required_text(row[positions["statement_source_row_number"]], row_number, "statement_source_row_number")
+        name = _required_text(row[positions["component_name"]], row_number, "component_name")
+        identity = (source_row, name)
+        if identity in seen:
+            raise WeeklyBillingError("ORDER financial component has duplicate source identity.")
+        seen.add(identity)
+        results[name] += _decimal_money(row[positions["component_amount"]], STATEMENT_FINANCIAL_COMPONENTS_TAB, row_number)
+    if not seen:
+        raise WeeklyBillingError("Selected batch has no ORDER financial component evidence.")
+    return results
+
+
+def _component_total(components: Mapping[str, Decimal], control_name: str) -> Decimal:
+    names = _CONTROL_COMPONENTS[control_name]
+    missing = [name for name in names if name not in components]
+    if missing:
+        raise WeeklyBillingError(
+            "ORDER financial controls are missing component(s): " + ", ".join(missing)
+        )
+    return sum((components[name] for name in names), Decimal("0.00"))
+
+
+def _financial_control(
+    name: str, derived: Decimal, native_by_label: Mapping[str, Decimal | None]
+) -> FinancialControl:
+    label = _NATIVE_CONTROL_LABELS[name]
+    native = native_by_label.get(label)
+    if native is None:
+        raise WeeklyBillingError(f"Statement_Summary is missing native {name}.")
+    return FinancialControl(name, derived, native, derived == native)
+
+
+def _decimal_money(value: Any, tab: str, row_number: int) -> Decimal:
+    try:
+        parsed = Decimal(_text(value))
+    except Exception as error:
+        raise WeeklyBillingError(f"{tab} row {row_number} has invalid money value.") from error
+    if parsed != parsed.quantize(CENT):
+        raise WeeklyBillingError(f"{tab} row {row_number} is not at cent precision.")
+    return parsed
 
 
 def _committed_periods(
@@ -561,6 +816,17 @@ def _tab_rows(
         if any(_text(value) for value in padded):
             result.append((row_number, padded[:len(headers)]))
     return tuple(result)
+
+
+def _optional_tab_rows(
+    tabs: Mapping[str, Sequence[Sequence[Any]]],
+    tab: str,
+    headers: Sequence[str],
+) -> tuple[tuple[int, tuple[Any, ...]], ...]:
+    """Keep Product Summary backward-compatible; Finance fails closed at use."""
+    if tab not in tabs:
+        return ()
+    return _tab_rows(tabs, tab, headers)
 
 
 def _cent_money(

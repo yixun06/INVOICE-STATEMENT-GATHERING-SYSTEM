@@ -5,7 +5,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.invoice_app.domain.weekly_billing import WeeklyBillingSummary
+from src.invoice_app.domain.weekly_billing import (
+    WeeklyBillingFinancialSummary,
+    WeeklyBillingReport,
+    WeeklyBillingSummary,
+)
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     HistoricalInvoiceStorageError,
 )
@@ -15,10 +19,10 @@ from src.invoice_app.services.uat2_data_settings import (
 from src.invoice_app.services.weekly_billing import (
     WeeklyBillingDataset,
     WeeklyBillingError,
-    build_weekly_billing_summary,
+    build_weekly_billing_report,
 )
 from src.invoice_app.services.weekly_billing_export import (
-    export_weekly_billing_summary,
+    export_weekly_billing_report,
 )
 
 
@@ -45,11 +49,11 @@ def _load_weekly_billing_dataset() -> WeeklyBillingDataset:
 def render_weekly_billing(
     dataset: WeeklyBillingDataset | None = None,
 ) -> None:
-    """Render one summary model for both preview and downloadable Excel."""
+    """Render one committed-period report for preview and downloadable Excel."""
 
     st.title(WEEKLY_BILLING_PAGE)
     st.caption(
-        "Product Summary from an existing committed Shopee Statement period."
+        "Product and Financial Summary from one committed Shopee Statement period."
     )
     try:
         source = dataset if dataset is not None else _load_weekly_billing_dataset()
@@ -67,15 +71,15 @@ def render_weekly_billing(
         key="weekly_billing_statement_period",
     )
     try:
-        summary = build_weekly_billing_summary(source, period)
+        report = build_weekly_billing_report(source, period)
     except WeeklyBillingError as error:
         st.error(f"Weekly Billing controls failed: {error}")
         return
 
-    _render_metrics(summary)
+    _render_metrics(report.product_summary)
     st.subheader("Product Summary")
     st.dataframe(
-        _summary_frame(summary),
+        _summary_frame(report.product_summary),
         hide_index=True,
         key="weekly_billing_product_summary",
         column_config={
@@ -92,12 +96,23 @@ def render_weekly_billing(
             "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
         },
     )
-    export_bytes = export_weekly_billing_summary(summary)
+    st.subheader("Financial Summary")
+    st.dataframe(
+        _financial_summary_frame(report.financial_summary),
+        hide_index=True,
+        key="weekly_billing_financial_summary",
+        column_config={
+            "Description": st.column_config.TextColumn("Description"),
+            "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
+        },
+    )
+    _render_financial_readiness(report)
+    export_bytes = export_weekly_billing_report(report)
     st.download_button(
-        "Export Excel",
+        "Export Weekly Billing Excel",
         export_bytes,
         file_name=(
-            "weekly-billing-product-summary-"
+            "weekly-billing-"
             f"{period.statement_period_from.isoformat()}-to-"
             f"{period.statement_period_to.isoformat()}.xlsx"
         ),
@@ -137,4 +152,30 @@ def _summary_frame(summary: WeeklyBillingSummary) -> pd.DataFrame:
             for row in summary.product_rows
         ),
         columns=PRODUCT_SUMMARY_COLUMNS,
+    )
+
+
+def _financial_summary_frame(summary: WeeklyBillingFinancialSummary) -> pd.DataFrame:
+    return pd.DataFrame(
+        (
+            {
+                "Description": (
+                    f"  {row.native_label}"
+                    if row.parent_source_row_number is not None
+                    else row.native_label
+                ),
+                "Amount": None if row.amount is None else float(row.amount),
+            }
+            for row in summary.rows
+        ),
+        columns=("Description", "Amount"),
+    )
+
+
+def _render_financial_readiness(report: WeeklyBillingReport) -> None:
+    controls = report.financial_summary.controls
+    st.caption(
+        "Financial controls passed: "
+        f"{sum(control.passed for control in controls)}/{len(controls)} "
+        "(native Summary compared with ORDER evidence)."
     )

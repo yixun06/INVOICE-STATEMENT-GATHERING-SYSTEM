@@ -43,7 +43,12 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder
 from src.invoice_app.domain.weekly_billing import BillingPeriod
+from src.invoice_app.domain.weekly_billing import (
+    FinancialControl, FinancialSummaryRow, WeeklyBillingFinancialSummary,
+    WeeklyBillingReport, WeeklyBillingSummary,
+)
 from src.invoice_app.services.weekly_billing import WeeklyBillingDataset
+from src.invoice_app.ui import weekly_billing as billing_ui
 from src.invoice_app.ui.weekly_billing import render_weekly_billing
 
 period = BillingPeriod(date(2026, 8, 31), date(2026, 9, 6), "batch-1", "a" * 64)
@@ -63,14 +68,25 @@ item = CanonicalInvoiceItem(
     unit_price=Decimal("10.00"),
     line_subtotal=Decimal("16.00"),
 )
-render_weekly_billing(
-    WeeklyBillingDataset(
-        periods=(period,),
-        order_ids_by_batch={"batch-1": ("ORDER-1",)},
-        orders={"ORDER-1": order},
-        items=(item,),
-    )
+dataset = WeeklyBillingDataset(
+    periods=(period,), order_ids_by_batch={"batch-1": ("ORDER-1",)},
+    orders={"ORDER-1": order}, items=(item,),
 )
+product = WeeklyBillingSummary(
+    period=period, order_count=1, invoice_item_count=1, source_items=(),
+    product_rows=(), total_quantity=2, total_standard_amount=Decimal("20.00"),
+    total_discount_amount=Decimal("4.00"), total_amount=Decimal("16.00"),
+    normal_amount_total=Decimal("16.00"), promotion_amount_total=Decimal("0.00"),
+    promotion_group_count=0, same_price_promotion_count=0, mixed_price_promotion_count=0,
+)
+financial = WeeklyBillingFinancialSummary(
+    period=period, currency="RM",
+    rows=(FinancialSummaryRow(1, "1. Total Revenue", "TOTAL", None, Decimal("16.00"), "RM"),),
+    controls=(FinancialControl("Total Revenue", Decimal("16.00"), Decimal("16.00"), True),),
+    export_ready=True, validation_failures=(),
+)
+billing_ui.build_weekly_billing_report = lambda _dataset, _period: WeeklyBillingReport(product, financial)
+render_weekly_billing(dataset)
 """
     )
     app.run(timeout=20)
@@ -82,7 +98,7 @@ render_weekly_billing(
         "Total Quantity",
         "Total Amount",
     ]
-    assert [metric.value for metric in app.metric] == ["1", "1", "2", "RM 16.00"]
+    assert [metric.value for metric in app.metric] == ["1", "0", "2", "RM 16.00"]
     assert app.selectbox[0].label == "Statement Period"
     assert tuple(app.dataframe[0].value.columns) == (
         "No.",
@@ -95,6 +111,7 @@ render_weekly_billing(
         "Disc Amt",
         "Amount",
     )
+    assert tuple(app.dataframe[1].value.columns) == ("Description", "Amount")
 
 
 def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
@@ -111,5 +128,5 @@ def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
     assert "file_uploader" not in source
     assert "create_repository" not in source
     assert "statement_financial_components" not in source
-    assert "build_weekly_billing_summary" in source
-    assert "export_weekly_billing_summary(summary)" in source
+    assert "build_weekly_billing_report" in source
+    assert "export_weekly_billing_report(report)" in source

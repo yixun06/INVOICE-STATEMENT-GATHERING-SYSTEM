@@ -21,7 +21,8 @@ database.
 - Shopee Weekly Statement native-XLSX ingestion, native Summary and
   financial-component evidence, Reconciliation V2, guarded Commit, and
   readback verification
-- Committed-period Weekly Billing Product Summary preview and Excel export
+- Committed-period Weekly Billing Product Summary and Financial Summary preview,
+  with one two-sheet Excel export
 
 ## Current Shopee reconciliation model
 
@@ -95,7 +96,11 @@ no quantity-match claim is made.
   `Statement_Summary` preserves one native Shopee Summary line per row; it is
   source evidence, not a Billing calculation. Do not change schemas or
   business rules merely to make a reconciliation pass.
-- Weekly Billing currently provides the Finance Product Summary only. UOM and
-  Dis% are blank until authoritative rules exist. Statement Financial Summary,
-  bank-receipt reconciliation, automatic CN/accounting normalization, and final
-  underpayment classification remain deferred.
+- Weekly Billing reads Product Summary and native Financial Summary from the
+  same committed Statement batch. Financial Summary displays persisted
+  `Statement_Summary` evidence; ORDER-level
+  `Statement_Financial_Components` are controls only. Its one Excel workbook
+  contains `Product Summary` and `Financial Summary` sheets. UOM and Dis%
+  remain blank until authoritative rules exist. Bank-receipt reconciliation,
+  automatic CN/accounting normalization, and final underpayment classification
+  remain deferred.

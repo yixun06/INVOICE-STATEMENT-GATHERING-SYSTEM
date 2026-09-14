@@ -28,6 +28,10 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+    STATEMENT_FINANCIAL_COMPONENTS_TAB,
+    STATEMENT_SUMMARY_HEADERS,
+    STATEMENT_SUMMARY_TAB,
 )
 from src.invoice_app.services.weekly_billing import (
     WeeklyBillingDataset,
@@ -148,6 +152,10 @@ def _tabs(
             INVOICE_ITEMS_HEADERS,
             *(_serialize_item(item) for item in items),
         ),
+        STATEMENT_FINANCIAL_COMPONENTS_TAB: (
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+        ),
+        STATEMENT_SUMMARY_TAB: (STATEMENT_SUMMARY_HEADERS,),
     }
 
 
