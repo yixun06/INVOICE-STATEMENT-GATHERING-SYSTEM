@@ -115,7 +115,7 @@ widen tolerance to pass, turn missing into zero, add fuzzy matching without
 approval, change source authority, guess financial meaning, or bypass atomicity
 for convenience.
 
-+### UX scope control and user confirmation
+### UX scope control and user confirmation
 
 Antigravity is not authorized to optimize InvoiceGather toward its own idea of
 "perfect UX." Its goal is to make the approved workflow clearer, faster,
