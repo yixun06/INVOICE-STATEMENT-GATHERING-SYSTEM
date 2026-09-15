@@ -71,6 +71,29 @@ class ProductSummaryRow:
 
 
 @dataclass(frozen=True)
+class StagingDataRow:
+    """One ERP-facing row mapped from one finalized Product Summary row."""
+
+    your_reference: str
+    posting_date: date
+    sell_to_customer_no: str
+    currency_code: str
+    item_type: str
+    nav: str
+    location_code: str
+    quantity: int
+    unit_of_measure_code: str
+    order_date: date
+    shipment_date: date
+    customer_outlet_code: None
+    business_unit_code_erp: str
+    project_code_erp: str
+    external_doc_no: int
+    unit_price_excl_gst: Decimal
+    ship_to_code: int
+
+
+@dataclass(frozen=True)
 class WeeklyBillingSummary:
     period: BillingPeriod
     order_count: int

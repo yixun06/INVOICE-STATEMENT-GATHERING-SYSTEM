@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import date
 from io import BytesIO
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from src.invoice_app.domain.weekly_billing import WeeklyBillingReport, WeeklyBillingSummary
+from src.invoice_app.services.weekly_billing_staging import (
+    STAGING_DATA_HEADERS,
+    build_staging_data_rows,
+)
 
 
 PRODUCT_SUMMARY_HEADERS = (
@@ -70,18 +75,30 @@ def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
     return output.getvalue()
 
 
-def export_weekly_billing_report(report: WeeklyBillingReport) -> bytes:
+def export_weekly_billing_report(
+    report: WeeklyBillingReport,
+    *,
+    generation_date: date | None = None,
+) -> bytes:
     """Export the exact Product/Financial previews from one committed batch."""
 
     if report.product_summary.period != report.financial_summary.period:
         raise ValueError("Weekly Billing Product and Financial Summary batches differ.")
     if not report.financial_summary.export_ready:
         raise ValueError("Financial Summary is not export-ready.")
+    export_date = generation_date or date.today()
+    staging_rows = build_staging_data_rows(
+        report.product_summary,
+        generation_date=export_date,
+    )
 
     workbook = Workbook()
     product_sheet = workbook.active
     product_sheet.title = "Product Summary"
     _write_product_summary(product_sheet, report.product_summary)
+
+    staging_sheet = workbook.create_sheet("Staging Data")
+    _write_staging_data(staging_sheet, staging_rows)
 
     financial_sheet = workbook.create_sheet("Financial Summary")
     financial_sheet.append(FINANCIAL_SUMMARY_HEADERS)
@@ -115,6 +132,62 @@ def export_weekly_billing_report(report: WeeklyBillingReport) -> bytes:
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _write_staging_data(sheet, rows) -> None:
+    sheet.append(STAGING_DATA_HEADERS)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:Q{max(1, len(rows) + 1)}"
+    for row in rows:
+        sheet.append((
+            row.your_reference,
+            row.posting_date,
+            row.sell_to_customer_no,
+            row.currency_code,
+            row.item_type,
+            row.nav,
+            row.location_code,
+            row.quantity,
+            row.unit_of_measure_code,
+            row.order_date,
+            row.shipment_date,
+            row.customer_outlet_code,
+            row.business_unit_code_erp,
+            row.project_code_erp,
+            row.external_doc_no,
+            float(row.unit_price_excl_gst),
+            row.ship_to_code,
+        ))
+    for row_number in range(2, sheet.max_row + 1):
+        sheet.cell(row_number, 2).number_format = "yyyy-mm-dd"
+        sheet.cell(row_number, 6).number_format = "@"
+        sheet.cell(row_number, 8).number_format = "#,##0"
+        sheet.cell(row_number, 10).number_format = "yyyy-mm-dd"
+        sheet.cell(row_number, 11).number_format = "yyyy-mm-dd"
+        sheet.cell(row_number, 16).number_format = "#,##0.00"
+    for column, width in {
+        "A": 27,
+        "B": 14,
+        "C": 22,
+        "D": 15,
+        "E": 12,
+        "F": 18,
+        "G": 16,
+        "H": 12,
+        "I": 24,
+        "J": 14,
+        "K": 15,
+        "L": 22,
+        "M": 24,
+        "N": 18,
+        "O": 18,
+        "P": 22,
+        "Q": 16,
+    }.items():
+        sheet.column_dimensions[column].width = width
 
 
 def _write_product_summary(sheet, summary: WeeklyBillingSummary) -> None:

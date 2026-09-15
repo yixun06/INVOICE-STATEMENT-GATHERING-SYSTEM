@@ -246,10 +246,10 @@ def test_missing_or_incomplete_native_summary_fails_closed():
         build_weekly_billing_financial_summary(_dataset(summary_rows=_summary_rows()[:-1]), PERIOD)
 
 
-def test_unified_workbook_has_exact_two_sheets_and_numeric_financial_amounts():
+def test_unified_workbook_has_exact_three_sheets_and_numeric_financial_amounts():
     report = build_weekly_billing_report(_dataset(), PERIOD)
     workbook = openpyxl.load_workbook(BytesIO(export_weekly_billing_report(report)), data_only=True)
-    assert workbook.sheetnames == ["Product Summary", "Financial Summary"]
+    assert workbook.sheetnames == ["Product Summary", "Staging Data", "Financial Summary"]
     assert workbook["Product Summary"].max_column == 9
     finance = workbook["Financial Summary"]
     assert finance.cell(1, 1).value == "Description"

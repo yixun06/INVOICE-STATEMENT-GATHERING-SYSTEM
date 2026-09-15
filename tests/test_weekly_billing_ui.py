@@ -44,8 +44,8 @@ from decimal import Decimal
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder
 from src.invoice_app.domain.weekly_billing import BillingPeriod
 from src.invoice_app.domain.weekly_billing import (
-    FinancialControl, FinancialSummaryRow, WeeklyBillingFinancialSummary,
-    WeeklyBillingReport, WeeklyBillingSummary,
+    FinancialControl, FinancialSummaryRow, ProductSummaryRow,
+    WeeklyBillingFinancialSummary, WeeklyBillingReport, WeeklyBillingSummary,
 )
 from src.invoice_app.services.weekly_billing import WeeklyBillingDataset
 from src.invoice_app.ui import weekly_billing as billing_ui
@@ -74,7 +74,12 @@ dataset = WeeklyBillingDataset(
 )
 product = WeeklyBillingSummary(
     period=period, order_count=1, invoice_item_count=1, source_items=(),
-    product_rows=(), total_quantity=2, total_standard_amount=Decimal("20.00"),
+    product_rows=(ProductSummaryRow(
+        number=1, nav="5000001", product_name="Product One", uom=None,
+        unit_price=Decimal("10.00"), quantity=2, discount_percent=None,
+        discount_amount=Decimal("4.00"), amount=Decimal("16.00"),
+        source_item_count=1,
+    ),), total_quantity=2, total_standard_amount=Decimal("20.00"),
     total_discount_amount=Decimal("4.00"), total_amount=Decimal("16.00"),
     normal_amount_total=Decimal("16.00"), promotion_amount_total=Decimal("0.00"),
     promotion_group_count=0, same_price_promotion_count=0, mixed_price_promotion_count=0,
@@ -98,7 +103,7 @@ render_weekly_billing(dataset)
         "Total Quantity",
         "Total Amount",
     ]
-    assert [metric.value for metric in app.metric] == ["1", "0", "2", "RM 16.00"]
+    assert [metric.value for metric in app.metric] == ["1", "1", "2", "RM 16.00"]
     assert app.selectbox[0].label == "Statement Period"
     assert tuple(app.dataframe[0].value.columns) == (
         "No.",
