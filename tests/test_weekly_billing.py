@@ -251,7 +251,7 @@ def test_normal_items_with_different_seller_skus_remain_separate():
             _item("ORDER-1", 0, nav="3000209", sku="9555208107347", name="Pre-Order Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]", variation="1KG", price="54.90"),
             _item("ORDER-2", 0, nav="3000209", sku="9555208107347", name="Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]", variation="Fresh Raw Honey 1kg", price="54.90"),
             1,
-            "Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]",
+            "Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar] | 1KG",
         ),
         (
             "L-03 keeps Coconut Sugar and Normal separate",
@@ -279,7 +279,7 @@ def test_normal_items_with_different_seller_skus_remain_separate():
             _item("ORDER-1", 0, nav="5000165", sku="9555208103158", name="Simply Natural Organic Mee Sua 200g Malaysia", variation=None, price="8.50"),
             _item("ORDER-2", 0, nav="5000165", sku="9555208103158", name="Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia", variation="Sweet Potato Mee Sua", price="8.50"),
             1,
-            "Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia",
+            "Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia | Sweet Potato Mee Sua",
         ),
         (
             "L-07 keeps historical price changes separate",
@@ -332,7 +332,7 @@ def test_approved_technical_title_noise_merges(
     )
 
     assert len(summary.product_rows) == 1
-    assert summary.product_rows[0].product_name == expected_description
+    assert summary.product_rows[0].product_name == f"{expected_description} | Original"
 
 
 def test_same_identity_with_different_historical_price_remains_two_rows():

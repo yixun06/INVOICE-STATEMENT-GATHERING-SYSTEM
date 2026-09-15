@@ -27,6 +27,7 @@ class _ApprovedEquivalence:
     variations: frozenset[str]
     identity_key: str
     display_description: str
+    display_variation: str
 
 
 _APPROVED_EQUIVALENCES = (
@@ -35,12 +36,14 @@ _APPROVED_EQUIVALENCES = (
         variations=frozenset({"1KG", "Fresh Raw Honey 1kg"}),
         identity_key="approved:L-02-honey-1kg",
         display_description="Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]",
+        display_variation="1KG",
     ),
     _ApprovedEquivalence(
         seller_sku="9555208103158",
         variations=frozenset({"", "Sweet Potato Mee Sua"}),
         identity_key="approved:L-06-sweet-potato-mee-sua",
         display_description="Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia",
+        display_variation="Sweet Potato Mee Sua",
     ),
 )
 
@@ -75,7 +78,10 @@ def resolve_product_summary_identity(
             historical_pm_unit_price=historical_pm_unit_price,
             title_key=equivalence.identity_key,
             identity_fallback=False,
-            display_description=equivalence.display_description,
+            display_description=_description_with_variation(
+                equivalence.display_description,
+                equivalence.display_variation,
+            ),
         )
 
     normalized_title = normalize_technical_product_title(clean_name)
@@ -86,7 +92,10 @@ def resolve_product_summary_identity(
         historical_pm_unit_price=historical_pm_unit_price,
         title_key=normalized_title.casefold(),
         identity_fallback=clean_sku is None,
-        display_description=normalized_title,
+        display_description=_description_with_variation(
+            normalized_title,
+            clean_variation,
+        ),
     )
 
 
@@ -135,3 +144,9 @@ def _optional_text(value: str | None) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _description_with_variation(product_name: str, variation: str) -> str:
+    """Keep the source Variation visible without changing grouping facts."""
+
+    return f"{product_name} | {variation}" if variation else product_name
