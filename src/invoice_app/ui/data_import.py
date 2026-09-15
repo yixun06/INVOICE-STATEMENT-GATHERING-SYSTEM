@@ -22,11 +22,13 @@ from ..services.import_result_adapters import (
 )
 from ..services.import_result_contract import ImportResult, ReconciliationException, RecoveryAction, ValidationIssue
 from ..services.validation_recovery import (
+    REMOVE_INVOICE_STAGING,
     REMOVE_SOURCE,
     REMOVE_STAGED_SOURCE,
     VIEW_DETAILS,
     execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
+    plan_current_invoice_staging_exit,
     plan_duplicate_source_removal,
     recovery_actions_for_source,
 )
@@ -96,6 +98,7 @@ _WORKFLOW_KEYS = (
     "weekly_statement_review_stale_reason",
     "weekly_statement_commit_completed",
     "invoice_commit_completed",
+    "invoice_commit_completed_count",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
     "uat2_historical_commit_entries",
@@ -239,6 +242,8 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             st.rerun()
 def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> None:
     _render_recovery_notice()
+    if _has_pending_recovery():
+        _render_recovery_confirmation()
     source_type = st.session_state.get("import_source_type")
     if source_type == PLATFORM_ORDERS:
         st.subheader("Upload platform order files")
@@ -250,6 +255,7 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
             3,
             back_step=1,
             allowed=has_staging,
+            include_invoice_exit=True,
             disabled_reason=(
                 None
                 if has_staging
@@ -343,6 +349,7 @@ def _render_validation_step(
             4,
             back_step=2,
             allowed=result.commit_readiness.ready,
+            include_invoice_exit=True,
             disabled_reason=_commit_readiness_reason(result),
         )
 
@@ -728,6 +735,8 @@ def _render_recovery_confirmation() -> None:
     context = st.session_state.get("pending_validation_recovery_context")
     if isinstance(action, RecoveryAction) and context == "exit_statement":
         _render_statement_exit_confirmation()
+    elif isinstance(action, RecoveryAction) and context == "exit_invoice":
+        _render_invoice_exit_confirmation()
     elif isinstance(action, RecoveryAction) and action.action_type == REMOVE_STAGED_SOURCE:
         _render_staged_statement_removal_confirmation()
     elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "duplicate_sources":
@@ -749,6 +758,24 @@ def _render_statement_exit_confirmation() -> None:
         cancel_key="cancel_exit_statement_review",
         failure_message=(
             "Unable to remove the staged Statement. Your current work has been kept."
+        ),
+    )
+
+
+@st.dialog("Leave Invoice Import?", icon=":material/warning:")
+def _render_invoice_exit_confirmation() -> None:
+    _render_pending_recovery_dialog(
+        body=(
+            "Uncommitted Invoice files and review progress in this step will be "
+            "discarded. Previously completed data will remain unchanged."
+        ),
+        confirm_label="Leave Invoice Import",
+        confirm_key="confirm_exit_invoice_import",
+        cancel_label="Cancel",
+        cancel_key="cancel_exit_invoice_import",
+        failure_message=(
+            "Unable to remove the current Invoice staging. Your current work "
+            "has been kept."
         ),
     )
 
@@ -877,6 +904,8 @@ def _execute_pending_recovery(failure_message: str) -> None:
     st.session_state.validation_recovery_notice = execution.message
     st.session_state.validation_recovery_detail = None
     if isinstance(action, RecoveryAction) and action.action_type == REMOVE_STAGED_SOURCE:
+        _set_step(2)
+    elif isinstance(action, RecoveryAction) and action.action_type == REMOVE_INVOICE_STAGING:
         _set_step(2)
     _clear_pending_recovery()
     st.rerun()
@@ -1283,6 +1312,7 @@ def _render_reconciliation_step() -> None:
                 historical_ready
                 or bool(st.session_state.get("invoice_commit_completed"))
             ),
+            include_invoice_exit=True,
             disabled_reason=(
                 None
                 if historical_ready
@@ -1341,6 +1371,18 @@ def _render_review_and_commit_step() -> None:
     _render_source_summary(result)
     readiness = result.commit_readiness
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        if st.session_state.get("invoice_commit_completed"):
+            imported_count = st.session_state.get("invoice_commit_completed_count")
+            st.success(
+                (
+                    f"Historical Invoice Commit Complete — Imported: {imported_count}."
+                    if imported_count is not None
+                    else "Historical Invoice Commit Complete."
+                ),
+                icon=":material/check_circle:",
+            )
+            _render_back_button(4, key="completed_invoice_back")
+            return
         entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
         historical_ready = _historical_commit_ready(entries)
         if readiness.ready and historical_ready:
@@ -1352,7 +1394,9 @@ def _render_review_and_commit_step() -> None:
                 "Return to Reconcile and resolve/remove all non-NEW sources before Commit.",
                 icon=":material/warning:",
             )
-        _render_back_button(4, key="invoice_commit_back")
+        with st.container(horizontal=True):
+            _render_back_button(4, key="invoice_commit_back")
+            _render_invoice_exit_button(key="exit_invoice_commit")
         _render_historical_invoice_commit()
         return
     if st.session_state.get("weekly_statement_commit_completed"):
@@ -1480,7 +1524,8 @@ def _render_historical_invoice_commit() -> None:
                 st.warning("Historical state changed immediately before commit. No mixed-batch write was started; validate again.")
             else:
                 st.session_state.invoice_commit_completed = True
-                st.success(f"Historical Invoice Commit Complete — Imported: {len(actual)}.")
+                st.session_state.invoice_commit_completed_count = len(actual)
+                st.rerun()
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True
             st.error(
@@ -1898,6 +1943,22 @@ def _render_statement_exit_button(*, key: str) -> None:
         st.rerun()
 
 
+def _render_invoice_exit_button(*, key: str) -> None:
+    if st.session_state.get("import_source_type") != PLATFORM_ORDERS:
+        return
+    action = plan_current_invoice_staging_exit(st.session_state)
+    if action is None:
+        return
+    if st.button(
+        "Exit Invoice Import",
+        icon=":material/logout:",
+        key=key,
+    ):
+        st.session_state.pending_validation_recovery_action = action
+        st.session_state.pending_validation_recovery_context = "exit_invoice"
+        st.rerun()
+
+
 def _statement_review_stale() -> bool:
     return bool(st.session_state.get("weekly_statement_review_stale_reason"))
 
@@ -2015,6 +2076,7 @@ def _render_next_step(
     *,
     back_step: int | None = None,
     allowed: bool = True,
+    include_invoice_exit: bool = False,
     disabled_reason: str | None = None,
 ) -> None:
     with st.container(horizontal=True):
@@ -2027,6 +2089,8 @@ def _render_next_step(
             if back_step is not None
             else False
         )
+        if include_invoice_exit:
+            _render_invoice_exit_button(key=f"invoice_exit_before_{step}")
         next_clicked = st.button(
             label,
             type="primary",

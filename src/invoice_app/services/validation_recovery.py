@@ -14,8 +14,14 @@ from .import_result_contract import RecoveryAction
 REMOVE_SOURCE = "remove_source"
 REMOVE_DUPLICATE = "remove_duplicate"
 REMOVE_STAGED_SOURCE = "remove_staged_source"
+REMOVE_INVOICE_STAGING = "remove_invoice_staging"
 VIEW_DETAILS = "view_details"
-_REMOVABLE_ACTION_TYPES = {REMOVE_SOURCE, REMOVE_DUPLICATE, REMOVE_STAGED_SOURCE}
+_REMOVABLE_ACTION_TYPES = {
+    REMOVE_SOURCE,
+    REMOVE_DUPLICATE,
+    REMOVE_STAGED_SOURCE,
+    REMOVE_INVOICE_STAGING,
+}
 _SOURCE_BUCKETS = (
     "orders",
     "products",
@@ -31,6 +37,27 @@ _STAGED_STATEMENT_KEYS = (
     "weekly_statement_issue_order_id",
     "weekly_statement_issue_order_click",
     "weekly_statement_commit_completed",
+)
+_INVOICE_STAGING_KEYS = (
+    "batch_id",
+    "pdf_count",
+    "upload_notice",
+    "upload_result_summary",
+    "view_customize_open",
+    "manual_review_correction_drafts",
+    "manual_resolution_notice",
+    "uat2_historical_commit_entries",
+    "uat2_historical_commit_refresh_required",
+    "uat2_historical_commit_signature",
+    "validation_recovery_detail",
+    "validation_recovery_notice",
+    "invoice_commit_completed",
+    "invoice_commit_completed_count",
+)
+_INVOICE_WIDGET_PREFIXES = (
+    "pdf_uploader_",
+    "data_import_current_batch_",
+    "mr_",
 )
 
 
@@ -120,6 +147,82 @@ def recovery_actions_for_source(
     return tuple(actions)
 
 
+def plan_current_invoice_staging_exit(
+    state: MutableMapping[str, Any],
+) -> RecoveryAction | None:
+    """Return a guarded exit action only for wholly uncommitted Invoice staging."""
+
+    if state.get("import_source_type") != "Platform Orders":
+        return None
+    if _has_committed_invoice_evidence(state):
+        return None
+    staging_token = _invoice_staging_token(state)
+    if staging_token is None:
+        return None
+    return _action(
+        REMOVE_INVOICE_STAGING,
+        "Exit Invoice Import",
+        staging_token,
+        destructive=True,
+        requires_revalidation=False,
+    )
+
+
+def execute_current_invoice_staging_exit(
+    state: MutableMapping[str, Any],
+    action: RecoveryAction,
+) -> RecoveryExecution:
+    """Remove only current uncommitted Invoice staging from this session.
+
+    This operation has no repository dependency and performs no archive or
+    remote-persistence deletion. It fails closed if commit evidence exists or
+    if the staged facts changed after confirmation was requested.
+    """
+
+    if action.action_type != REMOVE_INVOICE_STAGING:
+        raise ValueError("Recovery action is not an Invoice staging exit.")
+    if state.get("import_source_type") != "Platform Orders":
+        raise ValueError("The active source is not an Invoice import.")
+    if _has_committed_invoice_evidence(state):
+        raise ValueError("Committed Invoice evidence cannot be removed by step exit.")
+    current_token = _invoice_staging_token(state)
+    if current_token is None:
+        raise ValueError("No uncommitted Invoice staging is available.")
+    if current_token != action.affected_item:
+        raise ValueError("Invoice staging changed after exit confirmation was requested.")
+
+    removed_counts = {
+        bucket: len(state.get(bucket) or ())
+        for bucket in _SOURCE_BUCKETS
+    }
+    removed_fields = sum(key in state for key in _INVOICE_STAGING_KEYS)
+    widget_keys = tuple(
+        key
+        for key in state.keys()
+        if isinstance(key, str) and key.startswith(_INVOICE_WIDGET_PREFIXES)
+    )
+    for bucket in _SOURCE_BUCKETS:
+        state.pop(bucket, None)
+    for key in _INVOICE_STAGING_KEYS:
+        state.pop(key, None)
+    for key in widget_keys:
+        state.pop(key, None)
+    state["uploader_version"] = int(state.get("uploader_version", 0)) + 1
+
+    removed_counts["invoice_staging_fields"] = removed_fields
+    removed_counts["invoice_widget_state"] = len(widget_keys)
+    return RecoveryExecution(
+        action_id=action.action_id,
+        changed=True,
+        revalidated=False,
+        removed_counts=removed_counts,
+        message=(
+            "Removed current uncommitted Invoice staging. Upload Invoice files "
+            "to begin again."
+        ),
+    )
+
+
 def execute_current_batch_recovery(
     state: MutableMapping[str, Any],
     action: RecoveryAction,
@@ -136,6 +239,9 @@ def execute_current_batch_recovery(
         raise ValueError(f"Unsupported recovery action: {action.action_type}")
     if not action.affected_item:
         raise ValueError("Recovery action does not identify a source file.")
+
+    if action.action_type == REMOVE_INVOICE_STAGING:
+        return execute_current_invoice_staging_exit(state, action)
 
     if action.action_type == REMOVE_STAGED_SOURCE:
         changed = state.get("weekly_statement_stage") is not None
@@ -242,6 +348,49 @@ def _revalidate_platform_batch_state(state: MutableMapping[str, Any]) -> None:
             processing_errors=len(state.get("processing_errors", [])),
         )
         state["upload_result_summary"] = summary
+
+
+def _has_committed_invoice_evidence(state: MutableMapping[str, Any]) -> bool:
+    if state.get("invoice_commit_completed"):
+        return True
+    for entry in state.get("uat2_historical_commit_entries", ()):
+        status = getattr(entry, "status", None)
+        if getattr(status, "value", status) == "IMPORTED":
+            return True
+    return False
+
+
+def _invoice_staging_token(state: MutableMapping[str, Any]) -> str | None:
+    uploader_keys = tuple(
+        sorted(
+            key
+            for key in state.keys()
+            if isinstance(key, str) and key.startswith("pdf_uploader_")
+            and state.get(key)
+        )
+    )
+    has_staging = bool(
+        state.get("batch_id")
+        or any(state.get(bucket) for bucket in _SOURCE_BUCKETS)
+        or state.get("upload_result_summary")
+        or state.get("manual_review_correction_drafts")
+        or state.get("uat2_historical_commit_entries")
+        or uploader_keys
+    )
+    if not has_staging:
+        return None
+    signature_parts = [
+        ("import_source_type", repr(state.get("import_source_type"))),
+        ("batch_id", repr(state.get("batch_id"))),
+        ("uploader_version", repr(state.get("uploader_version", 0))),
+    ]
+    signature_parts.extend(
+        (key, repr(state.get(key)))
+        for key in (*_SOURCE_BUCKETS, *_INVOICE_STAGING_KEYS)
+    )
+    signature_parts.extend((key, repr(state.get(key))) for key in uploader_keys)
+    digest = sha256(repr(signature_parts).encode("utf-8")).hexdigest()[:16]
+    return f"invoice-staging:{digest}"
 
 
 def _action(
