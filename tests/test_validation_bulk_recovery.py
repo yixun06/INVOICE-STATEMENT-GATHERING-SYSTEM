@@ -145,8 +145,12 @@ def test_source_conflict_is_never_a_safe_duplicate_removal_target():
 def test_weekly_statement_duplicate_removal_uses_staged_source_action():
     state = {
         "weekly_statement_stage": object(),
-        "orders": [],
-        "products": [],
+        "weekly_statement_review": object(),
+        "weekly_statement_review_stale_reason": "Refresh required",
+        "weekly_statement_issue_order_id": "ORDER-1",
+        "weekly_statement_uploader_version": 3,
+        "orders": [{"order_id": "PERSISTED-INVOICE"}],
+        "products": [{"order_id": "PERSISTED-INVOICE", "item_index": 0}],
         "reviews": [],
         "duplicate_skipped": [],
         "unsupported_files": [],
@@ -162,7 +166,18 @@ def test_weekly_statement_duplicate_removal_uses_staged_source_action():
     execution = execute_current_batch_recovery(state, action)
 
     assert execution.changed is True
-    assert "weekly_statement_stage" not in state
+    for key in (
+        "weekly_statement_stage",
+        "weekly_statement_review",
+        "weekly_statement_review_stale_reason",
+        "weekly_statement_issue_order_id",
+    ):
+        assert key not in state
+    assert state["weekly_statement_uploader_version"] == 4
+    assert state["orders"] == [{"order_id": "PERSISTED-INVOICE"}]
+    assert state["products"] == [
+        {"order_id": "PERSISTED-INVOICE", "item_index": 0}
+    ]
 
 
 def test_validate_weekly_duplicate_removal_clears_the_staged_statement(tmp_path, monkeypatch):
@@ -199,7 +214,7 @@ def test_validate_weekly_duplicate_removal_clears_the_staged_statement(tmp_path,
     next(
         button
         for button in app.button
-        if button.label == "Confirm removal and revalidate"
+        if button.label == "Remove Statement"
     ).click().run(timeout=20)
 
     assert app.exception == []
@@ -236,7 +251,7 @@ def test_validate_duplicate_only_source_offers_safe_removal_and_keeps_audit_expa
     next(
         button
         for button in app.button
-        if button.label == "Confirm removal and revalidate"
+        if button.label == "Remove 1 Source"
     ).click().run(timeout=20)
 
     assert app.exception == []
@@ -335,7 +350,7 @@ def test_validate_bulk_manual_review_removal_requires_confirmation(tmp_path, mon
 
     next(button for button in app.button if button.label == "Remove all Manual Review sources from current batch").click().run(timeout=20)
     assert len(app.session_state.filtered_state["reviews"]) == 2
-    next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Remove 2 Sources").click().run(timeout=20)
     assert app.exception == []
     assert app.session_state.filtered_state["reviews"] == []
     assert [row["source_pdf"] for row in app.session_state.filtered_state["orders"]] == ["good.pdf"]
@@ -371,6 +386,6 @@ def test_reconcile_bulk_needs_review_removal_requires_confirmation(tmp_path, mon
 
     next(button for button in app.button if button.label == "Remove all NEEDS_REVIEW sources from current batch").click().run(timeout=20)
     assert len(app.session_state.filtered_state["orders"]) == 2
-    next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Remove 1 Source").click().run(timeout=20)
     assert app.exception == []
     assert [row["source_pdf"] for row in app.session_state.filtered_state["orders"]] == ["new.pdf"]

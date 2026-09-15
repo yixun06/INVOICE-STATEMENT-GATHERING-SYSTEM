@@ -24,6 +24,14 @@ _SOURCE_BUCKETS = (
     "unsupported_files",
     "processing_errors",
 )
+_STAGED_STATEMENT_KEYS = (
+    "weekly_statement_stage",
+    "weekly_statement_review",
+    "weekly_statement_review_stale_reason",
+    "weekly_statement_issue_order_id",
+    "weekly_statement_issue_order_click",
+    "weekly_statement_commit_completed",
+)
 
 
 @dataclass(frozen=True)
@@ -130,7 +138,12 @@ def execute_current_batch_recovery(
         raise ValueError("Recovery action does not identify a source file.")
 
     if action.action_type == REMOVE_STAGED_SOURCE:
-        changed = state.pop("weekly_statement_stage", None) is not None
+        changed = state.get("weekly_statement_stage") is not None
+        for key in _STAGED_STATEMENT_KEYS:
+            state.pop(key, None)
+        state["weekly_statement_uploader_version"] = (
+            int(state.get("weekly_statement_uploader_version", 0)) + 1
+        )
         return RecoveryExecution(
             action_id=action.action_id,
             changed=changed,

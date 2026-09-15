@@ -415,7 +415,7 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     app.session_state["navigation"] = "Data Import"
     app.session_state["batch_id"] = "batch-1"
     app.session_state["import_source_type"] = "Shopee Weekly Statement"
-    app.session_state["data_import_step"] = 5
+    app.session_state["data_import_step"] = 4
     app.session_state["weekly_statement_stage"] = review.stage
     app.session_state["weekly_statement_review"] = review
 
@@ -433,6 +433,17 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     assert review_table.iloc[0]["Identity"] == "ITEM"
     assert review_table.iloc[0]["Merchandise"] == "Reconciled"
     assert review_table.iloc[0]["Settlement"] == "Exact"
+    assert any(
+        button.label == "Continue to review & commit" and not button.disabled
+        for button in app.button
+    )
+
+    app.session_state["data_import_step"] = 5
+    app.run(timeout=20)
+
+    assert "Reconciliation V2 review" not in {
+        element.value for element in app.subheader
+    }
     assert any(
         button.label == "Commit Statement" and not button.disabled
         for button in app.button
@@ -935,7 +946,7 @@ def test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index(
     app.session_state["navigation"] = "Data Import"
     app.session_state["batch_id"] = "batch-1"
     app.session_state["import_source_type"] = "Shopee Weekly Statement"
-    app.session_state["data_import_step"] = 5
+    app.session_state["data_import_step"] = 4
     app.session_state["weekly_statement_stage"] = review.stage
     app.session_state["weekly_statement_review"] = review
 
@@ -958,7 +969,7 @@ def test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index(
         for caption in app.caption
     )
     assert any(
-        button.label == "Commit Statement" and not button.disabled
+        button.label == "Continue to review & commit" and not button.disabled
         for button in app.button
     )
 
@@ -987,4 +998,263 @@ def test_stale_product_master_review_is_visible_and_commit_is_disabled(
     assert any(
         button.label == "Commit Statement" and button.disabled
         for button in app.button
+    )
+
+
+def test_statement_back_is_navigation_only_and_forward_restores_staging(
+    tmp_path, monkeypatch
+):
+    review, _, _ = _review(
+        monkeypatch,
+        items=(_item("Other Product", seller_sku="OTHER-SKU"),),
+    )
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    invoice_orders = [{"order_id": "COMMITTED-INVOICE", "status": "Accepted"}]
+    invoice_products = [{"order_id": "COMMITTED-INVOICE", "item_index": 0}]
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "statement-back-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+        "orders": invoice_orders,
+        "products": invoice_products,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    forward = next(
+        button for button in app.button
+        if button.label == "Continue to reconcile"
+    )
+    assert forward.disabled is True
+    assert any(
+        "still need attention before continuing" in caption.value
+        for caption in app.caption
+    )
+    next(button for button in app.button if button.key == "statement_back_4").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert state["data_import_step"] == 2
+    assert state["weekly_statement_stage"] == review.stage
+    assert state["weekly_statement_review"] == review
+    assert state["orders"] == invoice_orders
+    assert state["products"] == invoice_products
+    assert not any(
+        button.label in {"Leave Statement Review", "Remove Statement"}
+        for button in app.button
+    )
+
+    next(
+        button for button in app.button
+        if button.label == "Continue to validate"
+    ).click().run(timeout=20)
+
+    restored = app.session_state.filtered_state
+    assert restored["data_import_step"] == 3
+    assert restored["weekly_statement_stage"] == review.stage
+    assert restored["weekly_statement_review"] == review
+
+
+def test_direct_statement_commit_access_remains_blocked_and_routes_to_review(
+    tmp_path, monkeypatch
+):
+    review, _, _ = _review(
+        monkeypatch,
+        items=(_item("Other Product", seller_sku="OTHER-SKU"),),
+    )
+    expected = adapt_shopee_weekly_statement_import_result(
+        review.stage,
+        batch_id="blocked-direct-batch",
+        review=review,
+    )
+    expected_issues = len(expected.validation.blocking_issues)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "blocked-direct-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 5,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    blocker = next(error.value for error in app.error if "Cannot commit Statement" in error.value)
+    assert "1 order still needs" in blocker
+    assert f"{expected_issues} unresolved issue" in blocker
+    assert all(reason not in blocker for reason in review.blockers)
+    assert any(
+        button.label == "Commit Statement" and button.disabled
+        for button in app.button
+    )
+    assert "Reconciliation V2 review" not in {
+        element.value for element in app.subheader
+    }
+
+    next(
+        button for button in app.button
+        if button.label == "Back to Statement Review"
+    ).click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert state["data_import_step"] == 3
+    assert state["weekly_statement_stage"] == review.stage
+    assert state["weekly_statement_review"] == review
+    assert "Affected orders" in {element.value for element in app.subheader}
+
+
+def test_exit_statement_review_cancel_and_confirm_are_narrow(
+    tmp_path, monkeypatch
+):
+    review, _, _ = _review(
+        monkeypatch,
+        items=(_item("Other Product", seller_sku="OTHER-SKU"),),
+    )
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    invoice_orders = [{"order_id": "COMMITTED-INVOICE", "status": "Accepted"}]
+    invoice_products = [{"order_id": "COMMITTED-INVOICE", "item_index": 0}]
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "statement-exit-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+        "weekly_statement_review_stale_reason": "Refresh required.",
+        "weekly_statement_issue_order_id": "ORDER-1",
+        "weekly_statement_uploader_version": 4,
+        "orders": invoice_orders,
+        "products": invoice_products,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    next(
+        button for button in app.button
+        if button.label == "Exit Statement Review"
+    ).click().run(timeout=20)
+
+    pending = app.session_state.filtered_state
+    assert pending["weekly_statement_stage"] == review.stage
+    assert pending["weekly_statement_review"] == review
+    assert any(button.label == "Leave Statement Review" for button in app.button)
+    next(
+        button for button in app.button
+        if button.key == "cancel_exit_statement_review"
+    ).click().run(timeout=20)
+
+    cancelled = app.session_state.filtered_state
+    assert cancelled["data_import_step"] == 3
+    assert cancelled["weekly_statement_stage"] == review.stage
+    assert cancelled["orders"] == invoice_orders
+
+    next(
+        button for button in app.button
+        if button.label == "Exit Statement Review"
+    ).click().run(timeout=20)
+    next(
+        button for button in app.button
+        if button.label == "Leave Statement Review"
+    ).click().run(timeout=20)
+
+    exited = app.session_state.filtered_state
+    assert app.exception == []
+    assert exited["data_import_step"] == 2
+    for key in (
+        "weekly_statement_stage",
+        "weekly_statement_review",
+        "weekly_statement_review_stale_reason",
+        "weekly_statement_issue_order_id",
+    ):
+        assert key not in exited
+    assert exited["weekly_statement_uploader_version"] == 5
+    assert exited["orders"] == invoice_orders
+    assert exited["products"] == invoice_products
+    assert exited["batch_id"] == "statement-exit-batch"
+
+
+def test_failed_statement_exit_keeps_work_and_current_step(
+    tmp_path, monkeypatch
+):
+    review, _, _ = _review(
+        monkeypatch,
+        items=(_item("Other Product", seller_sku="OTHER-SKU"),),
+    )
+
+    def fail_recovery(_state, _action):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(
+        "src.invoice_app.ui.data_import.execute_current_batch_recovery",
+        fail_recovery,
+    )
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "statement-failure-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    next(
+        button for button in app.button
+        if button.label == "Exit Statement Review"
+    ).click().run(timeout=20)
+    next(
+        button for button in app.button
+        if button.label == "Leave Statement Review"
+    ).click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert state["data_import_step"] == 3
+    assert state["weekly_statement_stage"] == review.stage
+    assert state["weekly_statement_review"] == review
+    assert any(
+        "Unable to remove the staged Statement" in error.value
+        for error in app.error
+    )
+    assert not any("Recovery complete" in success.value for success in app.success)
+
+
+def test_committed_statement_does_not_offer_destructive_exit(tmp_path, monkeypatch):
+    review, _, _ = _review(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "completed-statement-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 5,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+        "weekly_statement_commit_completed": True,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert not any(
+        button.label == "Exit Statement Review" for button in app.button
     )

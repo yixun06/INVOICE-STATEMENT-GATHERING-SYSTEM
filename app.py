@@ -74,6 +74,8 @@ from src.invoice_app.services.exporter import (
 )
 from src.invoice_app.ui.data_import import (
     DATA_IMPORT_PAGE,
+    PLATFORM_ORDERS,
+    SHOPEE_WEEKLY_STATEMENT,
     initialize_data_import_state,
     render_data_import,
     reset_data_import_state,
@@ -496,6 +498,8 @@ def _render_workflow_safety_dialogs() -> None:
         _render_navigation_blocked_dialog(str(blocked.get("activity", "workflow operation")))
     if st.session_state.get("pending_batch_discard_confirmation"):
         _render_batch_discard_dialog()
+    if st.session_state.get("pending_logout_confirmation"):
+        _render_logout_confirmation_dialog()
 
 
 @st.dialog("Processing in progress", icon=":material/info:")
@@ -509,16 +513,85 @@ def _render_navigation_blocked_dialog(activity: str) -> None:
         st.rerun()
 
 
-@st.dialog("Discard current batch?", icon=":material/warning:")
+@st.dialog("Discard Current Batch?", icon=":material/warning:")
 def _render_batch_discard_dialog() -> None:
-    st.warning("This removes the current session batch and its staging state. Archived source files are not changed.")
+    st.warning(
+        "This will clear all uncommitted data in the current batch, not just "
+        "the current step. This action cannot be undone."
+    )
     with st.container(horizontal=True):
-        if st.button("Discard current batch", type="primary", icon=":material/delete:", key="confirm_discard_current_batch"):
+        if st.button("Discard Current Batch", type="primary", icon=":material/delete:", key="confirm_discard_current_batch"):
             reset_batch()
             st.session_state.pop("pending_batch_discard_confirmation", None)
             st.rerun()
         if st.button("Cancel", key="cancel_discard_current_batch"):
             st.session_state.pop("pending_batch_discard_confirmation", None)
+            st.rerun()
+
+
+def _has_unfinished_session_work() -> bool:
+    """Derive progress-loss risk from current authoritative session facts."""
+
+    if st.session_state.get("manual_review_correction_drafts"):
+        return True
+    if (
+        st.session_state.get("pending_validation_recovery_action")
+        or st.session_state.get("pending_validation_bulk_recovery")
+    ):
+        return True
+    source_type = st.session_state.get("import_source_type")
+    if source_type == SHOPEE_WEEKLY_STATEMENT:
+        return bool(
+            st.session_state.get("weekly_statement_stage")
+            and not st.session_state.get("weekly_statement_commit_completed")
+        )
+    if source_type == PLATFORM_ORDERS:
+        if st.session_state.get("invoice_commit_completed"):
+            return False
+        return bool(
+            st.session_state.get("batch_id")
+            or any(
+                st.session_state.get(key)
+                for key in (
+                    "orders",
+                    "products",
+                    "reviews",
+                    "duplicate_skipped",
+                    "unsupported_files",
+                    "processing_errors",
+                )
+            )
+        )
+    return bool(
+        st.session_state.get("weekly_statement_stage")
+        and not st.session_state.get("weekly_statement_commit_completed")
+    )
+
+
+def _perform_logout() -> None:
+    st.session_state.authenticated = False
+    st.session_state.pop("authenticated_username", None)
+    st.session_state.pop("pending_logout_confirmation", None)
+    reset_batch()
+
+
+@st.dialog("Log Out?", icon=":material/warning:")
+def _render_logout_confirmation_dialog() -> None:
+    st.warning(
+        "You still have unfinished work in the current session. Uncommitted "
+        "progress may be lost."
+    )
+    with st.container(horizontal=True):
+        if st.button(
+            "Log Out",
+            type="primary",
+            icon=":material/logout:",
+            key="confirm_logout_with_unfinished_work",
+        ):
+            _perform_logout()
+            st.rerun()
+        if st.button("Stay", key="cancel_logout_with_unfinished_work"):
+            st.session_state.pop("pending_logout_confirmation", None)
             st.rerun()
 
 def show_sidebar(pdf_count: int) -> str:
@@ -770,9 +843,10 @@ def show_sidebar(pdf_count: int) -> str:
             st.rerun()
 
         if st.button("Logout", icon=":material/logout:", width="stretch"):
-            st.session_state.authenticated = False
-            st.session_state.pop("authenticated_username", None)
-            reset_batch()
+            if _has_unfinished_session_work():
+                st.session_state.pending_logout_confirmation = True
+            else:
+                _perform_logout()
             st.rerun()
 
         st.html(

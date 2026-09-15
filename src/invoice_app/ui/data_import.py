@@ -94,13 +94,21 @@ _WORKFLOW_KEYS = (
     "weekly_statement_stage",
     "weekly_statement_review",
     "weekly_statement_review_stale_reason",
+    "weekly_statement_commit_completed",
+    "invoice_commit_completed",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
     "manual_review_correction_drafts",
+    "pending_validation_recovery_action",
     "pending_validation_bulk_recovery",
+    "pending_validation_recovery_context",
+    "validation_recovery_detail",
+    "validation_recovery_notice",
+    "weekly_statement_issue_order_id",
+    "weekly_statement_issue_order_click",
 )
 
 
@@ -230,16 +238,24 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             _set_step(2)
             st.rerun()
 def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> None:
+    _render_recovery_notice()
     source_type = st.session_state.get("import_source_type")
     if source_type == PLATFORM_ORDERS:
         st.subheader("Upload platform order files")
         st.caption("Upload PDF or ZIP order documents for the active batch.")
         render_platform_orders_upload()
-        if st.session_state.get("batch_id") and st.button(
-            "Continue to validate", type="primary", icon=":material/arrow_forward:"
-        ):
-            _set_step(3)
-            st.rerun()
+        has_staging = bool(st.session_state.get("batch_id"))
+        _render_next_step(
+            "Continue to validate",
+            3,
+            back_step=1,
+            allowed=has_staging,
+            disabled_reason=(
+                None
+                if has_staging
+                else "Upload and process at least one Invoice source before continuing."
+            ),
+        )
         return
     if source_type == SHOPEE_WEEKLY_STATEMENT:
         _render_weekly_statement_upload()
@@ -251,6 +267,16 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
 def _render_weekly_statement_upload() -> None:
     st.subheader("Upload Shopee Weekly Statement")
     st.caption("Upload one native Shopee Weekly Statement workbook (.xlsx).")
+    review = _weekly_review()
+    stage = _weekly_stage()
+    if stage is not None:
+        st.info(
+            f"Staged Statement: {stage.source_filename}. Return to validation to "
+            "continue the existing review.",
+            icon=":material/info:",
+        )
+        _render_statement_resume_actions(back_step=1)
+        return
     version = int(st.session_state.get("weekly_statement_uploader_version", 0))
     uploaded_file = st.file_uploader(
         "Shopee Weekly Statement (.xlsx)",
@@ -288,6 +314,7 @@ def _render_weekly_statement_upload() -> None:
         if _weekly_review() is not None:
             _set_step(3)
             st.rerun()
+    _render_back_button(1, key="statement_upload_back")
 
 
 def _render_validation_step(
@@ -309,9 +336,15 @@ def _render_validation_step(
         _render_statement_review_tables()
     _render_recovery_area()
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
-        _render_statement_next_step("Continue to reconcile", 4)
+        _render_statement_next_step("Continue to reconcile", 4, back_step=2)
     else:
-        _render_next_step("Continue to reconcile", 4)
+        _render_next_step(
+            "Continue to reconcile",
+            4,
+            back_step=2,
+            allowed=result.commit_readiness.ready,
+            disabled_reason=_commit_readiness_reason(result),
+        )
 
 
 def _render_contract_validation(result: ImportResult) -> None:
@@ -424,16 +457,6 @@ def _render_weekly_statement_needs_attention(
         "Statement issues before this Statement can be committed.",
         icon=":material/error:",
     )
-
-    action = presentation.removal_action
-    if action is not None and st.button(
-        action.label,
-        icon=":material/delete_outline:",
-        key=f"statement_level_{action.action_id}",
-        disabled=not action.allowed,
-    ):
-        st.session_state.pending_validation_recovery_action = action
-        st.rerun()
 
     if presentation.statement_issues:
         st.subheader("Statement issues")
@@ -569,6 +592,7 @@ def _render_consolidated_duplicates(duplicate_warnings: tuple[ValidationIssue, .
                 _queue_bulk_recovery(
                     list(removal_plan.safe_sources),
                     label="Remove safe duplicate sources",
+                    confirmation_kind="duplicate_sources",
                 )
         if removal_plan.retained_sources:
             st.caption(
@@ -613,6 +637,7 @@ def _render_weekly_statement_duplicate_removal(
         key="remove_staged_duplicate_statement",
     ):
         st.session_state.pending_validation_recovery_action = action
+        st.session_state.pending_validation_recovery_context = "remove_statement"
         st.rerun()
 
 
@@ -674,54 +699,193 @@ def _has_pending_recovery() -> bool:
     )
 
 
-def _queue_bulk_recovery(sources: list[str], *, label: str) -> None:
+def _queue_bulk_recovery(
+    sources: list[str],
+    *,
+    label: str,
+    confirmation_kind: str = "remove_sources",
+) -> None:
     source_names = tuple(dict.fromkeys(source.strip() for source in sources if source.strip()))
     if not source_names:
         return
     st.session_state.pending_validation_bulk_recovery = {
         "label": label,
         "sources": source_names,
+        "confirmation_kind": confirmation_kind,
     }
     st.rerun()
 
 
-@st.dialog("Remove source(s) from current batch?", icon=":material/warning:")
 def _render_recovery_confirmation() -> None:
+    """Route each pending destructive action to a concise native dialog."""
+
     action = st.session_state.get("pending_validation_recovery_action")
     bulk = st.session_state.get("pending_validation_bulk_recovery")
     if not isinstance(action, RecoveryAction) and not isinstance(bulk, dict):
-        st.session_state.pop("pending_validation_recovery_action", None)
-        st.session_state.pop("pending_validation_bulk_recovery", None)
+        _clear_pending_recovery()
         st.rerun()
-    if isinstance(action, RecoveryAction):
-        description = f"{action.label}: {action.affected_item}."
+
+    context = st.session_state.get("pending_validation_recovery_context")
+    if isinstance(action, RecoveryAction) and context == "exit_statement":
+        _render_statement_exit_confirmation()
+    elif isinstance(action, RecoveryAction) and action.action_type == REMOVE_STAGED_SOURCE:
+        _render_staged_statement_removal_confirmation()
+    elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "duplicate_sources":
+        _render_duplicate_removal_confirmation()
     else:
+        _render_source_removal_confirmation()
+
+
+@st.dialog("Leave Statement Review?", icon=":material/warning:")
+def _render_statement_exit_confirmation() -> None:
+    _render_pending_recovery_dialog(
+        body=(
+            "The staged Weekly Statement will be removed. Previously completed "
+            "Invoice data will remain unchanged."
+        ),
+        confirm_label="Leave Statement Review",
+        confirm_key="confirm_exit_statement_review",
+        cancel_label="Cancel",
+        cancel_key="cancel_exit_statement_review",
+        failure_message=(
+            "Unable to remove the staged Statement. Your current work has been kept."
+        ),
+    )
+
+
+@st.dialog("Remove Staged Statement?", icon=":material/warning:")
+def _render_staged_statement_removal_confirmation() -> None:
+    _render_pending_recovery_dialog(
+        body=(
+            "This Statement will be removed from the current session. Previously "
+            "completed Invoice data will remain unchanged."
+        ),
+        confirm_label="Remove Statement",
+        confirm_key="confirm_remove_staged_statement",
+        cancel_label="Cancel",
+        cancel_key="cancel_remove_staged_statement",
+        failure_message=(
+            "Unable to remove the staged Statement. Your current work has been kept."
+        ),
+    )
+
+
+@st.dialog("Remove Duplicate Sources?", icon=":material/warning:")
+def _render_duplicate_removal_confirmation() -> None:
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    sources = tuple(bulk.get("sources", ())) if isinstance(bulk, dict) else ()
+    if not sources:
+        _clear_pending_recovery()
+        st.rerun()
+    count = len(sources)
+    _render_pending_recovery_dialog(
+        body=(
+            f"{count} duplicate-only source file{'s' if count != 1 else ''} will "
+            "be removed from the current batch. Valid orders will not be affected."
+        ),
+        confirm_label=f"Remove {count} Source{'s' if count != 1 else ''}",
+        confirm_key="confirm_remove_duplicate_sources",
+        cancel_label="Cancel",
+        cancel_key="cancel_remove_duplicate_sources",
+        failure_message=(
+            "Unable to remove the duplicate sources. Your current work has been kept."
+        ),
+    )
+
+
+@st.dialog("Remove Current Source?", icon=":material/warning:")
+def _render_source_removal_confirmation() -> None:
+    action = st.session_state.get("pending_validation_recovery_action")
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    if isinstance(action, RecoveryAction):
+        body = (
+            f"{action.affected_item} will be removed from the current batch. "
+            "Other current-batch sources will remain."
+        )
+        confirm_label = "Remove Source"
+    elif isinstance(bulk, dict):
         sources = tuple(bulk.get("sources", ()))
         if not sources:
-            st.session_state.pop("pending_validation_bulk_recovery", None)
+            _clear_pending_recovery()
             st.rerun()
-        description = f"{bulk.get('label', 'Remove selected sources')}: {len(sources)} source(s)."
-    st.warning(f"{description} This changes only current staging; archived source files remain unchanged.")
+        count = len(sources)
+        body = (
+            f"{count} selected source file{'s' if count != 1 else ''} will be "
+            "removed from the current batch. Other current-batch sources will remain."
+        )
+        confirm_label = f"Remove {count} Source{'s' if count != 1 else ''}"
+    else:
+        _clear_pending_recovery()
+        st.rerun()
+    _render_pending_recovery_dialog(
+        body=body,
+        confirm_label=confirm_label,
+        confirm_key="confirm_remove_current_sources",
+        cancel_label="Cancel",
+        cancel_key="cancel_remove_current_sources",
+        failure_message=(
+            "Unable to remove the selected source. Your current work has been kept."
+        ),
+    )
+
+
+def _render_pending_recovery_dialog(
+    *,
+    body: str,
+    confirm_label: str,
+    confirm_key: str,
+    cancel_label: str,
+    cancel_key: str,
+    failure_message: str,
+) -> None:
+    st.warning(body)
     with st.container(horizontal=True):
-        if st.button("Confirm removal and revalidate", type="primary", icon=":material/delete:", key="confirm_validation_recovery"):
-            begin_workflow_activity(st.session_state, "Revalidating")
-            try:
-                execution = (
-                    execute_current_batch_recovery(st.session_state, action)
-                    if isinstance(action, RecoveryAction)
-                    else execute_current_batch_bulk_recovery(st.session_state, bulk["sources"])
-                )
-            finally:
-                end_workflow_activity(st.session_state)
-            st.session_state.validation_recovery_notice = execution.message
-            st.session_state.validation_recovery_detail = None
-            st.session_state.pop("pending_validation_recovery_action", None)
-            st.session_state.pop("pending_validation_bulk_recovery", None)
+        if st.button(
+            confirm_label,
+            type="primary",
+            icon=":material/delete:",
+            key=confirm_key,
+        ):
+            _execute_pending_recovery(failure_message)
+        if st.button(cancel_label, key=cancel_key):
+            _clear_pending_recovery()
             st.rerun()
-        if st.button("Cancel", key="cancel_validation_recovery"):
-            st.session_state.pop("pending_validation_recovery_action", None)
-            st.session_state.pop("pending_validation_bulk_recovery", None)
-            st.rerun()
+
+
+def _execute_pending_recovery(failure_message: str) -> None:
+    action = st.session_state.get("pending_validation_recovery_action")
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    begin_workflow_activity(st.session_state, "Revalidating")
+    try:
+        if isinstance(action, RecoveryAction):
+            execution = execute_current_batch_recovery(st.session_state, action)
+        elif isinstance(bulk, dict):
+            execution = execute_current_batch_bulk_recovery(
+                st.session_state,
+                bulk.get("sources", ()),
+            )
+        else:
+            raise ValueError("No pending recovery action is available.")
+    except Exception:
+        st.error(failure_message, icon=":material/error:")
+        return
+    finally:
+        end_workflow_activity(st.session_state)
+    if not execution.changed:
+        st.error(failure_message, icon=":material/error:")
+        return
+    st.session_state.validation_recovery_notice = execution.message
+    st.session_state.validation_recovery_detail = None
+    if isinstance(action, RecoveryAction) and action.action_type == REMOVE_STAGED_SOURCE:
+        _set_step(2)
+    _clear_pending_recovery()
+    st.rerun()
+
+
+def _clear_pending_recovery() -> None:
+    st.session_state.pop("pending_validation_recovery_action", None)
+    st.session_state.pop("pending_validation_bulk_recovery", None)
+    st.session_state.pop("pending_validation_recovery_context", None)
 
 def _render_recovery_notice() -> None:
     notice = st.session_state.pop("validation_recovery_notice", None)
@@ -1105,26 +1269,57 @@ def _render_final_amount_form(key: str, review: dict[str, Any]) -> None:
 
 def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")
+    if _has_pending_recovery():
+        _render_recovery_confirmation()
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         _reconcile_historical_invoice_staging()
-        if _has_pending_recovery():
-            _render_recovery_confirmation()
-        _render_next_step("Continue to review & commit", 5)
+        entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
+        historical_ready = _historical_commit_ready(entries)
+        _render_next_step(
+            "Continue to review & commit",
+            5,
+            back_step=3,
+            allowed=(
+                historical_ready
+                or bool(st.session_state.get("invoice_commit_completed"))
+            ),
+            disabled_reason=(
+                None
+                if historical_ready
+                else _historical_forward_reason(entries)
+            ),
+        )
         return
     reconciliation = _current_import_result().reconciliation
     if not reconciliation.available:
         reason = reconciliation.source_specific_details.get("reason")
         st.info(f"{reconciliation.status} — {reason or 'Reconciliation is not available for this staged result.'}", icon=":material/info:")
-        _render_next_step("Continue to review & commit", 5)
+        _render_next_step(
+            "Continue to review & commit",
+            5,
+            back_step=3,
+            allowed=False,
+            disabled_reason=(
+                reason or "Reconciliation must be available before continuing."
+            ),
+        )
         return
     _render_summary_items(reconciliation.summary)
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
         _render_statement_review_tables()
-        _render_statement_next_step("Continue to review & commit", 5)
+        _render_statement_next_step(
+            "Continue to review & commit",
+            5,
+            back_step=3,
+        )
     else:
-        _render_next_step("Continue to review & commit", 5)
+        _render_next_step(
+            "Continue to review & commit",
+            5,
+            back_step=3,
+        )
 
 
 def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationException, ...]) -> None:
@@ -1157,11 +1352,20 @@ def _render_review_and_commit_step() -> None:
                 "Return to Reconcile and resolve/remove all non-NEW sources before Commit.",
                 icon=":material/warning:",
             )
+        _render_back_button(4, key="invoice_commit_back")
         _render_historical_invoice_commit()
         return
-    _render_statement_review_tables()
+    if st.session_state.get("weekly_statement_commit_completed"):
+        st.success("Statement Commit Complete.", icon=":material/check_circle:")
+        _render_back_button(4, key="completed_statement_back")
+        return
     review = _weekly_review()
-    if review is not None and review.ready and not _statement_review_stale():
+    if (
+        review is not None
+        and readiness.ready
+        and review.commit_ready
+        and not _statement_review_stale()
+    ):
         st.success(
             "Reconciliation review complete — V2 found no business blockers.",
             icon=":material/check_circle:",
@@ -1172,13 +1376,36 @@ def _render_review_and_commit_step() -> None:
                 "No row-to-item allocation has been invented for GROUP evidence.",
                 icon=":material/info:",
             )
-    elif _statement_review_stale():
-        st.warning(
-            str(st.session_state.get("weekly_statement_review_stale_reason")),
-            icon=":material/refresh:",
-        )
+        with st.container(horizontal=True):
+            _render_back_button(4, key="ready_statement_commit_back")
+            _render_statement_exit_button(key="exit_ready_statement_commit")
     else:
-        st.warning(f"Items still need attention — {' '.join(readiness.reasons)}", icon=":material/warning:")
+        affected_orders, unresolved_issues = _statement_blocker_counts(result)
+        st.error(
+            "**Cannot commit Statement**\n\n"
+            f"{affected_orders} order{'s' if affected_orders != 1 else ''} "
+            f"{'still needs' if affected_orders == 1 else 'still need'} attention. "
+            f"{unresolved_issues} unresolved "
+            f"issue{'s' if unresolved_issues != 1 else ''} remain.\n\n"
+            "Resolve all blocking issues in Statement Review before committing.",
+            icon=":material/error:",
+        )
+        if _statement_review_stale():
+            st.warning(
+                str(st.session_state.get("weekly_statement_review_stale_reason")),
+                icon=":material/refresh:",
+            )
+        elif not unresolved_issues and readiness.reasons:
+            st.caption(readiness.reasons[0])
+        with st.container(horizontal=True):
+            if st.button(
+                "Back to Statement Review",
+                icon=":material/arrow_back:",
+                key="back_to_statement_review",
+            ):
+                _set_step(3)
+                st.rerun()
+            _render_statement_exit_button(key="exit_blocked_statement_commit")
     _render_statement_commit(readiness.ready)
 
 
@@ -1252,6 +1479,7 @@ def _render_historical_invoice_commit() -> None:
                 st.session_state.uat2_historical_commit_refresh_required = True
                 st.warning("Historical state changed immediately before commit. No mixed-batch write was started; validate again.")
             else:
+                st.session_state.invoice_commit_completed = True
                 st.success(f"Historical Invoice Commit Complete — Imported: {len(actual)}.")
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True
@@ -1512,8 +1740,8 @@ def _render_statement_commit(ready: bool) -> None:
         st.error(f"Statement commit failed before a safe write could be confirmed: {error}")
         return
     if attempt.committed:
-        st.success("Statement Commit Complete.", icon=":material/check_circle:")
-        return
+        st.session_state.weekly_statement_commit_completed = True
+        st.rerun()
     st.warning(
         "Statement state changed or the write was not applied. No new commit was confirmed; validation has been refreshed."
     )
@@ -1542,17 +1770,131 @@ def _refresh_statement_review(review: StatementImportReview) -> bool:
     return True
 
 
-def _render_statement_next_step(label: str, step: int) -> None:
-    """Re-evaluate current evidence before moving to the next review step."""
+def _render_statement_next_step(
+    label: str,
+    step: int,
+    *,
+    back_step: int,
+) -> None:
+    """Gate forward navigation with the authoritative Statement review."""
 
-    if not st.button(label, type="primary", icon=":material/arrow_forward:"):
+    allowed, disabled_reason = _statement_forward_gate()
+    with st.container(horizontal=True):
+        back_clicked = st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key=f"statement_back_{step}",
+        )
+        _render_statement_exit_button(key=f"statement_exit_before_{step}")
+        next_clicked = st.button(
+            label,
+            type="primary",
+            icon=":material/arrow_forward:",
+            key=f"statement_next_{step}",
+            disabled=not allowed,
+        )
+    if not allowed and disabled_reason:
+        st.caption(disabled_reason)
+    if back_clicked:
+        _set_step(back_step)
+        st.rerun()
+    if not next_clicked:
         return
     review = _weekly_review()
     if review is None:
-        st.warning("Validate the Statement before continuing.")
         return
-    if _refresh_statement_review(review):
-        _set_step(step)
+    if not _refresh_statement_review(review):
+        return
+    refreshed = _weekly_review()
+    if refreshed is None or not refreshed.commit_ready or _statement_review_stale():
+        st.warning(_statement_forward_gate()[1])
+        return
+    _set_step(step)
+    st.rerun()
+
+
+def _render_statement_resume_actions(*, back_step: int) -> None:
+    with st.container(horizontal=True):
+        back_clicked = st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key="statement_resume_back",
+        )
+        _render_statement_exit_button(key="statement_resume_exit")
+        continue_clicked = st.button(
+            "Continue to validate",
+            type="primary",
+            icon=":material/arrow_forward:",
+            key="statement_resume_validation",
+        )
+    if back_clicked:
+        _set_step(back_step)
+        st.rerun()
+    if continue_clicked:
+        _set_step(3)
+        st.rerun()
+
+
+def _statement_forward_gate() -> tuple[bool, str | None]:
+    review = _weekly_review()
+    if review is None:
+        return False, "Check the Weekly Statement before continuing."
+    if _statement_review_stale():
+        return False, "Refresh the Statement review before continuing."
+    result = _current_import_result()
+    if result.commit_readiness.ready and review.commit_ready:
+        return True, None
+    affected_orders, issue_count = _statement_blocker_counts(result)
+    if issue_count:
+        return (
+            False,
+            f"{affected_orders} affected order{'s' if affected_orders != 1 else ''}; "
+            f"{issue_count} unresolved issue{'s' if issue_count != 1 else ''} "
+            "still need attention before continuing.",
+        )
+    return False, _commit_readiness_reason(result)
+
+
+def _statement_blocker_counts(result: ImportResult) -> tuple[int, int]:
+    issues = result.validation.blocking_issues
+    presentation = _statement_issue_presentation(result, issues)
+    return len(presentation.order_groups), len(issues)
+
+
+def _statement_removal_action() -> RecoveryAction | None:
+    result = _current_import_result()
+    issues = (*result.validation.blocking_issues, *result.validation.warnings)
+    action = _statement_issue_presentation(result, issues).removal_action
+    if action is not None:
+        return action
+    stage = _weekly_stage()
+    if stage is None:
+        return None
+    actions = recovery_actions_for_source(
+        source=stage.source_filename,
+        action_type=REMOVE_STAGED_SOURCE,
+        remove_label="Remove staged source",
+        include_details=False,
+    )
+    return actions[0] if actions else None
+
+
+def _render_statement_exit_button(*, key: str) -> None:
+    if st.session_state.get("weekly_statement_commit_completed"):
+        return
+    stage = _weekly_stage()
+    if stage is None or stage.duplicate_status:
+        return
+    action = _statement_removal_action()
+    if action is None:
+        return
+    if st.button(
+        "Exit Statement Review",
+        icon=":material/logout:",
+        key=key,
+    ):
+        st.session_state.pending_validation_recovery_action = action
+        st.session_state.pending_validation_recovery_context = "exit_statement"
         st.rerun()
 
 
@@ -1661,7 +2003,58 @@ def _historical_commit_signature() -> str:
     return sha256(repr((st.session_state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
 
 
-def _render_next_step(label: str, step: int) -> None:
-    if st.button(label, type="primary", icon=":material/arrow_forward:"):
+def _render_back_button(step: int, *, key: str) -> None:
+    if st.button("Back", icon=":material/arrow_back:", key=key):
         _set_step(step)
         st.rerun()
+
+
+def _render_next_step(
+    label: str,
+    step: int,
+    *,
+    back_step: int | None = None,
+    allowed: bool = True,
+    disabled_reason: str | None = None,
+) -> None:
+    with st.container(horizontal=True):
+        back_clicked = (
+            st.button(
+                "Back",
+                icon=":material/arrow_back:",
+                key=f"data_import_back_{step}",
+            )
+            if back_step is not None
+            else False
+        )
+        next_clicked = st.button(
+            label,
+            type="primary",
+            icon=":material/arrow_forward:",
+            key=f"data_import_next_{step}",
+            disabled=not allowed,
+        )
+    if not allowed and disabled_reason:
+        st.caption(disabled_reason)
+    if back_clicked:
+        _set_step(back_step)
+        st.rerun()
+    if next_clicked and allowed:
+        _set_step(step)
+        st.rerun()
+
+
+def _commit_readiness_reason(result: ImportResult) -> str:
+    if result.commit_readiness.reasons:
+        return result.commit_readiness.reasons[0]
+    return "Resolve the current step before continuing."
+
+
+def _historical_forward_reason(entries: tuple[Any, ...]) -> str:
+    if not entries:
+        return "Complete historical Invoice reconciliation before continuing."
+    unresolved = sum(entry.status is not IntakeStatus.NEW for entry in entries)
+    return (
+        f"Resolve or remove {unresolved} non-NEW Invoice source"
+        f"{'s' if unresolved != 1 else ''} before continuing."
+    )

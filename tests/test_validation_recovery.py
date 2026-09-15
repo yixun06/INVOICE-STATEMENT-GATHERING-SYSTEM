@@ -204,9 +204,9 @@ def test_recovery_remove_requires_confirmation_before_current_batch_changes(tmp_
 
     next(button for button in app.button if button.label == "Remove source from current batch").click().run(timeout=20)
     assert app.session_state.filtered_state["reviews"][0]["source_pdf"] == "manual.pdf"
-    assert any(button.label == "Confirm removal and revalidate" for button in app.button)
+    assert any(button.label == "Remove Source" for button in app.button)
 
-    next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Remove Source").click().run(timeout=20)
     assert app.exception == []
     assert app.session_state.filtered_state["reviews"] == []
 
@@ -260,7 +260,7 @@ def test_historical_conflict_remove_reuses_confirmed_current_batch_recovery(tmp_
     assert "Check Historical Status" not in {button.label for button in app.button}
     next(button for button in app.button if button.label == "Remove conflict.pdf from current batch").click().run(timeout=20)
     assert app.session_state.filtered_state["orders"][0]["source_pdf"] == "conflict.pdf"
-    next(button for button in app.button if button.label == "Confirm removal and revalidate").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Remove Source").click().run(timeout=20)
 
     state = app.session_state.filtered_state
     assert app.exception == []

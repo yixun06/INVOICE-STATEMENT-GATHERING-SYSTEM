@@ -1027,3 +1027,105 @@ def test_weekly_statement_reconciliation_uses_existing_staged_counts(tmp_path, m
     assert "These results are shown for review and do not change the source outcome." in {
         caption.value for caption in app.caption
     }
+
+
+def test_discard_current_batch_uses_stronger_confirmation_and_cancel_is_safe(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Dashboard",
+        "batch_id": "discard-cancel-batch",
+        "import_source_type": "Platform Orders",
+        "orders": [{"order_id": "KEEP-ME"}],
+        "products": [],
+        "reviews": [],
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    next(
+        button for button in app.button
+        if button.label == "Discard current batch"
+    ).click().run(timeout=20)
+
+    assert app.session_state.filtered_state["batch_id"] == "discard-cancel-batch"
+    assert any(
+        "not just the current step" in warning.value
+        and "cannot be undone" in warning.value
+        for warning in app.warning
+    )
+    assert any(button.label == "Discard Current Batch" for button in app.button)
+    next(
+        button for button in app.button
+        if button.key == "cancel_discard_current_batch"
+    ).click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert state["batch_id"] == "discard-cancel-batch"
+    assert state["orders"] == [{"order_id": "KEEP-ME"}]
+
+
+def test_logout_with_unfinished_work_requires_confirmation_and_stay_is_safe(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "authenticated_username": "Admin",
+        "navigation": "Dashboard",
+        "batch_id": "logout-warning-batch",
+        "import_source_type": "Platform Orders",
+        "orders": [{"order_id": "UNCOMMITTED"}],
+        "products": [],
+        "reviews": [],
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    next(button for button in app.button if button.label == "Logout").click().run(timeout=20)
+
+    pending = app.session_state.filtered_state
+    assert pending["authenticated"] is True
+    assert pending["batch_id"] == "logout-warning-batch"
+    assert any(
+        "unfinished work" in warning.value
+        and "Uncommitted progress may be lost" in warning.value
+        for warning in app.warning
+    )
+    assert any(button.label == "Log Out" for button in app.button)
+    next(
+        button for button in app.button
+        if button.key == "cancel_logout_with_unfinished_work"
+    ).click().run(timeout=20)
+
+    stayed = app.session_state.filtered_state
+    assert stayed["authenticated"] is True
+    assert stayed["batch_id"] == "logout-warning-batch"
+
+    next(button for button in app.button if button.label == "Logout").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Log Out").click().run(timeout=20)
+
+    logged_out = app.session_state.filtered_state
+    assert logged_out["authenticated"] is False
+    assert "batch_id" not in logged_out
+
+
+def test_logout_without_unfinished_work_has_no_confirmation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Dashboard"
+
+    app.run(timeout=20)
+    next(button for button in app.button if button.label == "Logout").click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["authenticated"] is False
+    assert not any(
+        button.key == "confirm_logout_with_unfinished_work"
+        for button in app.button
+    )

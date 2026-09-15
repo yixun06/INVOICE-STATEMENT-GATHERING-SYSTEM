@@ -212,7 +212,7 @@ class _FakeStreamlit:
         raise AssertionError("No action was clicked in this test.")
 
 
-def test_needs_attention_renders_one_blocker_and_one_statement_removal(monkeypatch):
+def test_needs_attention_renderer_keeps_actions_in_the_workflow_footer(monkeypatch):
     issues = (
         _issue("ORDER-1: product identity is unresolved."),
         _issue("ORDER-1: merchandise Product Price is not reconciled."),
@@ -225,7 +225,7 @@ def test_needs_attention_renders_one_blocker_and_one_statement_removal(monkeypat
 
     assert len(fake.errors) == 1
     assert "1 order" in fake.errors[0]
-    assert fake.buttons == ["Remove staged source"]
+    assert fake.buttons == []
     affected_rows = next(frame for frame in fake.frames if "Order ID" in frame[0])
     assert len(affected_rows) == 1
     assert affected_rows[0]["Issue Count"] == 2
@@ -363,7 +363,7 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
         "Total Released",
         "Adjustment Total",
     }
-    assert sum(button.label == "Remove staged source" for button in app.button) == 1
+    assert app.button == []
     affected = next(
         frame.value
         for frame in app.dataframe
