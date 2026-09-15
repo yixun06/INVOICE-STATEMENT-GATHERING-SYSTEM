@@ -40,6 +40,9 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_SUMMARY_HEADERS,
     STATEMENT_SUMMARY_TAB,
 )
+from src.invoice_app.services.product_summary_identity import (
+    resolve_product_summary_identity,
+)
 
 
 CENT = Decimal("0.01")
@@ -702,6 +705,7 @@ def _required_item_facts(item: CanonicalInvoiceItem) -> dict[str, Any]:
         "nav": _text(item.nav),
         "seller_sku": _text(item.seller_sku) or None,
         "product_name": _text(item.product_name),
+        "variation": _text(item.variation),
         "uom": None,
         "historical_pm_unit_price": _cent_money(
             item.unit_price, item.order_id, item.item_index, "historical PM Unit Price"
@@ -713,21 +717,34 @@ def _required_item_facts(item: CanonicalInvoiceItem) -> dict[str, Any]:
 def _aggregate_source_items(
     source_items: Sequence[BillingSourceItem],
 ) -> tuple[ProductSummaryRow, ...]:
-    groups: dict[tuple[str, str, Decimal], list[BillingSourceItem]] = defaultdict(list)
+    groups: dict[
+        tuple[str, str | None, str, Decimal, str], list[BillingSourceItem]
+    ] = defaultdict(list)
+    descriptions: dict[tuple[str, str | None, str, Decimal, str], str] = {}
     for item in source_items:
+        identity = resolve_product_summary_identity(
+            nav=item.nav,
+            seller_sku=item.seller_sku,
+            product_name=item.product_name,
+            variation=item.variation,
+            historical_pm_unit_price=item.historical_pm_unit_price,
+        )
         key = (
-            item.nav,
-            item.product_name,
-            item.historical_pm_unit_price,
+            identity.nav,
+            identity.seller_sku,
+            identity.variation_key,
+            identity.historical_pm_unit_price,
+            identity.title_key,
         )
         groups[key].append(item)
+        descriptions[key] = identity.display_description
     unsorted_rows = tuple(
         ProductSummaryRow(
             number=0,
             nav=key[0],
-            product_name=key[1],
+            product_name=descriptions[key],
             uom=None,
-            unit_price=key[2],
+            unit_price=key[3],
             quantity=sum(item.quantity for item in members),
             discount_percent=None,
             discount_amount=sum(

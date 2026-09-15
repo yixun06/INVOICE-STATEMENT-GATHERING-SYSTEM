@@ -45,6 +45,7 @@ class BillingSourceItem:
     actual_selling_amount_basis: ActualSellingAmountBasis
     promotion_group_id: str | None = None
     source_group_total: Decimal | None = None
+    variation: str = ""
 
     @property
     def standard_amount(self) -> Decimal:

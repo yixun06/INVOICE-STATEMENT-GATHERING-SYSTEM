@@ -68,6 +68,7 @@ def _item(
     nav: str = "5000001",
     sku: str = "SKU-1",
     name: str = "Product One",
+    variation: str | None = None,
     price: str = "10.00",
     quantity: int = 1,
     subtotal: str | None = "8.00",
@@ -81,6 +82,7 @@ def _item(
         nav=nav,
         seller_sku=sku,
         product_name=name,
+        variation=variation,
         unit_price=Decimal(price),
         quantity=quantity,
         line_subtotal=Decimal(subtotal) if subtotal is not None else None,
@@ -216,7 +218,7 @@ def test_selected_statement_orders_define_complete_source_population():
     assert summary.total_amount == Decimal("16.00")
 
 
-def test_normal_items_use_line_subtotal_and_revised_aggregation_key():
+def test_normal_items_with_different_seller_skus_remain_separate():
     summary = build_weekly_billing_summary(
         _dataset(
             _item("ORDER-1", 0, sku="SKU-A", quantity=2, subtotal="16.00"),
@@ -225,13 +227,112 @@ def test_normal_items_use_line_subtotal_and_revised_aggregation_key():
         PERIOD,
     )
 
-    assert len(summary.product_rows) == 1
-    assert summary.product_rows[0].quantity == 5
-    assert summary.product_rows[0].amount == Decimal("37.00")
-    assert summary.product_rows[0].discount_amount == Decimal("13.00")
-    assert summary.product_rows[0].uom is None
-    assert summary.product_rows[0].discount_percent is None
+    assert len(summary.product_rows) == 2
+    assert sum(row.quantity for row in summary.product_rows) == 5
+    assert sum(row.amount for row in summary.product_rows) == Decimal("37.00")
+    assert sum(row.discount_amount for row in summary.product_rows) == Decimal("13.00")
+    assert all(row.uom is None for row in summary.product_rows)
+    assert all(row.discount_percent is None for row in summary.product_rows)
     assert summary.source_items[0].actual_selling_amount_basis is ActualSellingAmountBasis.DIRECT
+
+
+@pytest.mark.parametrize(
+    ("case", "first", "second", "expected_rows", "description"),
+    (
+        (
+            "L-01 keeps conflicting tea titles separate",
+            _item("ORDER-1", 0, nav="5004322", sku="9555208108580", name="Rose Tea", variation=None, price="18.90"),
+            _item("ORDER-2", 0, nav="5004322", sku="9555208108580", name="Jasmine Tea Rose Tea", variation=None, price="18.90"),
+            2,
+            None,
+        ),
+        (
+            "L-02 merges approved honey variations",
+            _item("ORDER-1", 0, nav="3000209", sku="9555208107347", name="Pre-Order Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]", variation="1KG", price="54.90"),
+            _item("ORDER-2", 0, nav="3000209", sku="9555208107347", name="Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]", variation="Fresh Raw Honey 1kg", price="54.90"),
+            1,
+            "Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar]",
+        ),
+        (
+            "L-03 keeps Coconut Sugar and Normal separate",
+            _item("ORDER-1", 0, nav="5003317", sku="9555208104926", variation="Coconut Sugar", price="13.90"),
+            _item("ORDER-2", 0, nav="5003317", sku="9555208104926", variation="Normal", price="13.90"),
+            2,
+            None,
+        ),
+        (
+            "L-04 keeps Baby Noodles ambiguity separate",
+            _item("ORDER-1", 0, nav="4007457", sku="9555208017721", name="Baby Thin Noodle", variation="Rainbow Baby Noodles", price="12.90"),
+            _item("ORDER-2", 0, nav="4007457", sku="9555208017721", name="Rainbow Noodles", variation=None, price="12.90"),
+            2,
+            None,
+        ),
+        (
+            "L-05 keeps Good Fibre variants separate",
+            _item("ORDER-1", 0, nav="5003397", sku="9555208105169", name="Good Fibre", variation="1 Box", price="79.90"),
+            _item("ORDER-2", 0, nav="5003397", sku="9555208105169", name="Good Fibre Plus+ Zero Sugar", variation="1box (Normal sugar)", price="79.90"),
+            2,
+            None,
+        ),
+        (
+            "L-06 merges approved Sweet Potato Mee Sua variations",
+            _item("ORDER-1", 0, nav="5000165", sku="9555208103158", name="Simply Natural Organic Mee Sua 200g Malaysia", variation=None, price="8.50"),
+            _item("ORDER-2", 0, nav="5000165", sku="9555208103158", name="Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia", variation="Sweet Potato Mee Sua", price="8.50"),
+            1,
+            "Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia",
+        ),
+        (
+            "L-07 keeps historical price changes separate",
+            _item("ORDER-1", 0, nav="060328", sku="9555208105145-1Lter", variation="1000ml", price="42.90"),
+            _item("ORDER-2", 0, nav="060328", sku="9555208105145-1Lter", variation="1000ml", price="43.90"),
+            2,
+            None,
+        ),
+        (
+            "L-08 keeps Buy 5 free 1 and Bundle Set separate",
+            _item("ORDER-1", 0, nav="3000573", sku="9555208106944-6", variation="Buy 5 free 1", price="36.00"),
+            _item("ORDER-2", 0, nav="3000573", sku="9555208106944-6", variation="Bundle Set", price="36.00"),
+            2,
+            None,
+        ),
+    ),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_product_owner_approved_listing_identity_cases(
+    case, first, second, expected_rows, description,
+):
+    summary = build_weekly_billing_summary(_dataset(first, second), PERIOD)
+
+    assert len(summary.product_rows) == expected_rows
+    assert sum(row.quantity for row in summary.product_rows) == 2
+    assert sum(row.amount for row in summary.product_rows) == Decimal("16.00")
+    if description is not None:
+        assert summary.product_rows[0].product_name == description
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name", "expected_description"),
+    (
+        ("Gluten F ree", "Gluten Free", "Gluten Free"),
+        ("Plant-Ba sed Oil", "Plant-Based Oil", "Plant-Based Oil"),
+        ("Best Snacks", "Be st Snacks", "Best Snacks"),
+        ("Pre-Order Product One", "Product One", "Product One"),
+        ("中文 名称", "中文名称", "中文名称"),
+    ),
+)
+def test_approved_technical_title_noise_merges(
+    first_name, second_name, expected_description,
+):
+    summary = build_weekly_billing_summary(
+        _dataset(
+            _item("ORDER-1", 0, name=first_name, variation="Original"),
+            _item("ORDER-2", 0, name=second_name, variation="Original"),
+        ),
+        PERIOD,
+    )
+
+    assert len(summary.product_rows) == 1
+    assert summary.product_rows[0].product_name == expected_description
 
 
 def test_same_identity_with_different_historical_price_remains_two_rows():
@@ -308,11 +409,11 @@ def test_source_missing_seller_sku_is_preserved_and_does_not_block_billing():
     summary = build_weekly_billing_summary(_dataset(item, peer), PERIOD)
 
     assert any(source.seller_sku is None for source in summary.source_items)
-    assert len(summary.product_rows) == 1
-    assert summary.product_rows[0].nav == "5004722"
-    assert summary.product_rows[0].quantity == 3
-    assert summary.product_rows[0].amount == Decimal("62.70")
-    assert summary.product_rows[0].discount_amount == Decimal("0.00")
+    assert len(summary.product_rows) == 2
+    assert {row.nav for row in summary.product_rows} == {"5004722"}
+    assert sum(row.quantity for row in summary.product_rows) == 3
+    assert sum(row.amount for row in summary.product_rows) == Decimal("62.70")
+    assert sum(row.discount_amount for row in summary.product_rows) == Decimal("0.00")
 
 
 def test_negative_discount_is_preserved_not_clamped():
