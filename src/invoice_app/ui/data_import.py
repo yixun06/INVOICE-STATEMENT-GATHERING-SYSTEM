@@ -125,6 +125,10 @@ _INVOICE_UPLOAD_ATTEMPT_KEY = "invoice_upload_attempt"
 _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS = frozenset(
     {"selected", "processing", "failed"}
 )
+_INVOICE_UPLOAD_PRISTINE = "pristine"
+_INVOICE_UPLOAD_SELECTED = "selected"
+_INVOICE_UPLOAD_NEEDS_ATTENTION = "needs_attention"
+_INVOICE_UPLOAD_RESOLVED = "resolved"
 
 
 @dataclass(frozen=True)
@@ -175,12 +179,31 @@ def invoice_upload_is_resolved(state: MutableMapping[str, Any]) -> bool:
     selected or interrupted upload must be resolved first.
     """
 
+    return invoice_upload_presentation_state(state) == _INVOICE_UPLOAD_RESOLVED
+
+
+def invoice_upload_presentation_state(state: MutableMapping[str, Any]) -> str:
+    """Classify the current technical Upload lifecycle for presentation only.
+
+    This derives from the authoritative attempt and activity facts; it does not
+    introduce a second workflow state. A visible ``processing`` attempt is no
+    longer actively executing the synchronous uploader, so it needs recovery.
+    """
+
     attempt = state.get(_INVOICE_UPLOAD_ATTEMPT_KEY)
-    if attempt in _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS:
-        return False
     if state.get("workflow_activity") == "Processing":
-        return False
-    return attempt == "resolved" or bool(state.get("upload_result_summary"))
+        return _INVOICE_UPLOAD_NEEDS_ATTENTION
+    if attempt == "selected":
+        return _INVOICE_UPLOAD_SELECTED
+    if attempt in {"processing", "failed"}:
+        return _INVOICE_UPLOAD_NEEDS_ATTENTION
+    if attempt == "resolved" or (
+        attempt is None and bool(state.get("upload_result_summary"))
+    ):
+        return _INVOICE_UPLOAD_RESOLVED
+    if attempt is None:
+        return _INVOICE_UPLOAD_PRISTINE
+    return _INVOICE_UPLOAD_NEEDS_ATTENTION
 
 
 def render_data_import(
@@ -282,15 +305,18 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
         st.subheader("Upload platform order files")
         st.caption("Upload PDF or ZIP order documents for the active batch.")
         render_platform_orders_upload()
-        if invoice_upload_is_resolved(st.session_state):
+        presentation_state = invoice_upload_presentation_state(st.session_state)
+        if presentation_state == _INVOICE_UPLOAD_RESOLVED:
             _render_next_step(
                 "Continue to validate",
                 3,
                 back_step=1,
                 include_invoice_exit=True,
             )
-        else:
+        elif presentation_state == _INVOICE_UPLOAD_NEEDS_ATTENTION:
             _render_unresolved_invoice_upload_actions(back_step=1)
+        else:
+            _render_invoice_upload_back_actions(back_step=1)
         return
     if source_type == SHOPEE_WEEKLY_STATEMENT:
         _render_weekly_statement_upload()
@@ -358,12 +384,14 @@ def _render_validation_step(
     render_platform_orders_validation_data: Callable[[], Any],
 ) -> None:
     st.subheader("Validate")
-    if (
-        st.session_state.get("import_source_type") == PLATFORM_ORDERS
-        and not invoice_upload_is_resolved(st.session_state)
-    ):
-        _render_unresolved_invoice_upload_actions(back_step=2)
-        return
+    if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        presentation_state = invoice_upload_presentation_state(st.session_state)
+        if presentation_state != _INVOICE_UPLOAD_RESOLVED:
+            if presentation_state == _INVOICE_UPLOAD_NEEDS_ATTENTION:
+                _render_unresolved_invoice_upload_actions(back_step=2)
+            else:
+                _render_invoice_upload_back_actions(back_step=2)
+            return
     result = _current_import_result()
     is_platform_orders = bool(
         result.source_specific_details.get("show_platform_order_outcomes")
@@ -2209,16 +2237,22 @@ def _render_unresolved_invoice_upload_actions(*, back_step: int) -> None:
         message="Finish processing or clear the interrupted upload before continuing.",
         state="blocked",
     )
+    _render_invoice_upload_back_actions(back_step=back_step)
+
+
+def _render_invoice_upload_back_actions(*, back_step: int) -> None:
+    """Render neutral navigation while Upload is not yet eligible to advance."""
+
     with st.container(horizontal=True):
         if st.button(
             "Back",
             icon=":material/arrow_back:",
-            key=f"data_import_unresolved_upload_back_{back_step}",
+            key=f"data_import_upload_back_{back_step}",
         ):
             _set_step(back_step)
             st.rerun()
         _render_invoice_exit_button(
-            key=f"invoice_exit_unresolved_upload_{back_step}"
+            key=f"invoice_exit_upload_{back_step}"
         )
 
 

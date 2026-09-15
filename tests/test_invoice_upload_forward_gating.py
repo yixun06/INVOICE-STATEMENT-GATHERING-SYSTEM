@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 from src.invoice_app.ui.data_import import (
     clear_invoice_upload_attempt,
     invoice_upload_is_resolved,
+    invoice_upload_presentation_state,
     mark_invoice_upload_attempt,
 )
 
@@ -59,8 +60,8 @@ def _button_labels(app: AppTest) -> set[str]:
     return {button.label for button in app.button}
 
 
-@pytest.mark.parametrize("attempt", ("selected", "processing", "failed"))
-def test_unresolved_invoice_upload_hides_continue_even_with_earlier_batch_data(
+@pytest.mark.parametrize("attempt", ("processing", "failed"))
+def test_interrupted_invoice_upload_hides_continue_and_shows_warning(
     tmp_path, monkeypatch, attempt: str
 ):
     monkeypatch.chdir(tmp_path)
@@ -73,6 +74,61 @@ def test_unresolved_invoice_upload_hides_continue_even_with_earlier_batch_data(
     assert "Continue to validate" not in _button_labels(app)
     assert {"Back", "Exit Invoice Import"} <= _button_labels(app)
     assert any("Upload not completed" in error.value for error in app.error)
+
+
+def test_pristine_upload_is_neutral_and_cannot_continue(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_invoice_upload(app, attempt=None, include_completed_upload=False)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Continue to validate" not in _button_labels(app)
+    assert not any("Upload not completed" in error.value for error in app.error)
+    assert "Back" in _button_labels(app)
+    assert next(button for button in app.button if button.label == "Process files").disabled
+    assert next(button for button in app.button if button.label == "Clear uploaded files").disabled
+    assert invoice_upload_presentation_state(app.session_state.filtered_state) == "pristine"
+
+
+def test_selected_upload_is_neutral_and_remains_blocked(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_invoice_upload(app, attempt=None, include_completed_upload=False)
+
+    app.run(timeout=20)
+    app.file_uploader[0].upload(
+        "selected.pdf", b"test upload", "application/pdf"
+    ).run(timeout=20)
+
+    assert app.exception == []
+    assert "Continue to validate" not in _button_labels(app)
+    assert not any("Upload not completed" in error.value for error in app.error)
+    assert not next(button for button in app.button if button.label == "Process files").disabled
+    assert not next(button for button in app.button if button.label == "Clear uploaded files").disabled
+    assert invoice_upload_presentation_state(app.session_state.filtered_state) == "selected"
+
+
+def test_clearing_selected_upload_returns_to_pristine_presentation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_invoice_upload(app, attempt=None, include_completed_upload=False)
+
+    app.run(timeout=20)
+    app.file_uploader[0].upload(
+        "selected.pdf", b"test upload", "application/pdf"
+    ).run(timeout=20)
+    next(button for button in app.button if button.label == "Clear uploaded files").click().run(
+        timeout=20
+    )
+
+    assert app.exception == []
+    assert "Continue to validate" not in _button_labels(app)
+    assert not any("Upload not completed" in error.value for error in app.error)
+    assert next(button for button in app.button if button.label == "Process files").disabled
+    assert next(button for button in app.button if button.label == "Clear uploaded files").disabled
+    assert invoice_upload_presentation_state(app.session_state.filtered_state) == "pristine"
 
 
 def test_completed_invoice_upload_keeps_continue_to_validate_available(tmp_path, monkeypatch):
@@ -99,6 +155,7 @@ def test_existing_completed_upload_stays_eligible_after_interrupted_selection_is
 
     app.run(timeout=20)
     assert "Continue to validate" not in _button_labels(app)
+    assert not any("Upload not completed" in error.value for error in app.error)
 
     clear_invoice_upload_attempt(app.session_state)
     app.run(timeout=20)
@@ -128,6 +185,17 @@ def test_successful_retry_marks_the_upload_attempt_resolved():
 
     mark_invoice_upload_attempt(state, "resolved")
     assert invoice_upload_is_resolved(state) is True
+    assert invoice_upload_presentation_state(state) == "resolved"
+
+
+def test_cleared_upload_without_a_completed_result_returns_to_pristine():
+    state: dict[str, object] = {}
+
+    mark_invoice_upload_attempt(state, "selected")
+    clear_invoice_upload_attempt(state)
+
+    assert invoice_upload_presentation_state(state) == "pristine"
+    assert invoice_upload_is_resolved(state) is False
 
 
 def test_invoice_exit_clears_an_unresolved_upload_attempt(tmp_path, monkeypatch):
@@ -159,7 +227,7 @@ def test_direct_validate_access_returns_to_upload_when_attempt_is_unresolved(
     assert app.exception == []
     assert "Continue to reconcile" not in _button_labels(app)
     assert "Current batch summary" not in {element.value for element in app.subheader}
-    assert any("Upload not completed" in error.value for error in app.error)
+    assert not any("Upload not completed" in error.value for error in app.error)
 
     next(button for button in app.button if button.label == "Back").click().run(timeout=20)
     assert app.session_state.filtered_state["data_import_step"] == 2
