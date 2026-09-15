@@ -195,6 +195,9 @@ def test_invoice_exit_dialog_cancel_preserves_all_staging(tmp_path, monkeypatch)
     assert pending["batch_id"] == "invoice-exit-batch"
     assert pending["uploader_version"] == 7
     assert any(button.label == "Leave Invoice Import" for button in app.button)
+    dialog_copy = " ".join(warning.value for warning in app.warning)
+    assert "All uncommitted data for this Invoice import will be cleared" in dialog_copy
+    assert "Previously committed data and archived source files will remain unchanged" in dialog_copy
 
     next(
         button for button in app.button

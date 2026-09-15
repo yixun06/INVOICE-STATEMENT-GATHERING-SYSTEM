@@ -15,6 +15,12 @@ from typing import Any, Callable
 
 import streamlit as st
 
+from .data_import_components import (
+    render_authoritative_status,
+    render_summary_items,
+    render_workflow_stepper,
+)
+
 from ..services.batch_service import create_batch_id
 from ..services.import_result_adapters import (
     adapt_platform_orders_import_result,
@@ -145,6 +151,7 @@ def render_data_import(
     *,
     render_platform_orders_upload: Callable[[], Any],
     render_platform_orders_outcomes: Callable[[], Any],
+    render_platform_orders_summary: Callable[[], Any],
     render_platform_orders_validation_data: Callable[[], Any],
     discard_current_batch: Callable[[], None],
 ) -> None:
@@ -162,6 +169,7 @@ def render_data_import(
     elif step == 3:
         _render_validation_step(
             render_platform_orders_outcomes,
+            render_platform_orders_summary,
             render_platform_orders_validation_data,
         )
     elif step == 4:
@@ -189,18 +197,7 @@ def _set_step(step: int) -> None:
 
 
 def _render_wizard_progress(current_step: int) -> None:
-    st.progress(current_step / len(WIZARD_STEPS), text=f"Step {current_step} of {len(WIZARD_STEPS)} — {WIZARD_STEPS[current_step - 1]}")
-    columns = st.columns(len(WIZARD_STEPS), gap="small")
-    for index, (column, label) in enumerate(zip(columns, WIZARD_STEPS), start=1):
-        with column:
-            st.caption(f"Step {index}")
-            st.write(label)
-            if index < current_step:
-                st.badge("Completed", icon=":material/check_circle:", color="green")
-            elif index == current_step:
-                st.badge("Current", icon=":material/play_circle:", color="blue")
-            else:
-                st.badge("Pending", icon=":material/schedule:", color="gray")
+    render_workflow_stepper(WIZARD_STEPS, current_step)
 
 
 def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
@@ -325,22 +322,18 @@ def _render_weekly_statement_upload() -> None:
 
 def _render_validation_step(
     render_platform_orders_outcomes: Callable[[], Any],
+    render_platform_orders_summary: Callable[[], Any],
     render_platform_orders_validation_data: Callable[[], Any],
 ) -> None:
     st.subheader("Validate")
     result = _current_import_result()
-    _render_source_summary(result)
-    if result.source_specific_details.get("show_platform_order_outcomes"):
-        render_platform_orders_validation_data()
-        _render_manual_review_resolution()
-    _render_contract_validation(result)
+    is_platform_orders = bool(
+        result.source_specific_details.get("show_platform_order_outcomes")
+    )
+    _render_validation_status(result)
     if _has_pending_recovery():
         _render_recovery_confirmation()
-    if result.source_specific_details.get("show_platform_order_outcomes"):
-        render_platform_orders_outcomes()
-    else:
-        _render_statement_review_tables()
-    _render_recovery_area()
+
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
         _render_statement_next_step("Continue to reconcile", 4, back_step=2)
     else:
@@ -353,6 +346,70 @@ def _render_validation_step(
             disabled_reason=_commit_readiness_reason(result),
         )
 
+    if is_platform_orders:
+        _render_contract_validation(result)
+        _render_manual_review_resolution()
+        st.subheader("Current batch summary")
+        render_platform_orders_summary()
+        render_platform_orders_validation_data()
+        render_platform_orders_outcomes()
+    else:
+        _render_source_summary(result)
+        _render_contract_validation(result)
+        _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
+    _render_recovery_area()
+
+
+def _render_validation_status(result: ImportResult) -> None:
+    """Present existing readiness truth before any detailed validation output."""
+
+    if not result.session_state.applied_to_current_session:
+        render_authoritative_status(
+            title="No active batch",
+            message=result.source_summary.empty_message or "Upload a source to begin.",
+            state="empty",
+        )
+        return
+    if result.commit_readiness.ready:
+        accepted_orders = next(
+            (
+                item.value
+                for item in result.source_summary.items
+                if item.label in {"Accepted Orders", "Statement Orders"}
+            ),
+            None,
+        )
+        message = (
+            f"{accepted_orders} accepted order{'s' if accepted_orders != 1 else ''} "
+            "validated successfully."
+            if accepted_orders is not None
+            else "The current batch passed the existing readiness checks."
+        )
+        render_authoritative_status(title="Ready", message=message, state="ready")
+        return
+
+    if result.source_type == SHOPEE_WEEKLY_STATEMENT:
+        affected_orders, issue_count = _statement_blocker_counts(result)
+        if issue_count:
+            message = (
+                f"{affected_orders} affected order{'s' if affected_orders != 1 else ''}; "
+                f"{issue_count} unresolved issue{'s' if issue_count != 1 else ''} "
+                "must be resolved before continuing."
+            )
+        else:
+            message = _commit_readiness_reason(result)
+    else:
+        review_count = len(result.source_specific_details.get("manual_review", ()))
+        error_count = len(result.source_specific_details.get("processing_errors", ()))
+        attention_count = review_count + error_count
+        message = (
+            f"{attention_count} current-batch item{'s' if attention_count != 1 else ''} "
+            "require review. Resolve the blocking items before continuing."
+            if attention_count
+            else _commit_readiness_reason(result)
+        )
+    render_authoritative_status(title="Needs Attention", message=message, state="blocked")
+
 
 def _render_contract_validation(result: ImportResult) -> None:
     validation = result.validation
@@ -363,12 +420,6 @@ def _render_contract_validation(result: ImportResult) -> None:
     duplicate_warnings = tuple(issue for issue in visible_warnings if issue.layer == "duplicate")
     other_warnings = tuple(issue for issue in visible_warnings if issue.layer != "duplicate")
 
-    if not validation.blocking_issues and not other_warnings and not duplicate_warnings:
-        if result.session_state.applied_to_current_session:
-            if not validation.warnings:
-                st.success("No validation issues in the current batch.", icon=":material/check_circle:")
-        else:
-            st.info(result.source_summary.empty_message or "No import result is staged yet.", icon=":material/info:")
     if (
         result.source_type == SHOPEE_WEEKLY_STATEMENT
         and validation.blocking_issues
@@ -376,6 +427,7 @@ def _render_contract_validation(result: ImportResult) -> None:
         _render_weekly_statement_needs_attention(
             result,
             (*validation.blocking_issues, *other_warnings),
+            include_status=False,
         )
     else:
         for index, issue in enumerate(validation.blocking_issues):
@@ -454,16 +506,19 @@ def _statement_issue_order_id(
 def _render_weekly_statement_needs_attention(
     result: ImportResult,
     issues: tuple[ValidationIssue, ...],
+    *,
+    include_status: bool = True,
 ) -> None:
     presentation = _statement_issue_presentation(result, issues)
     affected_count = len(presentation.order_groups)
-    st.error(
-        "**Statement needs attention**\n\n"
-        f"{affected_count} order{'s' if affected_count != 1 else ''} contain "
-        "unresolved reconciliation issues. Review the affected orders and "
-        "Statement issues before this Statement can be committed.",
-        icon=":material/error:",
-    )
+    if include_status:
+        st.error(
+            "**Statement needs attention**\n\n"
+            f"{affected_count} order{'s' if affected_count != 1 else ''} contain "
+            "unresolved reconciliation issues. Review the affected orders and "
+            "Statement issues before this Statement can be committed.",
+            icon=":material/error:",
+        )
 
     if presentation.statement_issues:
         st.subheader("Statement issues")
@@ -766,8 +821,9 @@ def _render_statement_exit_confirmation() -> None:
 def _render_invoice_exit_confirmation() -> None:
     _render_pending_recovery_dialog(
         body=(
-            "Uncommitted Invoice files and review progress in this step will be "
-            "discarded. Previously completed data will remain unchanged."
+            "All uncommitted data for this Invoice import will be cleared from "
+            "this session. Previously committed data and archived source files "
+            "will remain unchanged."
         ),
         confirm_label="Leave Invoice Import",
         confirm_key="confirm_exit_invoice_import",
@@ -1301,9 +1357,17 @@ def _render_reconciliation_step() -> None:
     if _has_pending_recovery():
         _render_recovery_confirmation()
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
-        _reconcile_historical_invoice_staging()
-        entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
+        entries = _reconcile_historical_invoice_staging()
         historical_ready = _historical_commit_ready(entries)
+        render_authoritative_status(
+            title="Ready" if historical_ready else "Needs Attention",
+            message=(
+                "Historical status checks passed for the current Invoice batch."
+                if historical_ready
+                else _historical_forward_reason(entries)
+            ),
+            state="ready" if historical_ready else "blocked",
+        )
         _render_next_step(
             "Continue to review & commit",
             5,
@@ -1319,8 +1383,14 @@ def _render_reconciliation_step() -> None:
                 else _historical_forward_reason(entries)
             ),
         )
+        _render_historical_status_details(
+            entries,
+            allow_removal=True,
+            key_prefix="reconcile_historical",
+        )
         return
-    reconciliation = _current_import_result().reconciliation
+    result = _current_import_result()
+    reconciliation = result.reconciliation
     if not reconciliation.available:
         reason = reconciliation.source_specific_details.get("reason")
         st.info(f"{reconciliation.status} — {reason or 'Reconciliation is not available for this staged result.'}", icon=":material/info:")
@@ -1334,22 +1404,27 @@ def _render_reconciliation_step() -> None:
             ),
         )
         return
+    allowed, disabled_reason = _statement_forward_gate()
+    render_authoritative_status(
+        title="Ready" if allowed else "Needs Attention",
+        message=(
+            "Statement reconciliation passed the existing readiness checks."
+            if allowed
+            else (disabled_reason or "Resolve the current reconciliation blockers.")
+        ),
+        state="ready" if allowed else "blocked",
+    )
+    _render_statement_next_step(
+        "Continue to review & commit",
+        5,
+        back_step=3,
+    )
+    if not allowed:
+        _render_contract_validation(result)
     _render_summary_items(reconciliation.summary)
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
-    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
-        _render_statement_review_tables()
-        _render_statement_next_step(
-            "Continue to review & commit",
-            5,
-            back_step=3,
-        )
-    else:
-        _render_next_step(
-            "Continue to review & commit",
-            5,
-            back_step=3,
-        )
+    _render_statement_review_tables(collapsed=not allowed)
 
 
 def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationException, ...]) -> None:
@@ -1459,12 +1534,7 @@ def _render_source_summary(result: ImportResult) -> None:
 
 
 def _render_summary_items(items: tuple[Any, ...]) -> None:
-    if not items:
-        return
-    columns = st.columns(len(items), gap="small")
-    for column, item in zip(columns, items):
-        with column:
-            st.metric(item.label, item.value, border=True)
+    render_summary_items(items)
 
 
 def _current_import_result() -> ImportResult:
@@ -1538,7 +1608,7 @@ def _render_historical_invoice_commit() -> None:
             st.error(f"Historical Invoice storage write failed: {error}")
 
 
-def _reconcile_historical_invoice_staging() -> None:
+def _reconcile_historical_invoice_staging() -> tuple[Any, ...]:
     signature = _historical_commit_signature()
     refresh_required = st.session_state.get(
         "uat2_historical_commit_refresh_required", False
@@ -1565,13 +1635,9 @@ def _reconcile_historical_invoice_staging() -> None:
             st.session_state.uat2_historical_commit_signature = signature
         except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
             st.error(f"Historical Invoice validation is unavailable: {error}")
-            return
+            return ()
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
-    _render_historical_status_details(
-        entries,
-        allow_removal=True,
-        key_prefix="reconcile_historical",
-    )
+    return entries
 
 
 def _render_historical_status_details(
@@ -1649,7 +1715,7 @@ def _weekly_review() -> StatementImportReview | None:
     return review if isinstance(review, StatementImportReview) else None
 
 
-def _render_statement_review_tables() -> None:
+def _render_statement_review_tables(*, collapsed: bool = False) -> None:
     review = _weekly_review()
     if (
         review is None
@@ -1657,7 +1723,23 @@ def _render_statement_review_tables() -> None:
         or review.reconciliation_v2 is None
     ):
         return
+    if collapsed:
+        with st.expander("All reconciliation evidence", expanded=False):
+            _render_statement_review_content(review, nested_disclosure=False)
+        return
+    _render_statement_review_content(review, nested_disclosure=True)
+
+
+def _render_statement_review_content(
+    review: StatementImportReview,
+    *,
+    nested_disclosure: bool,
+) -> None:
+    """Render the existing reconciliation evidence without changing its values."""
+
     batch = review.reconciliation_v2
+    if batch is None:
+        return
     st.subheader("Reconciliation V2 review")
     stale_reason = st.session_state.get("weekly_statement_review_stale_reason")
     if stale_reason:
@@ -1713,15 +1795,25 @@ def _render_statement_review_tables() -> None:
         st.caption(
             "This is not included in original merchandise or seller-settlement reconciliation."
         )
-    with st.expander("Technical reconciliation evidence"):
-        st.caption(
-            f"Rule {batch.rule_version} · Product Master snapshot "
-            f"{batch.product_family_snapshot.sha256}"
-        )
-        st.dataframe(_identity_evidence_rows(batch), hide_index=True)
-        settlement_rows = _settlement_evidence_rows(batch)
-        if settlement_rows:
-            st.dataframe(settlement_rows, hide_index=True)
+    if nested_disclosure:
+        with st.expander("Technical reconciliation evidence"):
+            _render_statement_technical_evidence(batch)
+    else:
+        st.subheader("Technical reconciliation evidence")
+        _render_statement_technical_evidence(batch)
+
+
+def _render_statement_technical_evidence(batch: Any) -> None:
+    """Keep raw identity and settlement audit evidence reachable."""
+
+    st.caption(
+        f"Rule {batch.rule_version} · Product Master snapshot "
+        f"{batch.product_family_snapshot.sha256}"
+    )
+    st.dataframe(_identity_evidence_rows(batch), hide_index=True)
+    settlement_rows = _settlement_evidence_rows(batch)
+    if settlement_rows:
+        st.dataframe(settlement_rows, hide_index=True)
 
 
 def _render_statement_commit(ready: bool) -> None:

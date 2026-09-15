@@ -630,7 +630,7 @@ def show_sidebar(pdf_count: int) -> str:
             }
 
             [data-testid="stMain"] [data-testid="stCaptionContainer"] {
-                color: #879087;
+                color: #5f6c63;
                 font-size: 0.78rem;
             }
 
@@ -721,7 +721,7 @@ def show_sidebar(pdf_count: int) -> str:
                 margin-top: 0.08rem;
             }
 
-            section[data-testid="stSidebar"] [data-testid="stButton"] button {
+            section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"] {
                 min-height: 1.95rem;
                 height: 1.95rem;
                 padding: 0 0.58rem;
@@ -732,13 +732,24 @@ def show_sidebar(pdf_count: int) -> str:
                 font-weight: 500;
             }
 
-            section[data-testid="stSidebar"] [data-testid="stButton"] button:hover {
+            section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover {
                 border-color: #96ac8d;
                 background: #f7faf5;
                 color: #14532d;
             }
 
-            section[data-testid="stSidebar"] .sidebar-footnote {
+            section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {
+                min-height: 1.95rem;
+                height: 1.95rem;
+                padding: 0 0.58rem;
+                border-color: #14532d;
+                background: #14532d;
+                color: #ffffff;
+                box-shadow: none;
+                font-size: 0.78rem;
+                font-weight: 600;
+            }
+
             section[data-testid="stSidebar"] .sidebar-batch-summary {
                 display: flex;
                 align-items: center;
@@ -756,8 +767,10 @@ def show_sidebar(pdf_count: int) -> str:
                 color: #4a7650;
                 font-size: 0.95rem;
             }
+
+            section[data-testid="stSidebar"] .sidebar-footnote {
                 margin: 0.4rem 0 0;
-                color: #929d95;
+                color: #5f6c63;
                 font-size: 0.68rem;
                 line-height: 1.4;
             }
@@ -859,40 +872,23 @@ def show_sidebar(pdf_count: int) -> str:
 
 
 def show_upload_result_summary(summary: dict[str, int]) -> None:
-    orders = st.session_state.get("orders", [])
-    products = st.session_state.get("products", [])
-    reviews = st.session_state.get("reviews", [])
-    manual_review_count = sum(is_manual_review_record(review) for review in reviews)
     duplicate_count = len(st.session_state.get("duplicate_skipped", []))
     unsupported_count = len(st.session_state.get("unsupported_files", []))
     processing_error_count = len(st.session_state.get("processing_errors", []))
 
-    with st.container(border=True):
-        st.subheader("Result Summary")
-        st.success("Processing complete", icon=":material/check_circle:")
-        st.caption(
-            f"Current batch. {int(summary.get('pdfs_processed', 0))} PDF(s) processed in the latest action."
-        )
-        with st.container(horizontal=True, gap="xsmall"):
-            st.metric("PDFs", int(st.session_state.get("pdf_count", 0)), border=True)
-            st.metric("Orders", len(orders), border=True)
-            st.metric("Products", len(products), border=True)
-            show_manual_review_metric(manual_review_count, "upload")
-
-        skipped_parts = []
-        if duplicate_count:
-            skipped_parts.append(f"Duplicate skipped: {duplicate_count}")
-        if unsupported_count:
-            skipped_parts.append(f"Unsupported: {unsupported_count}")
-        if skipped_parts:
-            st.caption(" · ".join(skipped_parts))
-        if processing_error_count:
-            st.caption(f"Processing errors: {processing_error_count}. View details below.")
-        if manual_review_count:
-            st.warning(
-                f"{manual_review_count} item(s) need manual checking before final use.",
-                icon=":material/warning:",
-            )
+    latest_parts = [
+        "File processing finished",
+        f"{int(summary.get('pdfs_processed', 0))} PDF(s) in the latest action",
+        f"{int(summary.get('orders_imported', 0))} order(s) imported",
+        f"{int(summary.get('manual_reviews', 0))} sent to Manual Review",
+    ]
+    if duplicate_count:
+        latest_parts.append(f"{duplicate_count} duplicate skipped")
+    if unsupported_count:
+        latest_parts.append(f"{unsupported_count} unsupported")
+    if processing_error_count:
+        latest_parts.append(f"{processing_error_count} processing error(s)")
+    st.caption("Latest upload: " + " · ".join(latest_parts) + ".")
 
 
 
@@ -932,11 +928,31 @@ def show_current_batch_outcomes() -> None:
     show_batch_outcome_details()
 
 
-def show_current_batch_validation_data() -> None:
-    """Render the accepted current-batch dashboard and its filterable order table."""
+def show_current_batch_validation_summary() -> None:
+    """Render one authoritative current-batch metric group."""
     orders = st.session_state.get("orders", [])
     products = st.session_state.get("products", [])
     reviews = st.session_state.get("reviews", [])
+    dashboard = compute_current_batch_validation_dashboard(orders, products)
+    manual_review_count = sum(is_manual_review_record(review) for review in reviews)
+
+    st.caption(
+        "Accepted orders only. Missing Order Income or Final Amount values are "
+        "excluded from the respective total."
+    )
+    with st.container(horizontal=True, gap="xsmall"):
+        st.metric("Orders", int(dashboard["orders"]), border=True)
+        st.metric("Products", int(dashboard["products"]), border=True)
+        st.metric("Quantity", int(dashboard["quantity"]), border=True)
+        st.metric("Order Income", f"RM {dashboard['order_income']}", border=True)
+        st.metric("Final Amount", f"RM {dashboard['final_amount']}", border=True)
+        show_manual_review_metric(manual_review_count, "data-import-current-batch")
+
+
+def show_current_batch_validation_data() -> None:
+    """Render filterable accepted-order business detail without summary duplication."""
+    orders = st.session_state.get("orders", [])
+    products = st.session_state.get("products", [])
     order_columns = [
         "platform",
         "order_id",
@@ -954,21 +970,6 @@ def show_current_batch_validation_data() -> None:
         )
     )
     product_filter_columns = ["platform", "order_id", "product_name", "seller_sku"]
-    dashboard = compute_current_batch_validation_dashboard(orders, products)
-    manual_review_count = sum(is_manual_review_record(review) for review in reviews)
-
-    show_table_section_heading(
-        "Current Batch Overview",
-        "Accepted orders only. Missing Order Income or Final Amount values are excluded from the respective total.",
-    )
-    with st.container(horizontal=True, gap="xsmall"):
-        st.metric("Orders", int(dashboard["orders"]), border=True)
-        st.metric("Products", int(dashboard["products"]), border=True)
-        st.metric("Quantity", int(dashboard["quantity"]), border=True)
-        st.metric("Order Income", f"RM {dashboard['order_income']}", border=True)
-        st.metric("Final Amount", f"RM {dashboard['final_amount']}", border=True)
-        show_manual_review_metric(manual_review_count, "data-import-current-batch")
-
     show_table_section_heading(
         "Current Batch — Order Level Data",
         "Choose the default visible order fields, then filter accepted orders by Order ID, Product or SKU, and Platform.",
@@ -1170,7 +1171,7 @@ def process_uploads(uploaded_files: list[Any]) -> None:
         st.session_state.processing_errors = processing_errors
         st.session_state.upload_result_summary = action_summary
         st.session_state.data_import_step = 3
-        status.update(label="Processing complete", state="complete", expanded=False)
+        status.update(label="File processing finished", state="complete", expanded=False)
 
     st.session_state.uploader_version += 1
     st.rerun()
@@ -1937,6 +1938,7 @@ if selected_page == DATA_IMPORT_PAGE:
     render_data_import(
         render_platform_orders_upload=show_upload_panel,
         render_platform_orders_outcomes=show_current_batch_outcomes,
+        render_platform_orders_summary=show_current_batch_validation_summary,
         render_platform_orders_validation_data=show_current_batch_validation_data,
         discard_current_batch=request_batch_discard_confirmation,
     )

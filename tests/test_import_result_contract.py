@@ -115,6 +115,8 @@ def test_data_import_validation_displays_platform_contract_summary(tmp_path, mon
     app.run(timeout=20)
 
     assert app.exception == []
-    assert ("Accepted Orders", "1") in {(metric.label, metric.value) for metric in app.metric}
-    assert any("Current batch:" in caption.value for caption in app.caption)
-    assert any("No validation issues in the current batch." in success.value for success in app.success)
+    assert ("Orders", "1") in {(metric.label, metric.value) for metric in app.metric}
+    assert any(
+        "Ready" in success.value and "1 accepted order validated successfully" in success.value
+        for success in app.success
+    )

@@ -459,6 +459,7 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
         dataframe.value
         for dataframe in app.dataframe
         if "Order ID" in dataframe.value.columns
+        and dataframe.value["Order ID"].tolist() == ["SHP-1", "LZD-1", "ZNX-1"]
     )
     assert current_order_table["Order ID"].tolist() == ["SHP-1", "LZD-1", "ZNX-1"]
     assert {"Payment Status", "Refund Amount"} <= set(current_order_table.columns)
@@ -473,7 +474,7 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
         element for element in app.multiselect if element.label == "Order columns"
     )
     assert "Merchandise Subtotal" in order_columns_picker.options
-    assert {"Current Batch Overview", "Search and Filters"} <= {
+    assert {"Current batch summary", "Search and Filters"} <= {
         element.value for element in app.subheader
     }
     assert {
@@ -505,6 +506,7 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
         dataframe.value
         for dataframe in app.dataframe
         if "Order ID" in dataframe.value.columns
+        and dataframe.value["Order ID"].tolist() == ["LZD-1"]
     )
     assert filtered_order_table["Order ID"].tolist() == ["LZD-1"]
 
@@ -680,12 +682,19 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
    } <= {button.label for button in app.button}
     metrics = {(metric.label, metric.value) for metric in app.metric}
     assert {
-        ("PDFs", "15"),
         ("Orders", "1"),
         ("Products", "1"),
+        ("Quantity", "1"),
         ("Manual Review", "1"),
     } <= metrics
-    assert "Duplicate skipped: 1 · Unsupported: 1" in {caption.value for caption in app.caption}
+    assert ("PDFs", "15") not in metrics
+    assert any(
+        "Latest upload: File processing finished · 5 PDF(s) in the latest action"
+        in caption.value
+        and "1 duplicate skipped" in caption.value
+        and "1 unsupported" in caption.value
+        for caption in app.caption
+    )
     assert "batch-summary" not in {caption.value for caption in app.caption}
     assert {"Discard current batch", "Logout"} <= {
         button.label for button in app.button
@@ -698,7 +707,7 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert "View skipped items" in {expander.label for expander in app.expander}
     assert {
         "Validate",
-        "Result Summary",
+        "Current batch summary",
         "Current Batch — Order Level Data",
         "Manual Review",
         "Available recovery actions",
@@ -706,7 +715,10 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
         element.value for element in app.subheader
     }
     current_order_table = next(
-        dataframe.value for dataframe in app.dataframe if "Order ID" in dataframe.value.columns
+        dataframe.value
+        for dataframe in app.dataframe
+        if "Order ID" in dataframe.value.columns
+        and dataframe.value["Order ID"].tolist() == ["ORD-A"]
     )
     assert current_order_table["Order ID"].tolist() == ["ORD-A"]
     assert all("Historical Status" not in dataframe.value.columns for dataframe in app.dataframe)
@@ -957,7 +969,11 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
 
     assert app.exception == []
     assert "Data Import" in {title.value for title in app.title}
-    assert "Step 1 of 5 — Select Source" in {element.text for element in app.get("progress")}
+    stepper = {element.value for element in app.markdown if "badge[" in element.value}
+    assert len(stepper) == 5
+    assert any("1. Select Source" in item and "Current" in item for item in stepper)
+    assert any("5. Review & Commit" in item and "Pending" in item for item in stepper)
+    assert app.get("progress") == []
     source_type = next(
         control
         for control in app.get("button_group")

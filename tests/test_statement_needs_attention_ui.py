@@ -250,7 +250,7 @@ def test_ready_statement_keeps_existing_success_path(monkeypatch):
 
     assert fake.errors == []
     assert fake.buttons == []
-    assert fake.successes == ["No validation issues in the current batch."]
+    assert fake.successes == []
 
 
 def _many_mismatch_statement_app() -> None:

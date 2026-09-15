@@ -1112,6 +1112,9 @@ def test_direct_statement_commit_access_remains_blocked_and_routes_to_review(
     assert state["weekly_statement_stage"] == review.stage
     assert state["weekly_statement_review"] == review
     assert "Affected orders" in {element.value for element in app.subheader}
+    assert "All reconciliation evidence" in {
+        expander.label for expander in app.expander
+    }
 
 
 def test_exit_statement_review_cancel_and_confirm_are_narrow(
