@@ -8,6 +8,7 @@ persistence rules.
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from hashlib import sha256
 import io
 from typing import Any, Callable
@@ -101,6 +102,19 @@ _WORKFLOW_KEYS = (
     "manual_review_correction_drafts",
     "pending_validation_bulk_recovery",
 )
+
+
+@dataclass(frozen=True)
+class _StatementOrderIssueGroup:
+    order_id: str
+    issues: tuple[ValidationIssue, ...]
+
+
+@dataclass(frozen=True)
+class _StatementIssuePresentation:
+    order_groups: tuple[_StatementOrderIssueGroup, ...]
+    statement_issues: tuple[ValidationIssue, ...]
+    removal_action: RecoveryAction | None
 
 
 def initialize_data_import_state() -> None:
@@ -315,12 +329,215 @@ def _render_contract_validation(result: ImportResult) -> None:
                 st.success("No validation issues in the current batch.", icon=":material/check_circle:")
         else:
             st.info(result.source_summary.empty_message or "No import result is staged yet.", icon=":material/info:")
-    for index, issue in enumerate(validation.blocking_issues):
-        _render_validation_issue(issue, index=index, is_blocking=True)
-    for index, issue in enumerate(other_warnings, start=len(validation.blocking_issues)):
-        _render_validation_issue(issue, index=index, is_blocking=False)
+    if (
+        result.source_type == SHOPEE_WEEKLY_STATEMENT
+        and validation.blocking_issues
+    ):
+        _render_weekly_statement_needs_attention(
+            result,
+            (*validation.blocking_issues, *other_warnings),
+        )
+    else:
+        for index, issue in enumerate(validation.blocking_issues):
+            _render_validation_issue(issue, index=index, is_blocking=True)
+        for index, issue in enumerate(
+            other_warnings,
+            start=len(validation.blocking_issues),
+        ):
+            _render_validation_issue(issue, index=index, is_blocking=False)
     if duplicate_warnings:
         _render_consolidated_duplicates(duplicate_warnings)
+
+
+def _statement_issue_presentation(
+    result: ImportResult,
+    issues: tuple[ValidationIssue, ...],
+) -> _StatementIssuePresentation:
+    """Group existing issues for display without changing their semantics."""
+
+    known_order_ids: list[str] = []
+    batch = result.source_specific_details.get("reconciliation_v2")
+    for order_result in getattr(batch, "orders", ()):
+        order_id = str(getattr(order_result.evidence, "order_id", "") or "").strip()
+        if order_id and order_id not in known_order_ids:
+            known_order_ids.append(order_id)
+    for exception in result.reconciliation.exceptions:
+        order_id = str(exception.affected_item or "").strip()
+        if order_id and order_id not in known_order_ids:
+            known_order_ids.append(order_id)
+
+    grouped: dict[str, list[ValidationIssue]] = {}
+    statement_issues: list[ValidationIssue] = []
+    removal_action: RecoveryAction | None = None
+    for issue in issues:
+        if removal_action is None:
+            removal_action = next(
+                (
+                    action
+                    for action in issue.recovery_actions
+                    if action.action_type == REMOVE_STAGED_SOURCE
+                ),
+                None,
+            )
+        order_id = _statement_issue_order_id(issue, tuple(known_order_ids))
+        if order_id is None:
+            statement_issues.append(issue)
+            continue
+        grouped.setdefault(order_id, []).append(issue)
+
+    return _StatementIssuePresentation(
+        order_groups=tuple(
+            _StatementOrderIssueGroup(order_id, tuple(order_issues))
+            for order_id, order_issues in grouped.items()
+        ),
+        statement_issues=tuple(statement_issues),
+        removal_action=removal_action,
+    )
+
+
+def _statement_issue_order_id(
+    issue: ValidationIssue,
+    known_order_ids: tuple[str, ...],
+) -> str | None:
+    evidence_order_id = str(issue.evidence.get("order_id") or "").strip()
+    if evidence_order_id:
+        return evidence_order_id
+    affected_item = str(issue.affected_item or "").strip()
+    for order_id in known_order_ids:
+        if affected_item == order_id or affected_item.startswith(f"{order_id} /"):
+            return order_id
+        if issue.reason.startswith(f"{order_id}:"):
+            return order_id
+    return None
+
+
+def _render_weekly_statement_needs_attention(
+    result: ImportResult,
+    issues: tuple[ValidationIssue, ...],
+) -> None:
+    presentation = _statement_issue_presentation(result, issues)
+    affected_count = len(presentation.order_groups)
+    st.error(
+        "**Statement needs attention**\n\n"
+        f"{affected_count} order{'s' if affected_count != 1 else ''} contain "
+        "unresolved reconciliation issues. Review the affected orders and "
+        "Statement issues before this Statement can be committed.",
+        icon=":material/error:",
+    )
+
+    action = presentation.removal_action
+    if action is not None and st.button(
+        action.label,
+        icon=":material/delete_outline:",
+        key=f"statement_level_{action.action_id}",
+        disabled=not action.allowed,
+    ):
+        st.session_state.pending_validation_recovery_action = action
+        st.rerun()
+
+    if presentation.statement_issues:
+        st.subheader("Statement issues")
+        st.dataframe(
+            [
+                {
+                    "Status": "Needs review" if issue.blocking else "Warning",
+                    "Issue": issue.reason,
+                }
+                for issue in presentation.statement_issues
+            ],
+            hide_index=True,
+            height=min(320, 36 * (len(presentation.statement_issues) + 1)),
+        )
+        with st.expander("Statement technical details", expanded=False):
+            _render_statement_issue_evidence(presentation.statement_issues)
+
+    if not presentation.order_groups:
+        return
+    st.subheader("Affected orders")
+    order_ids = tuple(group.order_id for group in presentation.order_groups)
+    rows = [
+        {
+            "Order ID": group.order_id,
+            "Status": (
+                "Needs review"
+                if any(issue.blocking for issue in group.issues)
+                else "Warning"
+            ),
+            "Issue Count": len(group.issues),
+            "Issue Summary": _statement_issue_summary(group),
+            "Action": "View details",
+        }
+        for group in presentation.order_groups
+    ]
+    st.dataframe(
+        rows,
+        hide_index=True,
+        height=min(420, 36 * (len(rows) + 1)),
+        column_config={
+            "Order ID": st.column_config.TextColumn("Order ID", pinned=True),
+            "Issue Count": st.column_config.NumberColumn("Issue Count", format="%d"),
+            "Action": st.column_config.ButtonColumn(
+                "Action",
+                type="tertiary",
+                on_click=_select_statement_issue_order,
+                args=(order_ids,),
+                key="weekly_statement_issue_order_click",
+            ),
+        },
+    )
+    selected_order_id = st.session_state.get("weekly_statement_issue_order_id")
+    selected = next(
+        (
+            group
+            for group in presentation.order_groups
+            if group.order_id == selected_order_id
+        ),
+        None,
+    )
+    if selected is None:
+        return
+    with st.container(border=True):
+        st.write(f"**{selected.order_id}**")
+        st.caption(f"{len(selected.issues)} issue{'s' if len(selected.issues) != 1 else ''}")
+        st.write("Issues")
+        for issue in selected.issues:
+            st.markdown(f"- {issue.reason}")
+        with st.expander("Technical details", expanded=False):
+            _render_statement_issue_evidence(selected.issues)
+
+
+def _statement_issue_summary(group: _StatementOrderIssueGroup) -> str:
+    first = group.issues[0].reason
+    prefix = f"{group.order_id}:"
+    if first.startswith(prefix):
+        first = first[len(prefix):].strip()
+    if len(first) > 100:
+        first = f"{first[:97].rstrip()}..."
+    remaining = len(group.issues) - 1
+    return f"{first} +{remaining} more" if remaining else first
+
+
+def _select_statement_issue_order(order_ids: tuple[str, ...]) -> None:
+    click = st.session_state.get("weekly_statement_issue_order_click")
+    if click is None:
+        return
+    try:
+        row = int(click["row"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if 0 <= row < len(order_ids):
+        st.session_state["weekly_statement_issue_order_id"] = order_ids[row]
+
+
+def _render_statement_issue_evidence(
+    issues: tuple[ValidationIssue, ...],
+) -> None:
+    for index, issue in enumerate(issues, start=1):
+        st.caption(f"Issue {index}: {issue.reason}")
+        if issue.evidence:
+            st.write(dict(issue.evidence))
+        if issue.suggested_action:
+            st.caption(f"Suggested action: {issue.suggested_action}")
 
 
 def _render_consolidated_duplicates(duplicate_warnings: tuple[ValidationIssue, ...]) -> None:
