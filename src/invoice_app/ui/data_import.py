@@ -7,7 +7,9 @@ persistence rules.
 
 from __future__ import annotations
 
+import csv
 from hashlib import sha256
+import io
 from typing import Any, Callable
 
 import streamlit as st
@@ -20,9 +22,11 @@ from ..services.import_result_adapters import (
 from ..services.import_result_contract import ImportResult, ReconciliationException, RecoveryAction, ValidationIssue
 from ..services.validation_recovery import (
     REMOVE_SOURCE,
+    REMOVE_STAGED_SOURCE,
     VIEW_DETAILS,
     execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
+    plan_duplicate_source_removal,
     recovery_actions_for_source,
 )
 from ..services.historical_invoice_intake import (
@@ -302,7 +306,10 @@ def _render_contract_validation(result: ImportResult) -> None:
     visible_warnings = tuple(
         issue for issue in validation.warnings if issue.layer != "manual_review"
     )
-    if not validation.blocking_issues and not visible_warnings:
+    duplicate_warnings = tuple(issue for issue in visible_warnings if issue.layer == "duplicate")
+    other_warnings = tuple(issue for issue in visible_warnings if issue.layer != "duplicate")
+
+    if not validation.blocking_issues and not other_warnings and not duplicate_warnings:
         if result.session_state.applied_to_current_session:
             if not validation.warnings:
                 st.success("No validation issues in the current batch.", icon=":material/check_circle:")
@@ -310,13 +317,86 @@ def _render_contract_validation(result: ImportResult) -> None:
             st.info(result.source_summary.empty_message or "No import result is staged yet.", icon=":material/info:")
     for index, issue in enumerate(validation.blocking_issues):
         _render_validation_issue(issue, index=index, is_blocking=True)
-    for index, issue in enumerate(visible_warnings, start=len(validation.blocking_issues)):
+    for index, issue in enumerate(other_warnings, start=len(validation.blocking_issues)):
         _render_validation_issue(issue, index=index, is_blocking=False)
-    for index, issue in enumerate(
-        (issue for issue in validation.warnings if issue.layer == "manual_review"),
-        start=len(validation.blocking_issues) + len(visible_warnings),
+    if duplicate_warnings:
+        _render_consolidated_duplicates(duplicate_warnings)
+
+
+def _render_consolidated_duplicates(duplicate_warnings: tuple[ValidationIssue, ...]) -> None:
+    count = len(duplicate_warnings)
+    st.info(
+        f"**Duplicate Orders Skipped ({count} file{'s' if count > 1 else ''})** — "
+        "These orders were already detected in the batch and safely skipped during import. "
+        "They do not affect accepted totals or validation readiness.",
+        icon=":material/info:",
+    )
+    duplicate_sources = [
+        str(w.affected_item or "").strip()
+        for w in duplicate_warnings
+        if w.affected_item
+    ]
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        _render_weekly_statement_duplicate_removal(duplicate_sources)
+    else:
+        removal_plan = plan_duplicate_source_removal(
+            st.session_state,
+            duplicate_sources,
+        )
+        with st.container(horizontal=True):
+            if removal_plan.safe_sources and st.button(
+                f"Remove {len(removal_plan.safe_sources)} safe duplicate source(s)",
+                icon=":material/delete_sweep:",
+                key="remove_all_duplicate_sources",
+            ):
+                _queue_bulk_recovery(
+                    list(removal_plan.safe_sources),
+                    label="Remove safe duplicate sources",
+                )
+        if removal_plan.retained_sources:
+            st.caption(
+                "Some duplicate PDFs also contain valid or reviewable orders, so "
+                "they are being kept. Duplicate orders are already skipped "
+                "automatically."
+            )
+    with st.expander(f"View skipped duplicate files ({count})", expanded=False):
+        st.dataframe(
+            [
+                {
+                    "Affected Source": w.affected_item or "Unavailable",
+                    "Reason": w.reason,
+                }
+                for w in duplicate_warnings
+            ],
+            hide_index=True,
+        )
+
+
+def _render_weekly_statement_duplicate_removal(
+    duplicate_sources: list[str],
+) -> None:
+    """Use the existing staged-statement recovery path for its duplicate state."""
+
+    stage = _weekly_stage()
+    source = stage.source_filename if stage is not None else None
+    if not source or source not in duplicate_sources:
+        return
+    actions = recovery_actions_for_source(
+        source=source,
+        action_type=REMOVE_STAGED_SOURCE,
+        remove_label="Remove staged duplicate statement from current batch",
+        include_details=False,
+    )
+    action = next((item for item in actions if item.destructive), None)
+    if action is None:
+        return
+    if st.button(
+        action.label,
+        icon=":material/delete_sweep:",
+        key="remove_staged_duplicate_statement",
     ):
-        _render_validation_issue(issue, index=index, is_blocking=False, show_message=False)
+        st.session_state.pending_validation_recovery_action = action
+        st.rerun()
 
 
 def _render_validation_issue(
@@ -446,48 +526,174 @@ def _render_manual_review_resolution() -> None:
     if not reviews:
         st.caption("No current-batch sources require Manual Review.")
         return
-    st.dataframe([{"Source PDF": item.get("source_pdf"), "Order ID": item.get("order_id"), "Reason": item.get("reason")} for item in reviews], hide_index=True)
+
     review_sources = [str(item.get("source_pdf") or "").strip() for item in reviews]
-    if st.button(
-        "Remove all Manual Review sources from current batch",
-        icon=":material/delete_sweep:",
-        key="remove_all_manual_review_sources",
-    ):
-        _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
-    st.subheader("Manual Review actions")
-    for review in reviews:
-        plan = resolution_plan(review)
-        with st.container(border=True):
-            st.write(f"**{review.get('order_id') or 'Unknown order'}**")
-            st.caption(f"Source: {review.get('source_pdf') or 'Unavailable'}")
-            if plan is None:
-                st.info("This issue needs source evidence or Product Master resolution and cannot be force-resolved.")
-                if st.button("View Details", key=f"manual_details_{id(review)}"):
-                    _render_issue_details(
-                        ValidationIssue(
-                            layer="manual_review",
-                            severity="warning",
-                            blocking=False,
-                            reason=str(review.get("reason") or "Manual Review required."),
-                            affected_item=(
-                                str(review.get("order_id") or "").strip()
-                                or str(review.get("source_pdf") or "").strip()
-                                or None
-                            ),
-                            evidence=review,
+    unfixable_reviews = [r for r in reviews if resolution_plan(r) is None]
+    fixable_reviews = [r for r in reviews if resolution_plan(r) is not None]
+
+    # Download All Manual Reviews (both unfixable and fixable)
+    all_output = io.StringIO()
+    all_writer = csv.DictWriter(
+        all_output,
+        fieldnames=["Order ID", "Source PDF", "Platform", "Resolution Type", "Reason"],
+    )
+    all_writer.writeheader()
+    for item in reviews:
+        res_type = "Requires Re-upload" if resolution_plan(item) is None else "Online Resolution"
+        all_writer.writerow({
+            "Order ID": str(item.get("order_id") or ""),
+            "Source PDF": str(item.get("source_pdf") or ""),
+            "Platform": str(item.get("platform") or "Shopee"),
+            "Resolution Type": res_type,
+            "Reason": str(item.get("reason") or "Manual Review required"),
+        })
+    all_csv_data = all_output.getvalue().encode("utf-8-sig")
+
+    with st.container(horizontal=True):
+        st.download_button(
+            label="📥 Download All Manual Reviews (CSV)",
+            data=all_csv_data,
+            file_name=f"all_manual_reviews_{st.session_state.get('batch_id', 'batch')}.csv",
+            mime="text/csv",
+            key="download_all_manual_reviews_csv",
+        )
+
+    tab_unfixable, tab_fixable = st.tabs([
+        f"⚠️ Requires Re-upload ({len(unfixable_reviews)})",
+        f"📝 Online Resolution ({len(fixable_reviews)})",
+    ])
+
+    with tab_unfixable:
+        if not unfixable_reviews:
+            st.success("No sources require re-upload in the current batch.", icon=":material/check_circle:")
+        else:
+            st.warning(
+                "The following invoices have missing product anchors or invalid document structure and cannot be resolved online. "
+                "Download this listing to request replacement files, and remove them from the current batch to proceed."
+            )
+            with st.container(horizontal=True):
+                output = io.StringIO()
+                writer = csv.DictWriter(
+                    output,
+                    fieldnames=["Order ID", "Source PDF", "Platform", "Reason"],
+                )
+                writer.writeheader()
+                for item in unfixable_reviews:
+                    writer.writerow({
+                        "Order ID": str(item.get("order_id") or ""),
+                        "Source PDF": str(item.get("source_pdf") or ""),
+                        "Platform": str(item.get("platform") or "Shopee"),
+                        "Reason": str(item.get("reason") or "Manual Review required"),
+                    })
+                st.download_button(
+                    label="📥 Download Re-upload Listing (CSV)",
+                    data=output.getvalue().encode("utf-8-sig"),
+                    file_name=f"manual_review_reupload_{st.session_state.get('batch_id', 'batch')}.csv",
+                    mime="text/csv",
+                    key="download_manual_review_unfixable_csv",
+                )
+                if st.button(
+                    "Remove all Manual Review sources from current batch",
+                    icon=":material/delete_sweep:",
+                    key="remove_all_manual_review_sources",
+                ):
+                    _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
+
+            st.dataframe(
+                [
+                    {
+                        "Order ID": item.get("order_id"),
+                        "Source PDF": item.get("source_pdf"),
+                        "Reason": item.get("reason"),
+                    }
+                    for item in unfixable_reviews
+                ],
+                hide_index=True,
+            )
+
+            for review in unfixable_reviews:
+                with st.expander(f"Technical Details · {review.get('order_id') or 'Unknown'}", expanded=False):
+                    source_pdf = review.get("source_pdf")
+                    if source_pdf:
+                        actions = recovery_actions_for_source(
+                            source=source_pdf,
+                            action_type=REMOVE_SOURCE,
+                            remove_label="Remove source from current batch",
+                            include_details=False,
                         )
-                    )
-                continue
-            if plan.issue_type == PRODUCT_COUNT_MISMATCH:
-                if review.get("product_payloads"):
-                    st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
-                _render_missing_product_draft(plan.key, review)
-            elif plan.issue_type == PROMOTION_SUBTOTAL:
-                _render_promotion_subtotal_form(plan.key, review)
-            elif plan.issue_type == FINAL_AMOUNT:
-                _render_final_amount_form(plan.key, review)
-            else:
-                _render_income_form(plan.key, review)
+                        for act in actions:
+                            if act.destructive:
+                                if st.button(
+                                    act.label,
+                                    icon=":material/delete_outline:",
+                                    key=f"remove_single_mr_unfixable_{id(review)}_{act.action_id}",
+                                ):
+                                    st.session_state.pending_validation_recovery_action = act
+                                    st.rerun()
+                    if st.button("View Details", key=f"manual_details_{id(review)}"):
+                        _render_issue_details(
+                            ValidationIssue(
+                                layer="manual_review",
+                                severity="warning",
+                                blocking=False,
+                                reason=str(review.get("reason") or "Manual Review required."),
+                                affected_item=(
+                                    str(review.get("order_id") or "").strip()
+                                    or str(review.get("source_pdf") or "").strip()
+                                    or None
+                                ),
+                                evidence=review,
+                            )
+                        )
+
+    with tab_fixable:
+        if not fixable_reviews:
+            st.success("No sources require online form resolution in the current batch.", icon=":material/check_circle:")
+        else:
+            st.info("The following invoices have missing fields or extracted product count discrepancies. Fill in the forms below to apply corrections.")
+            if not unfixable_reviews:
+                if st.button(
+                    "Remove all Manual Review sources from current batch",
+                    icon=":material/delete_sweep:",
+                    key="remove_all_manual_review_sources_fixable",
+                ):
+                    _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
+            st.subheader("Manual Review actions")
+            for review in fixable_reviews:
+                plan = resolution_plan(review)
+                if plan is None:
+                    continue
+                with st.container(border=True):
+                    with st.container(horizontal=True):
+                        st.write(f"**{review.get('order_id') or 'Unknown order'}**")
+                        source_pdf = review.get("source_pdf")
+                        if source_pdf:
+                            actions = recovery_actions_for_source(
+                                source=source_pdf,
+                                action_type=REMOVE_SOURCE,
+                                remove_label="Remove source from current batch",
+                                include_details=False,
+                            )
+                            for act in actions:
+                                if act.destructive:
+                                    if st.button(
+                                        act.label,
+                                        icon=":material/delete_outline:",
+                                        key=f"remove_single_mr_fixable_{id(review)}_{act.action_id}",
+                                    ):
+                                        st.session_state.pending_validation_recovery_action = act
+                                        st.rerun()
+                    st.caption(f"Source: {review.get('source_pdf') or 'Unavailable'}")
+                    if plan.issue_type == PRODUCT_COUNT_MISMATCH:
+                        if review.get("product_payloads"):
+                            st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
+                        _render_missing_product_draft(plan.key, review)
+                    elif plan.issue_type == PROMOTION_SUBTOTAL:
+                        _render_promotion_subtotal_form(plan.key, review)
+                    elif plan.issue_type == FINAL_AMOUNT:
+                        _render_final_amount_form(plan.key, review)
+                    else:
+                        _render_income_form(plan.key, review)
 
 
 def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:

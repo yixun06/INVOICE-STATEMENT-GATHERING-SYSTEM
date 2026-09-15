@@ -35,10 +35,63 @@ class RecoveryExecution:
     message: str
 
 
+@dataclass(frozen=True)
+class DuplicateSourceRemovalPlan:
+    """Authoritative current-staging decision for duplicate source cleanup."""
+
+    safe_sources: tuple[str, ...]
+    retained_sources: tuple[str, ...]
+
+
 def source_name(item: dict[str, Any]) -> str | None:
     value = item.get("source_pdf") or item.get("filename") or item.get("source_file")
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def plan_duplicate_source_removal(
+    state: MutableMapping[str, Any],
+    sources: Iterable[str],
+) -> DuplicateSourceRemovalPlan:
+    """Allow whole-source removal only for duplicate-only staged sources.
+
+    A PDF may contain both a duplicate order and newly accepted/reviewable
+    sibling orders.  The duplicate reducer has already safely excluded the
+    duplicate order, so this planner keeps any source that still owns a record
+    outside ``duplicate_skipped``.
+    """
+
+    candidate_sources = tuple(
+        dict.fromkeys(
+            source.strip()
+            for source in sources
+            if isinstance(source, str) and source.strip()
+        )
+    )
+    duplicate_sources = {
+        source_name(record)
+        for record in state.get("duplicate_skipped", [])
+        if isinstance(record, dict) and source_name(record)
+    }
+    retained_by_other_staging = {
+        source_name(record)
+        for bucket in _SOURCE_BUCKETS
+        if bucket != "duplicate_skipped"
+        for record in state.get(bucket, [])
+        if isinstance(record, dict) and source_name(record)
+    }
+    safe_sources = tuple(
+        source
+        for source in candidate_sources
+        if source in duplicate_sources and source not in retained_by_other_staging
+    )
+    safe_set = frozenset(safe_sources)
+    return DuplicateSourceRemovalPlan(
+        safe_sources=safe_sources,
+        retained_sources=tuple(
+            source for source in candidate_sources if source not in safe_set
+        ),
+    )
 
 
 def recovery_actions_for_source(

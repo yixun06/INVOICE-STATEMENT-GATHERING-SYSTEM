@@ -4,7 +4,16 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
-from src.invoice_app.services.validation_recovery import execute_current_batch_bulk_recovery
+from src.invoice_app.services.shopee_weekly_statement_service import (
+    StagedShopeeWeeklyStatement,
+)
+from src.invoice_app.services.validation_recovery import (
+    REMOVE_STAGED_SOURCE,
+    execute_current_batch_bulk_recovery,
+    execute_current_batch_recovery,
+    plan_duplicate_source_removal,
+    recovery_actions_for_source,
+)
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -67,6 +76,229 @@ def test_bulk_recovery_removes_only_selected_current_batch_sources_and_revalidat
     assert "uat2_historical_commit_entries" not in state
     assert "uat2_historical_commit_refresh_required" not in state
     assert "uat2_historical_commit_signature" not in state
+
+
+def test_duplicate_only_source_is_safe_for_whole_source_removal():
+    state = {
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "duplicate_skipped": [
+            {"source_pdf": "duplicate.pdf", "order_id": "DUP-1"},
+        ],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+
+    plan = plan_duplicate_source_removal(state, ["duplicate.pdf"])
+
+    assert plan.safe_sources == ("duplicate.pdf",)
+    assert plan.retained_sources == ()
+    execute_current_batch_bulk_recovery(state, plan.safe_sources)
+    assert state["duplicate_skipped"] == []
+
+
+def test_mixed_duplicate_source_is_retained_with_its_new_siblings():
+    state = {
+        "orders": [
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-A", "status": "Accepted"},
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-C", "status": "Accepted"},
+        ],
+        "products": [
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-A", "status": "Accepted"},
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-C", "status": "Accepted"},
+        ],
+        "reviews": [],
+        "duplicate_skipped": [
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-B", "status": "Duplicate Skipped"},
+        ],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+
+    plan = plan_duplicate_source_removal(state, ["multi.pdf"])
+
+    assert plan.safe_sources == ()
+    assert plan.retained_sources == ("multi.pdf",)
+    assert [item["order_id"] for item in state["orders"]] == ["ORDER-A", "ORDER-C"]
+    assert state["duplicate_skipped"][0]["order_id"] == "ORDER-B"
+
+
+def test_source_conflict_is_never_a_safe_duplicate_removal_target():
+    state = {
+        "orders": [],
+        "products": [],
+        "reviews": [
+            {"source_pdf": "conflict.pdf", "status": "SOURCE_CONFLICT"},
+        ],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+
+    plan = plan_duplicate_source_removal(state, ["conflict.pdf"])
+
+    assert plan.safe_sources == ()
+    assert plan.retained_sources == ("conflict.pdf",)
+
+
+def test_weekly_statement_duplicate_removal_uses_staged_source_action():
+    state = {
+        "weekly_statement_stage": object(),
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+    action = recovery_actions_for_source(
+        source="statement.xlsx",
+        action_type=REMOVE_STAGED_SOURCE,
+        remove_label="Remove staged duplicate statement from current batch",
+        include_details=False,
+    )[0]
+
+    execution = execute_current_batch_recovery(state, action)
+
+    assert execution.changed is True
+    assert "weekly_statement_stage" not in state
+
+
+def test_validate_weekly_duplicate_removal_clears_the_staged_statement(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    stage = StagedShopeeWeeklyStatement(
+        result="NEEDS_REVIEW",
+        source_filename="duplicate-statement.xlsx",
+        file_hash="hash",
+        statement=None,
+        validation_issues=(),
+        review_reasons=(),
+        rejection_reasons=(),
+        duplicate_status="ALREADY_STAGED",
+        order_reconciliations=(),
+        adjustment_reconciliations=(),
+    )
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "duplicate-statement-batch",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": stage,
+    }.items():
+        app.session_state[key] = value
+    app.run(timeout=20)
+
+    next(
+        button
+        for button in app.button
+        if button.label == "Remove staged duplicate statement from current batch"
+    ).click().run(timeout=20)
+    next(
+        button
+        for button in app.button
+        if button.label == "Confirm removal and revalidate"
+    ).click().run(timeout=20)
+
+    assert app.exception == []
+    assert "weekly_statement_stage" not in app.session_state.filtered_state
+
+
+def test_validate_duplicate_only_source_offers_safe_removal_and_keeps_audit_expander(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "duplicate-only-batch",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 3,
+        "orders": [{"source_pdf": "good.pdf", "order_id": "GOOD", "status": "Accepted"}],
+        "products": [],
+        "reviews": [],
+        "processing_errors": [],
+        "unsupported_files": [],
+        "duplicate_skipped": [
+            {"source_pdf": "duplicate.pdf", "order_id": "DUP-1", "status": "Duplicate Skipped"},
+        ],
+    }.items():
+        app.session_state[key] = value
+    app.run(timeout=20)
+
+    assert "View skipped duplicate files (1)" in {item.label for item in app.expander}
+    next(
+        button
+        for button in app.button
+        if button.label == "Remove 1 safe duplicate source(s)"
+    ).click().run(timeout=20)
+    next(
+        button
+        for button in app.button
+        if button.label == "Confirm removal and revalidate"
+    ).click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["duplicate_skipped"] == []
+
+
+def test_validate_mixed_duplicate_source_has_no_whole_source_removal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "mixed-duplicate-batch",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 3,
+        "orders": [
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-A", "status": "Accepted"},
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-C", "status": "Accepted"},
+        ],
+        "products": [],
+        "reviews": [],
+        "processing_errors": [],
+        "unsupported_files": [],
+        "duplicate_skipped": [
+            {"source_pdf": "multi.pdf", "order_id": "ORDER-B", "status": "Duplicate Skipped"},
+        ],
+    }.items():
+        app.session_state[key] = value
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert not any("safe duplicate source" in button.label for button in app.button)
+    assert any("also contain valid or reviewable orders" in item.value for item in app.caption)
+    assert [item["order_id"] for item in app.session_state.filtered_state["orders"]] == ["ORDER-A", "ORDER-C"]
+
+
+def test_manual_review_csv_downloads_remain_available(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "manual-review-csv-batch",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 3,
+        "orders": [],
+        "products": [],
+        "processing_errors": [],
+        "unsupported_files": [],
+        "duplicate_skipped": [],
+        "reviews": [
+            {"source_pdf": "reupload.pdf", "order_id": "REUPLOAD", "status": "Manual Review", "reason": "Source evidence required"},
+            {"source_pdf": "online.pdf", "order_id": "ONLINE", "status": "Manual Review", "reason_code": "PRODUCT_COUNT_MISMATCH", "reason": "Product Count Mismatch: source declares 1 product anchors."},
+        ],
+    }.items():
+        app.session_state[key] = value
+    app.run(timeout=20)
+
+    assert app.exception == []
+    labels = {item.label for item in app.get("download_button")}
+    assert "📥 Download All Manual Reviews (CSV)" in labels
+    assert "📥 Download Re-upload Listing (CSV)" in labels
 
 
 def _historical_signature(state):
