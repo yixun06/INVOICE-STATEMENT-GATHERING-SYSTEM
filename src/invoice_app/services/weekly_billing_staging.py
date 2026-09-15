@@ -20,14 +20,23 @@ STAGING_DATA_HEADERS = (
     "Location Code",
     "Quantity",
     "Unit of Measure Code",
+    "Unit Price [RSP] Excl.GST",
     "Order Date",
     "Shipment Date",
+    "External Doc No.",
     "Customer Outlet Code",
     "Business Unit Code ERP",
     "Project Code ERP",
-    "External Doc No.",
-    "Unit Price Excl. GST",
-    "Ship To Code",
+    "Transfer-to Code",
+    "Customer Remark",
+    "Customer",
+    "USOFT - USOFT CODE",
+    "USOFT product description",
+    "Plan Date",
+    "AM/PM",
+    "TYPE",
+    "Qty. per Unit of Measure",
+    "Line Discount %",
 )
 
 SELL_TO_CUSTOMER_NO = "HC001543"
@@ -38,7 +47,7 @@ UNIT_OF_MEASURE_CODE = "EA"
 BUSINESS_UNIT_CODE_ERP = "RETAIL"
 PROJECT_CODE_ERP = "JH02"
 EXTERNAL_DOC_NO = 0
-SHIP_TO_CODE = 0
+TRANSFER_TO_CODE = 0
 
 
 class StagingDataError(RuntimeError):
@@ -64,14 +73,23 @@ def build_staging_data_rows(
             location_code=LOCATION_CODE,
             quantity=product.quantity,
             unit_of_measure_code=UNIT_OF_MEASURE_CODE,
+            unit_price_rsp_excl_gst=product.unit_price,
             order_date=generation_date,
             shipment_date=generation_date,
+            external_doc_no=EXTERNAL_DOC_NO,
             customer_outlet_code=None,
             business_unit_code_erp=BUSINESS_UNIT_CODE_ERP,
             project_code_erp=PROJECT_CODE_ERP,
-            external_doc_no=EXTERNAL_DOC_NO,
-            unit_price_excl_gst=product.unit_price,
-            ship_to_code=SHIP_TO_CODE,
+            transfer_to_code=TRANSFER_TO_CODE,
+            customer_remark=None,
+            customer=None,
+            usoft_code=None,
+            usoft_product_description=None,
+            plan_date=None,
+            am_pm=None,
+            secondary_type=None,
+            quantity_per_unit_of_measure=None,
+            line_discount_percent=None,
         )
         for product in summary.product_rows
     )
@@ -100,7 +118,7 @@ def _validate_staging_rows(
             raise StagingDataError("Staging Data No. control failed.")
         if staging.quantity != product.quantity:
             raise StagingDataError("Staging Data Quantity row control failed.")
-        if staging.unit_price_excl_gst != product.unit_price:
+        if staging.unit_price_rsp_excl_gst != product.unit_price:
             raise StagingDataError("Staging Data Unit Price row control failed.")
     if sum(row.quantity for row in rows) != summary.total_quantity:
         raise StagingDataError("Staging Data Quantity total control failed.")

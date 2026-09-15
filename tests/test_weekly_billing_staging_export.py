@@ -148,12 +148,12 @@ def test_staging_mapper_is_one_to_one_and_conserves_golden_quantity():
     assert {row.posting_date for row in rows} == {GENERATION_DATE}
     assert {row.order_date for row in rows} == {GENERATION_DATE}
     assert {row.shipment_date for row in rows} == {GENERATION_DATE}
-    assert (rows[0].nav, rows[0].quantity, rows[0].unit_price_excl_gst) == (
+    assert (rows[0].nav, rows[0].quantity, rows[0].unit_price_rsp_excl_gst) == (
         summary.product_rows[0].nav,
         summary.product_rows[0].quantity,
         summary.product_rows[0].unit_price,
     )
-    assert [(row.nav, row.unit_price_excl_gst) for row in rows[:2]] == [
+    assert [(row.nav, row.unit_price_rsp_excl_gst) for row in rows[:2]] == [
         ("060328", Decimal("42.90")),
         ("060328", Decimal("43.90")),
     ]
@@ -175,7 +175,7 @@ def test_staging_mapper_applies_exact_erp_constants_and_blank_outlet():
         row.business_unit_code_erp,
         row.project_code_erp,
         row.external_doc_no,
-        row.ship_to_code,
+        row.transfer_to_code,
     ) == ("HC001543", "MYR", "ITEM", "JH02", "EA", None, "RETAIL", "JH02", 0, 0)
 
 
@@ -208,23 +208,28 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert tuple(cell.value for cell in product[1]) == PRODUCT_SUMMARY_HEADERS
     assert tuple(cell.value for cell in staging[1]) == STAGING_DATA_HEADERS
     assert staging.max_row == product.max_row == 178
-    assert staging.max_column == 17
+    assert staging.max_column == 26
     assert staging.freeze_panes == "A2"
+    assert staging.auto_filter.ref == "A1:Z178"
     assert staging.cell(2, 1).value == "DF20260831-20260906"
     assert staging.cell(2, 2).value.date() == GENERATION_DATE
+    assert staging.cell(2, 11).value.date() == GENERATION_DATE
+    assert staging.cell(2, 12).value.date() == GENERATION_DATE
     assert staging.cell(2, 6).value == "060328"
     assert staging.cell(3, 6).value == "060328"
     assert staging.cell(4, 6).value == "000123"
     assert staging.cell(2, 8).value == 539
-    assert staging.cell(2, 12).value is None
-    assert staging.cell(2, 16).value == 42.9
-    assert staging.cell(3, 16).value == 43.9
+    assert staging.cell(2, 10).value == 42.9
+    assert staging.cell(3, 10).value == 43.9
+    assert staging.cell(2, 14).value is None
+    assert staging.cell(2, 17).value == 0
+    assert all(staging.cell(2, column).value is None for column in range(18, 27))
     assert staging.cell(2, 2).data_type == "d"
     assert staging.cell(2, 6).data_type == "s"
     assert staging.cell(2, 8).data_type == "n"
-    assert staging.cell(2, 16).data_type == "n"
+    assert staging.cell(2, 10).data_type == "n"
     assert staging.cell(2, 2).number_format == "yyyy-mm-dd"
-    assert staging.cell(2, 16).number_format == "#,##0.00"
+    assert staging.cell(2, 10).number_format == "#,##0.00"
     assert sum(staging.cell(row, 8).value for row in range(2, 179)) == 715
     assert product.cell(2, 2).value == "060328"
     assert product.cell(2, 6).value == 42.9

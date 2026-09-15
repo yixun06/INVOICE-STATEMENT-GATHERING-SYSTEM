@@ -83,14 +83,23 @@ class StagingDataRow:
     location_code: str
     quantity: int
     unit_of_measure_code: str
+    unit_price_rsp_excl_gst: Decimal
     order_date: date
     shipment_date: date
+    external_doc_no: int
     customer_outlet_code: None
     business_unit_code_erp: str
     project_code_erp: str
-    external_doc_no: int
-    unit_price_excl_gst: Decimal
-    ship_to_code: int
+    transfer_to_code: int
+    customer_remark: None
+    customer: None
+    usoft_code: None
+    usoft_product_description: None
+    plan_date: None
+    am_pm: None
+    secondary_type: None
+    quantity_per_unit_of_measure: None
+    line_discount_percent: None
 
 
 @dataclass(frozen=True)

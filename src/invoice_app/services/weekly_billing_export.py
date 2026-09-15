@@ -140,7 +140,7 @@ def _write_staging_data(sheet, rows) -> None:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:Q{max(1, len(rows) + 1)}"
+    sheet.auto_filter.ref = f"A1:Z{max(1, len(rows) + 1)}"
     for row in rows:
         sheet.append((
             row.your_reference,
@@ -152,22 +152,31 @@ def _write_staging_data(sheet, rows) -> None:
             row.location_code,
             row.quantity,
             row.unit_of_measure_code,
+            float(row.unit_price_rsp_excl_gst),
             row.order_date,
             row.shipment_date,
+            row.external_doc_no,
             row.customer_outlet_code,
             row.business_unit_code_erp,
             row.project_code_erp,
-            row.external_doc_no,
-            float(row.unit_price_excl_gst),
-            row.ship_to_code,
+            row.transfer_to_code,
+            row.customer_remark,
+            row.customer,
+            row.usoft_code,
+            row.usoft_product_description,
+            row.plan_date,
+            row.am_pm,
+            row.secondary_type,
+            row.quantity_per_unit_of_measure,
+            row.line_discount_percent,
         ))
     for row_number in range(2, sheet.max_row + 1):
         sheet.cell(row_number, 2).number_format = "yyyy-mm-dd"
         sheet.cell(row_number, 6).number_format = "@"
         sheet.cell(row_number, 8).number_format = "#,##0"
-        sheet.cell(row_number, 10).number_format = "yyyy-mm-dd"
+        sheet.cell(row_number, 10).number_format = "#,##0.00"
         sheet.cell(row_number, 11).number_format = "yyyy-mm-dd"
-        sheet.cell(row_number, 16).number_format = "#,##0.00"
+        sheet.cell(row_number, 12).number_format = "yyyy-mm-dd"
     for column, width in {
         "A": 27,
         "B": 14,
@@ -178,14 +187,23 @@ def _write_staging_data(sheet, rows) -> None:
         "G": 16,
         "H": 12,
         "I": 24,
-        "J": 14,
-        "K": 15,
-        "L": 22,
-        "M": 24,
-        "N": 18,
-        "O": 18,
-        "P": 22,
-        "Q": 16,
+        "J": 25,
+        "K": 14,
+        "L": 15,
+        "M": 18,
+        "N": 22,
+        "O": 24,
+        "P": 18,
+        "Q": 18,
+        "R": 20,
+        "S": 18,
+        "T": 22,
+        "U": 28,
+        "V": 14,
+        "W": 12,
+        "X": 12,
+        "Y": 26,
+        "Z": 18,
     }.items():
         sheet.column_dimensions[column].width = width
 
