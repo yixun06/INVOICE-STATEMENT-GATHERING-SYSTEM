@@ -449,6 +449,7 @@ def test_data_import_validation_restores_current_batch_dashboard_and_filterable_
     ]
     app.session_state["batch_id"] = "batch-default-columns"
     app.session_state["pdf_count"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 3}
     app.session_state["navigation"] = "Data Import"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
@@ -527,6 +528,7 @@ def test_shopee_order_table_projects_missing_created_date_from_order_id(tmp_path
     app.session_state["reviews"] = []
     app.session_state["batch_id"] = "batch-order-date-projection"
     app.session_state["pdf_count"] = 1
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["navigation"] = "Data Import"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3

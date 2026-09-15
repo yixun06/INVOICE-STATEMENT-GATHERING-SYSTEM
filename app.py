@@ -76,7 +76,9 @@ from src.invoice_app.ui.data_import import (
     DATA_IMPORT_PAGE,
     PLATFORM_ORDERS,
     SHOPEE_WEEKLY_STATEMENT,
+    clear_invoice_upload_attempt,
     initialize_data_import_state,
+    mark_invoice_upload_attempt,
     render_data_import,
     reset_data_import_state,
 )
@@ -874,10 +876,14 @@ def show_sidebar(pdf_count: int) -> str:
 def show_upload_result_summary(summary: dict[str, int]) -> None:
     duplicate_count = len(st.session_state.get("duplicate_skipped", []))
     unsupported_count = len(st.session_state.get("unsupported_files", []))
-    processing_error_count = len(st.session_state.get("processing_errors", []))
 
+    action_processing_error_count = int(summary.get("processing_errors", 0))
     latest_parts = [
-        "File processing finished",
+        (
+            "File processing finished"
+            if action_processing_error_count == 0
+            else "File processing did not complete"
+        ),
         f"{int(summary.get('pdfs_processed', 0))} PDF(s) in the latest action",
         f"{int(summary.get('orders_imported', 0))} order(s) imported",
         f"{int(summary.get('manual_reviews', 0))} sent to Manual Review",
@@ -886,8 +892,8 @@ def show_upload_result_summary(summary: dict[str, int]) -> None:
         latest_parts.append(f"{duplicate_count} duplicate skipped")
     if unsupported_count:
         latest_parts.append(f"{unsupported_count} unsupported")
-    if processing_error_count:
-        latest_parts.append(f"{processing_error_count} processing error(s)")
+    if action_processing_error_count:
+        latest_parts.append(f"{action_processing_error_count} processing error(s)")
     st.caption("Latest upload: " + " · ".join(latest_parts) + ".")
 
 
@@ -1050,6 +1056,7 @@ def show_upload_panel() -> list[Any] | None:
         )
 
         if uploaded_files:
+            mark_invoice_upload_attempt(st.session_state, "selected")
             st.caption(f"{len(uploaded_files)} file(s) selected.")
 
         with st.container(horizontal=True, vertical_alignment="center"):
@@ -1066,13 +1073,18 @@ def show_upload_panel() -> list[Any] | None:
             )
 
         if clear_clicked:
+            clear_invoice_upload_attempt(st.session_state)
             st.session_state.uploader_version += 1
             st.rerun()
 
         if uploaded_files and process_clicked:
+            mark_invoice_upload_attempt(st.session_state, "processing")
             begin_workflow_activity(st.session_state, "Processing")
             try:
                 process_uploads(uploaded_files)
+            except Exception:
+                mark_invoice_upload_attempt(st.session_state, "failed")
+                raise
             finally:
                 end_workflow_activity(st.session_state)
     upload_result_summary = st.session_state.get("upload_result_summary")
@@ -1170,8 +1182,17 @@ def process_uploads(uploaded_files: list[Any]) -> None:
         st.session_state.unsupported_files = unsupported_files
         st.session_state.processing_errors = processing_errors
         st.session_state.upload_result_summary = action_summary
-        st.session_state.data_import_step = 3
-        status.update(label="File processing finished", state="complete", expanded=False)
+        if action_summary["processing_errors"]:
+            mark_invoice_upload_attempt(st.session_state, "failed")
+            status.update(
+                label="File processing did not complete",
+                state="error",
+                expanded=False,
+            )
+        else:
+            mark_invoice_upload_attempt(st.session_state, "resolved")
+            st.session_state.data_import_step = 3
+            status.update(label="File processing finished", state="complete", expanded=False)
 
     st.session_state.uploader_version += 1
     st.rerun()

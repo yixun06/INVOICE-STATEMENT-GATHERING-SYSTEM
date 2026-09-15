@@ -230,6 +230,7 @@ def test_validate_duplicate_only_source_offers_safe_removal_and_keeps_audit_expa
         "batch_id": "duplicate-only-batch",
         "import_source_type": "Platform Orders",
         "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1},
         "orders": [{"source_pdf": "good.pdf", "order_id": "GOOD", "status": "Accepted"}],
         "products": [],
         "reviews": [],
@@ -267,6 +268,7 @@ def test_validate_mixed_duplicate_source_has_no_whole_source_removal(tmp_path, m
         "batch_id": "mixed-duplicate-batch",
         "import_source_type": "Platform Orders",
         "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1},
         "orders": [
             {"source_pdf": "multi.pdf", "order_id": "ORDER-A", "status": "Accepted"},
             {"source_pdf": "multi.pdf", "order_id": "ORDER-C", "status": "Accepted"},
@@ -297,6 +299,7 @@ def test_manual_review_csv_downloads_remain_available(tmp_path, monkeypatch):
         "batch_id": "manual-review-csv-batch",
         "import_source_type": "Platform Orders",
         "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1},
         "orders": [],
         "products": [],
         "processing_errors": [],
@@ -334,6 +337,7 @@ def test_validate_bulk_manual_review_removal_requires_confirmation(tmp_path, mon
         "batch_id": "bulk-review-batch",
         "import_source_type": "Platform Orders",
         "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1},
         "orders": [{"platform": "Shopee", "order_id": "GOOD", "source_pdf": "good.pdf", "status": "Accepted"}],
         "products": [],
         "reviews": [

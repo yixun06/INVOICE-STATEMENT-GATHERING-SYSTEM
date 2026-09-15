@@ -194,6 +194,7 @@ def test_recovery_remove_requires_confirmation_before_current_batch_changes(tmp_
     app.session_state["batch_id"] = "recovery-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["orders"] = [{"platform": "Shopee", "order_id": "SHP-GOOD", "source_pdf": "good.pdf"}]
     app.session_state["products"] = []
     app.session_state["reviews"] = [{"platform": "Shopee", "order_id": "SHP-BAD", "source_pdf": "manual.pdf", "status": "Manual Review", "reason": "Product Count Mismatch"}]
@@ -338,6 +339,7 @@ def test_non_resolvable_manual_review_details_render_without_changing_readiness(
     app.session_state["batch_id"] = "incomplete-source-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["orders"] = []
     app.session_state["products"] = []
     app.session_state["processing_errors"] = []
@@ -376,6 +378,7 @@ def test_source_supported_income_manual_review_renders_confirmation_form(tmp_pat
     app.session_state["batch_id"] = "income-extraction-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["orders"] = []
     app.session_state["products"] = []
     app.session_state["processing_errors"] = []
@@ -411,6 +414,7 @@ def test_product_count_manual_review_renders_session_draft_without_derived_field
     app.session_state["batch_id"] = "draft-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["orders"] = []
     app.session_state["products"] = []
     app.session_state["processing_errors"] = []

@@ -105,6 +105,7 @@ def test_data_import_validation_displays_platform_contract_summary(tmp_path, mon
     app.session_state["batch_id"] = "platform-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
+    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
     app.session_state["orders"] = [{"platform": "Shopee", "order_id": "SHP-1"}]
     app.session_state["products"] = []
     app.session_state["reviews"] = []

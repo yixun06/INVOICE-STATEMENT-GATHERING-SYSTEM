@@ -11,7 +11,7 @@ import csv
 from dataclasses import dataclass
 from hashlib import sha256
 import io
-from typing import Any, Callable
+from typing import Any, Callable, MutableMapping
 
 import streamlit as st
 
@@ -99,6 +99,7 @@ WIZARD_STEPS = (
 _WORKFLOW_KEYS = (
     "data_import_step",
     "import_source_type",
+    "invoice_upload_attempt",
     "weekly_statement_stage",
     "weekly_statement_review",
     "weekly_statement_review_stale_reason",
@@ -118,6 +119,11 @@ _WORKFLOW_KEYS = (
     "validation_recovery_notice",
     "weekly_statement_issue_order_id",
     "weekly_statement_issue_order_click",
+)
+
+_INVOICE_UPLOAD_ATTEMPT_KEY = "invoice_upload_attempt"
+_UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS = frozenset(
+    {"selected", "processing", "failed"}
 )
 
 
@@ -145,6 +151,36 @@ def reset_data_import_state() -> None:
     """Remove UI-only workflow state when the active batch is cleared."""
     for key in _WORKFLOW_KEYS:
         st.session_state.pop(key, None)
+
+
+def mark_invoice_upload_attempt(state: MutableMapping[str, Any], status: str) -> None:
+    """Record the lifecycle fact for the currently selected Invoice upload."""
+
+    if status not in {*_UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS, "resolved"}:
+        raise ValueError(f"Unsupported Invoice upload attempt state: {status}")
+    state[_INVOICE_UPLOAD_ATTEMPT_KEY] = status
+
+
+def clear_invoice_upload_attempt(state: MutableMapping[str, Any]) -> None:
+    """Clear only the current selected-upload attempt after the uploader is reset."""
+
+    if _INVOICE_UPLOAD_ATTEMPT_KEY in state:
+        del state[_INVOICE_UPLOAD_ATTEMPT_KEY]
+
+
+def invoice_upload_is_resolved(state: MutableMapping[str, Any]) -> bool:
+    """Return whether the current Invoice Upload step is complete enough to advance.
+
+    Existing staged rows are deliberately not evidence of completion: a newer
+    selected or interrupted upload must be resolved first.
+    """
+
+    attempt = state.get(_INVOICE_UPLOAD_ATTEMPT_KEY)
+    if attempt in _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS:
+        return False
+    if state.get("workflow_activity") == "Processing":
+        return False
+    return attempt == "resolved" or bool(state.get("upload_result_summary"))
 
 
 def render_data_import(
@@ -246,19 +282,15 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
         st.subheader("Upload platform order files")
         st.caption("Upload PDF or ZIP order documents for the active batch.")
         render_platform_orders_upload()
-        has_staging = bool(st.session_state.get("batch_id"))
-        _render_next_step(
-            "Continue to validate",
-            3,
-            back_step=1,
-            allowed=has_staging,
-            include_invoice_exit=True,
-            disabled_reason=(
-                None
-                if has_staging
-                else "Upload and process at least one Invoice source before continuing."
-            ),
-        )
+        if invoice_upload_is_resolved(st.session_state):
+            _render_next_step(
+                "Continue to validate",
+                3,
+                back_step=1,
+                include_invoice_exit=True,
+            )
+        else:
+            _render_unresolved_invoice_upload_actions(back_step=1)
         return
     if source_type == SHOPEE_WEEKLY_STATEMENT:
         _render_weekly_statement_upload()
@@ -326,6 +358,12 @@ def _render_validation_step(
     render_platform_orders_validation_data: Callable[[], Any],
 ) -> None:
     st.subheader("Validate")
+    if (
+        st.session_state.get("import_source_type") == PLATFORM_ORDERS
+        and not invoice_upload_is_resolved(st.session_state)
+    ):
+        _render_unresolved_invoice_upload_actions(back_step=2)
+        return
     result = _current_import_result()
     is_platform_orders = bool(
         result.source_specific_details.get("show_platform_order_outcomes")
@@ -962,6 +1000,7 @@ def _execute_pending_recovery(failure_message: str) -> None:
     if isinstance(action, RecoveryAction) and action.action_type == REMOVE_STAGED_SOURCE:
         _set_step(2)
     elif isinstance(action, RecoveryAction) and action.action_type == REMOVE_INVOICE_STAGING:
+        clear_invoice_upload_attempt(st.session_state)
         _set_step(2)
     _clear_pending_recovery()
     st.rerun()
@@ -2160,6 +2199,27 @@ def _render_back_button(step: int, *, key: str) -> None:
     if st.button("Back", icon=":material/arrow_back:", key=key):
         _set_step(step)
         st.rerun()
+
+
+def _render_unresolved_invoice_upload_actions(*, back_step: int) -> None:
+    """Keep an unfinished Invoice upload in Upload until its attempt is resolved."""
+
+    render_authoritative_status(
+        title="Upload not completed",
+        message="Finish processing or clear the interrupted upload before continuing.",
+        state="blocked",
+    )
+    with st.container(horizontal=True):
+        if st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key=f"data_import_unresolved_upload_back_{back_step}",
+        ):
+            _set_step(back_step)
+            st.rerun()
+        _render_invoice_exit_button(
+            key=f"invoice_exit_unresolved_upload_{back_step}"
+        )
 
 
 def _render_next_step(
