@@ -67,6 +67,26 @@ not production logic:
 Statement quantity is absent from the authoritative source, so the benchmark
 makes no quantity-match claim.
 
+## Weekly Billing Golden Controls
+
+For the same accepted period, the current Weekly Billing benchmark is:
+
+| Measure | Accepted result |
+| --- | ---: |
+| Product Summary rows | 177 |
+| Orders / Invoice Items | 296 / 442 |
+| Quantity | 715 |
+| Standard | RM17,956.30 |
+| Disc Amt | RM2,007.53 |
+| Amount | RM15,948.77 |
+| Staging Data | 177 rows, 715 quantity, 26 columns; columns 18-26 blank |
+| Workbook tab order | `Product Summary`, `Staging Data`, `Financial Summary` |
+
+The Standard and Disc Amt controls were updated after the approved Product
+Master price for Order `2609045MDX0J9G` / NAV `3000573` became RM39.90. The
+Amount control is unchanged; this benchmark records approved persisted source
+facts and is not a pricing or Product Summary calculation rule.
+
 ## Persistence
 
 Approved schema widths remain unchanged: `Invoice_Orders` 44,
