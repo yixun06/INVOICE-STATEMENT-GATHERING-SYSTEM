@@ -8,6 +8,7 @@ persistence rules.
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from hashlib import sha256
 import io
 from typing import Any, Callable, MutableMapping
@@ -527,23 +528,83 @@ def _render_validation_status(result: ImportResult) -> None:
 def _render_contract_validation(result: ImportResult) -> None:
     _render_recovery_notice()
     queue = build_exception_work_queue(result)
+    blockers, notes = _partition_exception_work_queue(queue)
     if (
         result.source_type == SHOPEE_WEEKLY_STATEMENT
-        and missing_invoice_order_ids(queue)
+        and missing_invoice_order_ids(blockers)
     ):
         _render_missing_invoice_exception_details(
-            queue,
+            blockers,
+            notes,
             key_prefix="statement_exception_queue",
         )
         return
-    _render_needs_attention_queue(
-        queue,
+    _render_actionable_blockers_and_notes(
+        blockers,
+        notes,
         key_prefix=(
             "statement_exception_queue"
             if result.source_type == SHOPEE_WEEKLY_STATEMENT
             else "invoice_exception_queue"
         ),
     )
+
+
+def _render_actionable_blockers_and_notes(
+    blockers: ExceptionWorkQueue,
+    notes: ExceptionWorkQueue,
+    *,
+    key_prefix: str,
+    allow_recovery: bool = True,
+) -> None:
+    _render_needs_attention_queue(
+        blockers,
+        key_prefix=key_prefix,
+        allow_recovery=allow_recovery,
+    )
+    _render_exception_reconciliation_notes(notes)
+
+
+def _partition_exception_work_queue(
+    queue: ExceptionWorkQueue,
+) -> tuple[ExceptionWorkQueue, ExceptionWorkQueue]:
+    """Split authoritative issue facts into primary blockers and secondary notes."""
+
+    def requires_action(issue: Any) -> bool:
+        return issue.blocking or any(action.allowed for action in issue.recovery_actions)
+
+    def project(*, actionable: bool) -> ExceptionWorkQueue:
+        items: list[ExceptionPresentationItem] = []
+        for item in queue.items:
+            issues = tuple(
+                issue for issue in item.issues if requires_action(issue) is actionable
+            )
+            if not issues:
+                continue
+            first_reason = issues[0].reason
+            if item.order_id and first_reason.startswith(f"{item.order_id}:"):
+                first_reason = first_reason[len(item.order_id) + 1 :].strip()
+            summary = (
+                f"{first_reason} +{len(issues) - 1} more"
+                if len(issues) > 1
+                else first_reason
+            )
+            items.append(
+                replace(
+                    item,
+                    summary=summary,
+                    issues=issues,
+                    blocking=any(issue.blocking for issue in issues),
+                    recovery_actions=item.recovery_actions if actionable else (),
+                    action_hint=item.action_hint if actionable else "View details",
+                )
+            )
+        return ExceptionWorkQueue(
+            items=tuple(items),
+            source_issue_count=sum(item.issue_count for item in items),
+        )
+
+    return project(actionable=True), project(actionable=False)
 
 
 def _render_needs_attention_queue(
@@ -638,23 +699,19 @@ def _render_missing_invoice_status(result: ImportResult) -> bool:
 
 
 def _render_missing_invoice_exception_details(
-    queue: ExceptionWorkQueue,
+    blockers: ExceptionWorkQueue,
+    notes: ExceptionWorkQueue,
     *,
     key_prefix: str,
 ) -> None:
-    missing_ids = frozenset(missing_invoice_order_ids(queue))
+    missing_ids = frozenset(missing_invoice_order_ids(blockers))
     missing_items = tuple(
-        item for item in queue.items if item.order_id in missing_ids
+        item for item in blockers.items if item.order_id in missing_ids
     )
     other_blockers = tuple(
         item
-        for item in queue.items
-        if item.order_id not in missing_ids and item.blocking
-    )
-    notes = tuple(
-        item
-        for item in queue.items
-        if item.order_id not in missing_ids and not item.blocking
+        for item in blockers.items
+        if item.order_id not in missing_ids
     )
 
     if other_blockers:
@@ -664,16 +721,19 @@ def _render_missing_invoice_exception_details(
                 source_issue_count=sum(item.issue_count for item in other_blockers),
             ),
             key_prefix=f"{key_prefix}_other",
-            heading="Other blockers",
-            show_count=False,
             auto_select_single=False,
         )
 
     with st.expander("Missing Invoice details", expanded=False):
         _render_secondary_exception_items(missing_items)
-    if notes:
-        with st.expander("Reconciliation notes", expanded=False):
-            _render_secondary_exception_items(notes)
+    _render_exception_reconciliation_notes(notes)
+
+
+def _render_exception_reconciliation_notes(queue: ExceptionWorkQueue) -> None:
+    if not queue.items:
+        return
+    with st.expander("Reconciliation notes", expanded=False):
+        _render_secondary_exception_items(queue.items)
 
 
 def _render_secondary_exception_items(
@@ -1623,8 +1683,12 @@ def _render_review_and_commit_step() -> None:
             )
         elif not unresolved_issues and readiness.reasons:
             st.caption(readiness.reasons[0])
-        _render_needs_attention_queue(
-            build_exception_work_queue(result),
+        blockers, notes = _partition_exception_work_queue(
+            build_exception_work_queue(result)
+        )
+        _render_actionable_blockers_and_notes(
+            blockers,
+            notes,
             key_prefix="statement_commit_exception_queue",
             allow_recovery=False,
         )

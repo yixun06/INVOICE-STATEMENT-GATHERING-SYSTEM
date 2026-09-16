@@ -437,39 +437,73 @@ def _single_missing_invoice_app() -> None:
     )
     from src.invoice_app.ui import data_import
 
-    issues = (
-        ValidationIssue(
-            layer="statement_reconciliation_v2",
-            severity="error",
-            blocking=True,
-            reason="ORDER-ONLY: no persisted Invoice order coverage is available.",
-            affected_item="statement.xlsx",
+    import streamlit as st
+
+    variant = st.session_state.get("statement_test_variant", "missing_invoice")
+    note = ValidationIssue(
+        layer="statement_reconciliation_v2",
+        severity="warning",
+        blocking=False,
+        reason=(
+            "Statement quantity is not provided by the source; "
+            "no quantity-match claim is made."
         ),
-        ValidationIssue(
-            layer="statement_reconciliation_v2",
-            severity="error",
-            blocking=True,
-            reason="ORDER-ONLY: product identity is unresolved.",
-            affected_item="statement.xlsx",
-        ),
-        ValidationIssue(
-            layer="statement_reconciliation_v2",
-            severity="warning",
-            blocking=False,
-            reason=(
-                "Statement quantity is not provided by the source; "
-                "no quantity-match claim is made."
-            ),
-            affected_item="statement.xlsx",
-        ),
+        affected_item="statement.xlsx",
     )
+    group_note = ValidationIssue(
+        layer="statement_reconciliation_v2",
+        severity="warning",
+        blocking=False,
+        reason=(
+            "Product-group scope is reconciled from authoritative source evidence; "
+            "no item-level allocation is claimed."
+        ),
+        affected_item="statement.xlsx",
+    )
+    if variant == "notes_only":
+        issues = (group_note, note)
+        order_id = "ORDER-NOTE"
+    elif variant == "no_notes":
+        issues = ()
+        order_id = "ORDER-CLEAR"
+    elif variant == "blocker_and_notes":
+        issues = (
+            ValidationIssue(
+                layer="statement_reconciliation_v2",
+                severity="error",
+                blocking=True,
+                reason="ORDER-BLOCKED: product identity is unresolved.",
+                affected_item="statement.xlsx",
+            ),
+            note,
+        )
+        order_id = "ORDER-BLOCKED"
+    else:
+        issues = (
+            ValidationIssue(
+                layer="statement_reconciliation_v2",
+                severity="error",
+                blocking=True,
+                reason="ORDER-ONLY: no persisted Invoice order coverage is available.",
+                affected_item="statement.xlsx",
+            ),
+            ValidationIssue(
+                layer="statement_reconciliation_v2",
+                severity="error",
+                blocking=True,
+                reason="ORDER-ONLY: product identity is unresolved.",
+                affected_item="statement.xlsx",
+            ),
+            note,
+        )
+        order_id = "ORDER-ONLY"
     result = ImportResult(
         source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
-        batch_status="Not Ready",
+        batch_status="Not Ready" if any(issue.blocking for issue in issues) else "Ready to Commit",
         source_summary=SourceSummary(title="Statement"),
         validation=ValidationResult(
-            blocking_issues=issues[:2],
-            warnings=issues[2:],
+            blocking_issues=tuple(issue for issue in issues if issue.blocking),
+            warnings=tuple(issue for issue in issues if not issue.blocking),
         ),
         reconciliation=ReconciliationResult(
             available=True,
@@ -477,11 +511,14 @@ def _single_missing_invoice_app() -> None:
             exceptions=(
                 ReconciliationException(
                     status="Existing exception",
-                    affected_item="ORDER-ONLY",
+                    affected_item=order_id,
                 ),
             ),
         ),
-        commit_readiness=CommitReadiness(ready=False, status="Not Ready"),
+        commit_readiness=CommitReadiness(
+            ready=not any(issue.blocking for issue in issues),
+            status="Not Ready" if any(issue.blocking for issue in issues) else "Ready to Commit",
+        ),
         session_state=SessionState(
             applied_to_current_session=True,
             label="Applied to Current Session",
@@ -489,9 +526,7 @@ def _single_missing_invoice_app() -> None:
     )
     data_import._render_validation_status(result)
     data_import._render_contract_validation(result)
-    import streamlit as st
-
-    st.button("Continue to reconcile", disabled=True)
+    st.button("Continue to reconcile", disabled=not result.commit_readiness.ready)
 
 
 def test_single_missing_invoice_is_primary_and_notes_are_secondary():
@@ -509,6 +544,66 @@ def test_single_missing_invoice_is_primary_and_notes_are_secondary():
     assert "unresolved issue" not in blocker
     assert "work item" not in blocker
     assert "Missing Invoice details" in {item.label for item in app.expander}
+    assert "Reconciliation notes" in {item.label for item in app.expander}
+    assert any(
+        "Statement quantity is not provided by the source" in item.value
+        for item in (*app.caption, *app.markdown)
+    )
+    assert next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    ).disabled
+
+
+def test_ready_statement_notes_stay_secondary_and_do_not_block_continue():
+    app = AppTest.from_function(_single_missing_invoice_app)
+    app.session_state["statement_test_variant"] = "notes_only"
+
+    app.run()
+
+    assert app.exception == []
+    assert any("Ready" in item.value for item in app.success)
+    assert not any("Needs Attention" in item.value for item in app.error)
+    assert "Needs Attention" not in {item.value for item in app.subheader}
+    assert "Reconciliation notes" in {item.label for item in app.expander}
+    assert any(
+        "Statement quantity is not provided by the source" in item.value
+        for item in (*app.caption, *app.markdown)
+    )
+    assert any("Product-group scope is reconciled" in item.value for item in app.markdown)
+    assert not next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    ).disabled
+
+
+def test_ready_statement_without_notes_omits_secondary_sections():
+    app = AppTest.from_function(_single_missing_invoice_app)
+    app.session_state["statement_test_variant"] = "no_notes"
+
+    app.run()
+
+    assert app.exception == []
+    assert any("Ready" in item.value for item in app.success)
+    assert not any("Needs Attention" in item.value for item in app.error)
+    assert "Needs Attention" not in {item.value for item in app.subheader}
+    assert app.expander == []
+    assert not next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    ).disabled
+
+
+def test_blocker_and_notes_render_in_separate_sections():
+    app = AppTest.from_function(_single_missing_invoice_app)
+    app.session_state["statement_test_variant"] = "blocker_and_notes"
+
+    app.run()
+
+    assert app.exception == []
+    assert any("Needs Attention" in item.value for item in app.error)
+    assert "Needs Attention" in {item.value for item in app.subheader}
+    actionable = next(frame.value for frame in app.dataframe if "Issues" in frame.value.columns)
+    assert len(actionable) == 1
+    assert actionable.iloc[0]["Order ID"] == "ORDER-BLOCKED"
+    assert actionable.iloc[0]["Issues"] == 1
     assert "Reconciliation notes" in {item.label for item in app.expander}
     assert any(
         "Statement quantity is not provided by the source" in item.value
