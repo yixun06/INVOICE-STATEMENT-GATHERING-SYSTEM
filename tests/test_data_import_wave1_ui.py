@@ -69,8 +69,11 @@ def _position(app: AppTest, *, element_type: str, text: str) -> int:
     for index, element in enumerate(_walk(app.main)):
         if element.type != element_type:
             continue
-        value = str(getattr(element, "value", "") or getattr(element, "label", ""))
-        if text in value:
+        values = (
+            str(getattr(element, "value", "")),
+            str(getattr(element, "label", "")),
+        )
+        if any(text in value for value in values):
             return index
     raise AssertionError(f"Could not find {element_type!r} containing {text!r}")
 
@@ -120,6 +123,19 @@ def test_ready_validate_puts_usable_continue_next_to_status(tmp_path, monkeypatc
     assert _position(app, element_type="success", text="Ready") < _position(
         app, element_type="button", text="Continue to reconcile"
     ) < _position(app, element_type="subheader", text="Current batch summary")
+
+
+def test_validate_places_order_columns_between_filters_and_order_table(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_invoice_validate(app, blocked=False)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert _position(app, element_type="subheader", text="Search and Filters") < _position(
+        app, element_type="multiselect", text="Order columns"
+    ) < _position(app, element_type="dataframe", text="Order ID")
 
 
 def test_validate_has_one_batch_metric_group_and_keeps_latest_action_separate(
