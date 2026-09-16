@@ -66,6 +66,7 @@ from src.invoice_app.services.workflow_navigation import (
     end_workflow_activity,
     request_navigation,
 )
+from src.invoice_app.services.data_import_state import has_unfinished_session_work
 from src.invoice_app.services.exporter import (
     export_all_products_report,
     export_platform_report,
@@ -254,6 +255,7 @@ def reset_batch() -> None:
             st.session_state.pop(key, None)
     reset_data_import_state()
     reset_settlement_test_lab_state()
+    end_workflow_activity(st.session_state)
     st.session_state.uploader_version = current_uploader_version + 1
 
 
@@ -496,12 +498,12 @@ def request_batch_discard_confirmation() -> None:
 
 def _render_workflow_safety_dialogs() -> None:
     blocked = st.session_state.get("workflow_navigation_blocked")
-    if blocked:
-        _render_navigation_blocked_dialog(str(blocked.get("activity", "workflow operation")))
     if st.session_state.get("pending_batch_discard_confirmation"):
         _render_batch_discard_dialog()
-    if st.session_state.get("pending_logout_confirmation"):
+    elif st.session_state.get("pending_logout_confirmation"):
         _render_logout_confirmation_dialog()
+    elif blocked:
+        _render_navigation_blocked_dialog(str(blocked.get("activity", "workflow operation")))
 
 
 @st.dialog("Processing in progress", icon=":material/info:")
@@ -533,41 +535,7 @@ def _render_batch_discard_dialog() -> None:
 
 def _has_unfinished_session_work() -> bool:
     """Derive progress-loss risk from current authoritative session facts."""
-
-    if st.session_state.get("manual_review_correction_drafts"):
-        return True
-    if (
-        st.session_state.get("pending_validation_recovery_action")
-        or st.session_state.get("pending_validation_bulk_recovery")
-    ):
-        return True
-    source_type = st.session_state.get("import_source_type")
-    if source_type == SHOPEE_WEEKLY_STATEMENT:
-        return bool(
-            st.session_state.get("weekly_statement_stage")
-            and not st.session_state.get("weekly_statement_commit_completed")
-        )
-    if source_type == PLATFORM_ORDERS:
-        if st.session_state.get("invoice_commit_completed"):
-            return False
-        return bool(
-            st.session_state.get("batch_id")
-            or any(
-                st.session_state.get(key)
-                for key in (
-                    "orders",
-                    "products",
-                    "reviews",
-                    "duplicate_skipped",
-                    "unsupported_files",
-                    "processing_errors",
-                )
-            )
-        )
-    return bool(
-        st.session_state.get("weekly_statement_stage")
-        and not st.session_state.get("weekly_statement_commit_completed")
-    )
+    return has_unfinished_session_work(st.session_state)
 
 
 def _perform_logout() -> None:

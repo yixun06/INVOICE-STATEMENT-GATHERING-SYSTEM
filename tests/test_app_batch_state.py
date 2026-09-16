@@ -1016,7 +1016,7 @@ def test_data_import_prevents_second_source_for_an_active_batch(tmp_path, monkey
     }
 
 
-def test_weekly_statement_reconciliation_uses_existing_staged_counts(tmp_path, monkeypatch):
+def test_weekly_statement_stage_without_review_fails_closed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -1029,20 +1029,14 @@ def test_weekly_statement_reconciliation_uses_existing_staged_counts(tmp_path, m
     app.run(timeout=20)
 
     assert app.exception == []
-    metrics = {(metric.label, metric.value) for metric in app.metric}
-    assert {
-        ("Matched", "0"),
-        ("Different", "1"),
-        ("Estimated Only", "0"),
-        ("Statement Orders", "1"),
-        ("Order ID Covered", "1"),
-        ("Order ID Missing", "0"),
-        ("Missing Comparison Evidence", "0"),
-        ("Unmatched Adjustments", "1"),
-        ("Shipping exceptions", "0"),
-    } <= metrics
-    assert "Representative exceptions" in {caption.value for caption in app.caption}
-    assert "These results are shown for review and do not change the source outcome." in {
+    assert any("Statement check required" in item.value for item in app.error)
+    assert not app.metric
+    assert not any(
+        button.label == "Commit Statement" and not button.disabled
+        for button in app.button
+    )
+    assert "Representative exceptions" not in {caption.value for caption in app.caption}
+    assert "These results are shown for review and do not change the source outcome." not in {
         caption.value for caption in app.caption
     }
 

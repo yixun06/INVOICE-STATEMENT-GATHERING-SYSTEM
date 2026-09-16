@@ -47,6 +47,14 @@ from ..services.product_master_source import ProductMasterSourceError, load_conf
 from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
 from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
 from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
+from ..services.data_import_state import (
+    INVOICE_UPLOAD_ATTEMPT_KEY as _INVOICE_UPLOAD_ATTEMPT_KEY,
+    INVOICE_UPLOAD_UNRESOLVED as _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS,
+    clear_statement_upload_attempt,
+    invoice_upload_downstream_eligibility,
+    reset_invoice_upload_attempt,
+    statement_stage_review_consistency,
+)
 from ..services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
 )
@@ -103,6 +111,7 @@ _WORKFLOW_KEYS = (
     "weekly_statement_stage",
     "weekly_statement_review",
     "weekly_statement_review_stale_reason",
+    "weekly_statement_upload_selected",
     "weekly_statement_commit_completed",
     "invoice_commit_completed",
     "invoice_commit_completed_count",
@@ -121,10 +130,6 @@ _WORKFLOW_KEYS = (
     "weekly_statement_issue_order_click",
 )
 
-_INVOICE_UPLOAD_ATTEMPT_KEY = "invoice_upload_attempt"
-_UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS = frozenset(
-    {"selected", "processing", "failed"}
-)
 _INVOICE_UPLOAD_PRISTINE = "pristine"
 _INVOICE_UPLOAD_SELECTED = "selected"
 _INVOICE_UPLOAD_NEEDS_ATTENTION = "needs_attention"
@@ -155,6 +160,9 @@ def reset_data_import_state() -> None:
     """Remove UI-only workflow state when the active batch is cleared."""
     for key in _WORKFLOW_KEYS:
         st.session_state.pop(key, None)
+    for key in tuple(st.session_state):
+        if isinstance(key, str) and key.startswith("weekly_statement_uploader_"):
+            st.session_state.pop(key, None)
 
 
 def mark_invoice_upload_attempt(state: MutableMapping[str, Any], status: str) -> None:
@@ -195,7 +203,7 @@ def invoice_upload_presentation_state(state: MutableMapping[str, Any]) -> str:
         return _INVOICE_UPLOAD_NEEDS_ATTENTION
     if attempt == "selected":
         return _INVOICE_UPLOAD_SELECTED
-    if attempt in {"processing", "failed"}:
+    if attempt in _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS:
         return _INVOICE_UPLOAD_NEEDS_ATTENTION
     if attempt == "resolved" or (
         attempt is None and bool(state.get("upload_result_summary"))
@@ -221,6 +229,26 @@ def render_data_import(
     st.title("Data Import")
     st.caption("Use the active-batch workflow to stage, validate, reconcile, and review source data.")
     _render_wizard_progress(step)
+    if (
+        step >= 3
+        and st.session_state.get("import_source_type") == PLATFORM_ORDERS
+        and not invoice_upload_downstream_eligibility(st.session_state).eligible
+    ):
+        _render_blocked_invoice_destination(step)
+        return
+    if (
+        step >= 3
+        and st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT
+    ):
+        statement_consistency = statement_stage_review_consistency(st.session_state)
+        can_render_stage_recovery = (
+            step == 3
+            and statement_consistency.state == "stage_only"
+            and _weekly_stage() is not None
+        )
+        if not statement_consistency.coherent and not can_render_stage_recovery:
+            _render_inconsistent_statement_destination(step)
+            return
     if step == 1:
         _render_source_selection(discard_current_batch)
     elif step == 2:
@@ -328,6 +356,10 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
 def _render_weekly_statement_upload() -> None:
     st.subheader("Upload Shopee Weekly Statement")
     st.caption("Upload one native Shopee Weekly Statement workbook (.xlsx).")
+    consistency = statement_stage_review_consistency(st.session_state)
+    if not consistency.coherent:
+        _render_inconsistent_statement_destination(2)
+        return
     review = _weekly_review()
     stage = _weekly_stage()
     if stage is not None:
@@ -344,11 +376,15 @@ def _render_weekly_statement_upload() -> None:
         type=["xlsx"],
         key=f"weekly_statement_uploader_{version}",
     )
+    if uploaded_file is not None:
+        st.session_state.weekly_statement_upload_selected = True
+    else:
+        st.session_state.pop("weekly_statement_upload_selected", None)
     with st.container(horizontal=True):
         stage_clicked = st.button("Check statement", type="primary", icon=":material/upload_file:", disabled=uploaded_file is None)
         clear_clicked = st.button("Clear selected file", icon=":material/close:", disabled=uploaded_file is None)
     if clear_clicked:
-        st.session_state.weekly_statement_uploader_version = version + 1
+        clear_statement_upload_attempt(st.session_state)
         st.rerun()
     if stage_clicked and uploaded_file is not None:
         st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
@@ -368,6 +404,7 @@ def _render_weekly_statement_upload() -> None:
             st.session_state.weekly_statement_review = review
             st.session_state.weekly_statement_stage = review.stage
             st.session_state.pop("weekly_statement_review_stale_reason", None)
+            st.session_state.pop("weekly_statement_upload_selected", None)
         except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
             st.error(f"Statement validation is unavailable: {error}")
         finally:
@@ -375,7 +412,11 @@ def _render_weekly_statement_upload() -> None:
         if _weekly_review() is not None:
             _set_step(3)
             st.rerun()
-    _render_back_button(1, key="statement_upload_back")
+    if st.button("Back", icon=":material/arrow_back:", key="statement_upload_back"):
+        if uploaded_file is not None:
+            clear_statement_upload_attempt(st.session_state)
+        _set_step(1)
+        st.rerun()
 
 
 def _render_validation_step(
@@ -1424,6 +1465,10 @@ def _render_reconciliation_step() -> None:
     if _has_pending_recovery():
         _render_recovery_confirmation()
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        eligibility = invoice_upload_downstream_eligibility(st.session_state)
+        if not eligibility.eligible:
+            _render_blocked_invoice_destination(4)
+            return
         entries = _reconcile_historical_invoice_staging()
         historical_ready = _historical_commit_ready(entries)
         render_authoritative_status(
@@ -1513,6 +1558,10 @@ def _render_review_and_commit_step() -> None:
     _render_source_summary(result)
     readiness = result.commit_readiness
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        eligibility = invoice_upload_downstream_eligibility(st.session_state)
+        if not eligibility.eligible:
+            _render_blocked_invoice_destination(5)
+            return
         if st.session_state.get("invoice_commit_completed"):
             imported_count = st.session_state.get("invoice_commit_completed_count")
             st.success(
@@ -1884,6 +1933,10 @@ def _render_statement_technical_evidence(batch: Any) -> None:
 
 
 def _render_statement_commit(ready: bool) -> None:
+    consistency = statement_stage_review_consistency(st.session_state)
+    if not consistency.coherent or consistency.state != "coherent":
+        st.button("Commit Statement", disabled=True, key="statement_commit")
+        return
     review = _weekly_review()
     if review is None:
         st.button("Commit Statement", disabled=True, key="statement_commit")
@@ -2040,6 +2093,9 @@ def _render_statement_resume_actions(*, back_step: int) -> None:
 
 
 def _statement_forward_gate() -> tuple[bool, str | None]:
+    consistency = statement_stage_review_consistency(st.session_state)
+    if not consistency.coherent or consistency.state != "coherent":
+        return False, consistency.reason or "Check the Weekly Statement before continuing."
     review = _weekly_review()
     if review is None:
         return False, "Check the Weekly Statement before continuing."
@@ -2229,15 +2285,82 @@ def _render_back_button(step: int, *, key: str) -> None:
         st.rerun()
 
 
+def _render_blocked_invoice_destination(step: int) -> None:
+    """Fail closed when direct navigation bypasses an unresolved upload."""
+
+    st.subheader(WIZARD_STEPS[step - 1])
+    eligibility = invoice_upload_downstream_eligibility(st.session_state)
+    render_authoritative_status(
+        title="Upload not completed",
+        message=eligibility.reason or "Return to Upload before continuing.",
+        state="empty" if eligibility.state == "selected" else "blocked",
+    )
+    with st.container(horizontal=True):
+        if st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key=f"blocked_invoice_destination_{step}",
+        ):
+            _set_step(2)
+            st.rerun()
+        _render_invoice_exit_button(key=f"blocked_invoice_exit_{step}")
+
+
+def _render_inconsistent_statement_destination(step: int) -> None:
+    """Expose no operational controls for a partial Statement stage/review pair."""
+
+    if step != 2:
+        st.subheader(WIZARD_STEPS[step - 1])
+    consistency = statement_stage_review_consistency(st.session_state)
+    render_authoritative_status(
+        title="Statement check required",
+        message=consistency.reason or "Check the Weekly Statement again before continuing.",
+        state="blocked",
+    )
+    with st.container(horizontal=True):
+        if st.button(
+            "Clear incomplete Statement attempt",
+            icon=":material/refresh:",
+            key=f"clear_inconsistent_statement_{step}",
+        ):
+            clear_statement_upload_attempt(st.session_state)
+            _set_step(2)
+            st.rerun()
+        if step != 2 and st.button(
+            "Back to upload",
+            icon=":material/arrow_back:",
+            key=f"back_from_inconsistent_statement_{step}",
+        ):
+            _set_step(2)
+            st.rerun()
+
+
 def _render_unresolved_invoice_upload_actions(*, back_step: int) -> None:
     """Keep an unfinished Invoice upload in Upload until its attempt is resolved."""
 
     render_authoritative_status(
         title="Upload not completed",
-        message="Finish processing or clear the interrupted upload before continuing.",
+        message="Re-upload the files or clear the incomplete upload attempt before continuing.",
         state="blocked",
     )
-    _render_invoice_upload_back_actions(back_step=back_step)
+    with st.container(horizontal=True):
+        if st.button(
+            "Clear incomplete upload attempt",
+            icon=":material/refresh:",
+            key=f"clear_invoice_upload_attempt_{back_step}",
+        ):
+            reset_invoice_upload_attempt(st.session_state)
+            _set_step(2)
+            st.rerun()
+        if st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key=f"data_import_upload_back_{back_step}",
+        ):
+            reset_invoice_upload_attempt(st.session_state)
+            _set_step(back_step)
+            st.rerun()
+        _render_invoice_exit_button(key=f"invoice_exit_upload_{back_step}")
 
 
 def _render_invoice_upload_back_actions(*, back_step: int) -> None:
@@ -2249,6 +2372,8 @@ def _render_invoice_upload_back_actions(*, back_step: int) -> None:
             icon=":material/arrow_back:",
             key=f"data_import_upload_back_{back_step}",
         ):
+            if st.session_state.get(_INVOICE_UPLOAD_ATTEMPT_KEY) in _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS:
+                reset_invoice_upload_attempt(st.session_state)
             _set_step(back_step)
             st.rerun()
         _render_invoice_exit_button(

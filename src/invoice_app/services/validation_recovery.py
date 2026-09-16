@@ -9,6 +9,7 @@ from typing import Any
 
 from .batch_service import apply_batch_rules, is_manual_review_record
 from .import_result_contract import RecoveryAction
+from .workflow_navigation import end_workflow_activity
 
 
 REMOVE_SOURCE = "remove_source"
@@ -208,6 +209,8 @@ def execute_current_invoice_staging_exit(
     for key in widget_keys:
         state.pop(key, None)
     state["uploader_version"] = int(state.get("uploader_version", 0)) + 1
+    state.pop("invoice_upload_attempt", None)
+    end_workflow_activity(state)
 
     removed_counts["invoice_staging_fields"] = removed_fields
     removed_counts["invoice_widget_state"] = len(widget_keys)
@@ -250,6 +253,8 @@ def execute_current_batch_recovery(
         state["weekly_statement_uploader_version"] = (
             int(state.get("weekly_statement_uploader_version", 0)) + 1
         )
+        state.pop("weekly_statement_upload_selected", None)
+        end_workflow_activity(state)
         return RecoveryExecution(
             action_id=action.action_id,
             changed=changed,
