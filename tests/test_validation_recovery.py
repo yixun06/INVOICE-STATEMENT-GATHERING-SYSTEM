@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
 
@@ -53,6 +54,112 @@ def _historical_signature(state):
                     )
                 )
     return sha256(repr((state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
+
+
+def test_historical_validation_failure_is_one_compact_business_blocker(
+    tmp_path, monkeypatch
+):
+    from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
+        HistoricalInvoiceStorageError,
+    )
+    from src.invoice_app.ui import data_import
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda: (object(), "Synthetic Product Master"),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "build_current_batch_staging",
+        lambda **_kwargs: (object(),),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "configured_uat2_data_settings",
+        lambda: SimpleNamespace(create_repository=lambda: object()),
+    )
+
+    def _fail_classification(*_args, **_kwargs):
+        raise HistoricalInvoiceStorageError(
+            "Invoice_Items row 443 has no matching Invoice_Orders row.",
+            affected_order_id="SHP-MISSING-443",
+        )
+
+    monkeypatch.setattr(data_import, "classify_staging", _fail_classification)
+
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "historical-validation-blocker",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 4,
+        "invoice_upload_attempt": "resolved",
+        "upload_result_summary": {"pdfs_processed": 1},
+        "orders": [
+            {
+                "platform": "Shopee",
+                "order_id": "CURRENT-1",
+                "source_pdf": "current.pdf",
+                "status": "Accepted",
+            }
+        ],
+        "products": [],
+        "reviews": [],
+        "processing_errors": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    blocker = app.error[0].value
+    assert "Invoice data incomplete" in blocker
+    assert "Affected Order" in blocker
+    assert "SHP-MISSING-443" in blocker
+    assert "row 443" not in blocker
+    assert "Complete historical Invoice reconciliation" not in blocker
+    assert "View technical details" in {item.label for item in app.expander}
+    assert any(
+        "Invoice_Items row 443 has no matching Invoice_Orders row." in item.value
+        for item in app.code
+    )
+    continue_button = next(
+        button
+        for button in app.button
+        if button.label == "Continue to review & commit"
+    )
+    assert continue_button.disabled
+    assert any(button.label == "Back" for button in app.button)
+
+
+def _historical_blocker_without_order_app() -> None:
+    from src.invoice_app.ui import data_import
+
+    data_import._render_historical_validation_blocker(
+        {"technical_message": "Historical repository is temporarily unavailable."}
+    )
+
+
+def test_historical_validation_blocker_does_not_infer_missing_order_id():
+    app = AppTest.from_function(_historical_blocker_without_order_app)
+
+    app.run()
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    assert "Invoice data incomplete" in app.error[0].value
+    assert "Affected Order" not in app.error[0].value
+    assert "Historical repository is temporarily unavailable" not in app.error[0].value
+    assert any(
+        "Historical repository is temporarily unavailable" in item.value
+        for item in app.code
+    )
 
 
 def _state(**overrides):

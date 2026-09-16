@@ -55,6 +55,15 @@ _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 class HistoricalInvoiceStorageError(RuntimeError):
     """The configured UAT2 repository cannot safely read or write source facts."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        affected_order_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.affected_order_id = affected_order_id
+
 
 class GoogleSheetsHistoricalInvoiceGateway(Protocol):
     def read_tabs(self, spreadsheet_id: str, tabs: Sequence[str]) -> Mapping[str, Sequence[Sequence[Any]]]: ...
@@ -485,7 +494,10 @@ def _deserialize_snapshot(tabs: Mapping[str, Sequence[Sequence[Any]]], loaded_at
         item = _deserialize_item(row, row_number)
         identity = _identity(item.platform, item.order_id)
         if identity not in orders:
-            raise HistoricalInvoiceStorageError(f"Invoice_Items row {row_number} has no matching Invoice_Orders row.")
+            raise HistoricalInvoiceStorageError(
+                f"Invoice_Items row {row_number} has no matching Invoice_Orders row.",
+                affected_order_id=item.order_id,
+            )
         items.setdefault(identity, []).append(item)
     bundles: dict[tuple[str, str], InvoiceBundle] = {}
     for identity, order in orders.items():

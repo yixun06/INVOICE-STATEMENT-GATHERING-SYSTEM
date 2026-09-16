@@ -31,6 +31,7 @@ from ..services.exception_presentation import (
     ExceptionWorkQueue,
     build_exception_work_queue,
     build_historical_exception_work_queue,
+    missing_invoice_order_ids,
 )
 from ..services.validation_recovery import (
     REMOVE_INVOICE_STAGING,
@@ -124,6 +125,7 @@ _WORKFLOW_KEYS = (
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
+    "historical_validation_blocker",
     "manual_review_correction_drafts",
     "pending_validation_recovery_action",
     "pending_validation_bulk_recovery",
@@ -499,15 +501,16 @@ def _render_validation_status(result: ImportResult) -> None:
         return
 
     if result.source_type == SHOPEE_WEEKLY_STATEMENT:
+        if _render_missing_invoice_status(result):
+            return
         affected_orders, issue_count = _statement_blocker_counts(result)
-        if issue_count:
-            message = (
-                f"{affected_orders} affected order{'s' if affected_orders != 1 else ''}; "
-                f"{issue_count} unresolved issue{'s' if issue_count != 1 else ''} "
-                "must be resolved before continuing."
-            )
-        else:
-            message = _commit_readiness_reason(result)
+        message = (
+            f"{affected_orders} affected order{'s' if affected_orders != 1 else ''}; "
+            f"{issue_count} unresolved issue{'s' if issue_count != 1 else ''} "
+            "must be resolved before continuing."
+            if issue_count
+            else _commit_readiness_reason(result)
+        )
     else:
         review_count = len(result.source_specific_details.get("manual_review", ()))
         error_count = len(result.source_specific_details.get("processing_errors", ()))
@@ -524,6 +527,15 @@ def _render_validation_status(result: ImportResult) -> None:
 def _render_contract_validation(result: ImportResult) -> None:
     _render_recovery_notice()
     queue = build_exception_work_queue(result)
+    if (
+        result.source_type == SHOPEE_WEEKLY_STATEMENT
+        and missing_invoice_order_ids(queue)
+    ):
+        _render_missing_invoice_exception_details(
+            queue,
+            key_prefix="statement_exception_queue",
+        )
+        return
     _render_needs_attention_queue(
         queue,
         key_prefix=(
@@ -539,18 +551,22 @@ def _render_needs_attention_queue(
     *,
     key_prefix: str,
     allow_recovery: bool = True,
+    heading: str = "Needs Attention",
+    show_count: bool = True,
+    auto_select_single: bool = True,
 ) -> None:
     """Render one compact entry point while retaining every original issue."""
 
     if not queue.items:
         return
-    st.subheader("Needs Attention")
-    st.caption(
-        f"{queue.source_issue_count} issue"
-        f"{'s' if queue.source_issue_count != 1 else ''} across "
-        f"{len(queue.items)} work item{'s' if len(queue.items) != 1 else ''}. "
-        "Select an item to inspect its original evidence and available action."
-    )
+    st.subheader(heading)
+    if show_count:
+        st.caption(
+            f"{queue.source_issue_count} issue"
+            f"{'s' if queue.source_issue_count != 1 else ''} across "
+            f"{len(queue.items)} work item{'s' if len(queue.items) != 1 else ''}. "
+            "Select an item to inspect its original evidence and available action."
+        )
     item_keys = tuple(item.key for item in queue.items)
     click_key = f"{key_prefix}_click"
     st.dataframe(
@@ -584,7 +600,7 @@ def _render_needs_attention_queue(
     )
     selected_key = st.session_state.get(f"{key_prefix}_selected")
     selected = next((item for item in queue.items if item.key == selected_key), None)
-    if selected is None and len(queue.items) == 1:
+    if selected is None and auto_select_single and len(queue.items) == 1:
         selected = queue.items[0]
     if selected is not None:
         _render_exception_queue_detail(
@@ -592,6 +608,83 @@ def _render_needs_attention_queue(
             key_prefix=key_prefix,
             allow_recovery=allow_recovery,
         )
+
+
+def _render_missing_invoice_status(result: ImportResult) -> bool:
+    order_ids = missing_invoice_order_ids(build_exception_work_queue(result))
+    if not order_ids:
+        return False
+    label = (
+        "Missing Invoice Order"
+        if len(order_ids) == 1
+        else f"Missing Invoice Orders · {len(order_ids)}"
+    )
+    order_line = f"\n\n`{order_ids[0]}`" if len(order_ids) == 1 else ""
+    render_authoritative_status(
+        title="Statement blocked",
+        message=(
+            f"**{label}**{order_line}\n\n"
+            "Upload the missing invoice, then check the Statement again."
+        ),
+        state="blocked",
+    )
+    if len(order_ids) > 1:
+        st.dataframe(
+            [{"Missing Invoice Order ID": order_id} for order_id in order_ids],
+            hide_index=True,
+            height=min(280, 36 * (len(order_ids) + 1)),
+        )
+    return True
+
+
+def _render_missing_invoice_exception_details(
+    queue: ExceptionWorkQueue,
+    *,
+    key_prefix: str,
+) -> None:
+    missing_ids = frozenset(missing_invoice_order_ids(queue))
+    missing_items = tuple(
+        item for item in queue.items if item.order_id in missing_ids
+    )
+    other_blockers = tuple(
+        item
+        for item in queue.items
+        if item.order_id not in missing_ids and item.blocking
+    )
+    notes = tuple(
+        item
+        for item in queue.items
+        if item.order_id not in missing_ids and not item.blocking
+    )
+
+    if other_blockers:
+        _render_needs_attention_queue(
+            ExceptionWorkQueue(
+                items=other_blockers,
+                source_issue_count=sum(item.issue_count for item in other_blockers),
+            ),
+            key_prefix=f"{key_prefix}_other",
+            heading="Other blockers",
+            show_count=False,
+            auto_select_single=False,
+        )
+
+    with st.expander("Missing Invoice details", expanded=False):
+        _render_secondary_exception_items(missing_items)
+    if notes:
+        with st.expander("Reconciliation notes", expanded=False):
+            _render_secondary_exception_items(notes)
+
+
+def _render_secondary_exception_items(
+    items: tuple[ExceptionPresentationItem, ...],
+) -> None:
+    for item in items:
+        st.write(f"**{item.order_id or item.title}**")
+        for issue in item.issues:
+            st.markdown(f"- {issue.reason}")
+            if issue.evidence:
+                st.write(dict(issue.evidence))
 
 
 def _select_exception_queue_item(
@@ -1341,6 +1434,19 @@ def _render_reconciliation_step() -> None:
             _render_blocked_invoice_destination(4)
             return
         entries = _reconcile_historical_invoice_staging()
+        historical_validation_blocker = st.session_state.get(
+            "historical_validation_blocker"
+        )
+        if historical_validation_blocker:
+            _render_historical_validation_blocker(historical_validation_blocker)
+            _render_next_step(
+                "Continue to review & commit",
+                5,
+                back_step=3,
+                allowed=False,
+                include_invoice_exit=True,
+            )
+            return
         historical_ready = _historical_commit_ready(entries)
         render_authoritative_status(
             title="Ready" if historical_ready else "Needs Attention",
@@ -1392,15 +1498,18 @@ def _render_reconciliation_step() -> None:
         )
         return
     allowed, disabled_reason = _statement_forward_gate()
-    render_authoritative_status(
-        title="Ready" if allowed else "Needs Attention",
-        message=(
-            "Statement reconciliation passed the existing readiness checks."
-            if allowed
-            else (disabled_reason or "Resolve the current reconciliation blockers.")
-        ),
-        state="ready" if allowed else "blocked",
-    )
+    if allowed:
+        render_authoritative_status(
+            title="Ready",
+            message="Statement reconciliation passed the existing readiness checks.",
+            state="ready",
+        )
+    elif not _render_missing_invoice_status(result):
+        render_authoritative_status(
+            title="Needs Attention",
+            message=disabled_reason or "Resolve the current reconciliation blockers.",
+            state="blocked",
+        )
     _render_statement_next_step(
         "Continue to review & commit",
         5,
@@ -1497,15 +1606,16 @@ def _render_review_and_commit_step() -> None:
         _render_source_summary(result)
     else:
         affected_orders, unresolved_issues = _statement_blocker_counts(result)
-        st.error(
-            "**Cannot commit Statement**\n\n"
-            f"{affected_orders} order{'s' if affected_orders != 1 else ''} "
-            f"{'still needs' if affected_orders == 1 else 'still need'} attention. "
-            f"{unresolved_issues} unresolved "
-            f"issue{'s' if unresolved_issues != 1 else ''} remain.\n\n"
-            "Resolve all blocking issues in Statement Review before committing.",
-            icon=":material/error:",
-        )
+        if not _render_missing_invoice_status(result):
+            st.error(
+                "**Cannot commit Statement**\n\n"
+                f"{affected_orders} order{'s' if affected_orders != 1 else ''} "
+                f"{'still needs' if affected_orders == 1 else 'still need'} attention. "
+                f"{unresolved_issues} unresolved "
+                f"issue{'s' if unresolved_issues != 1 else ''} remain.\n\n"
+                "Resolve all blocking issues in Statement Review before committing.",
+                icon=":material/error:",
+            )
         if _statement_review_stale():
             st.warning(
                 str(st.session_state.get("weekly_statement_review_stale_reason")),
@@ -1642,11 +1752,39 @@ def _reconcile_historical_invoice_staging() -> tuple[Any, ...]:
             st.session_state.uat2_historical_commit_entries = entries
             st.session_state.uat2_historical_commit_refresh_required = False
             st.session_state.uat2_historical_commit_signature = signature
+            st.session_state.pop("historical_validation_blocker", None)
         except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
-            st.error(f"Historical Invoice validation is unavailable: {error}")
+            st.session_state.historical_validation_blocker = {
+                "order_id": getattr(error, "affected_order_id", None),
+                "technical_message": str(error),
+            }
             return ()
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
     return entries
+
+
+def _render_historical_validation_blocker(blocker: Any) -> None:
+    order_id = (
+        str(blocker.get("order_id") or "").strip()
+        if isinstance(blocker, dict)
+        else ""
+    )
+    message = "The historical Invoice records must be corrected before continuing."
+    if order_id:
+        message = f"**Affected Order**\n\n`{order_id}`\n\n{message}"
+    render_authoritative_status(
+        title="Invoice data incomplete",
+        message=message,
+        state="blocked",
+    )
+    technical_message = (
+        str(blocker.get("technical_message") or "").strip()
+        if isinstance(blocker, dict)
+        else ""
+    )
+    if technical_message:
+        with st.expander("View technical details", expanded=False):
+            st.code(technical_message, language=None)
 
 
 def _render_historical_status_details(
@@ -1756,10 +1894,6 @@ def _render_statement_review_content(
     stale_reason = st.session_state.get("weekly_statement_review_stale_reason")
     if stale_reason:
         st.warning(str(stale_reason), icon=":material/refresh:")
-    st.caption(
-        "Identity, merchandise, and seller settlement are evaluated separately. "
-        "GROUP is valid source-level reconciliation, not a failed item match."
-    )
     st.dataframe(
         [
             {
@@ -1795,12 +1929,12 @@ def _render_statement_review_content(
         ],
         hide_index=True,
     )
-    for limitation in review.limitations:
-        st.warning(limitation, icon=":material/info:")
-    st.caption(
-        "Quantity evidence — Invoice quantity: available where captured. "
-        "Statement quantity: not provided by source. No quantity-match claim is made."
-    )
+    if nested_disclosure:
+        with st.expander("Reconciliation notes", expanded=False):
+            _render_reconciliation_notes(review)
+    else:
+        st.write("**Reconciliation notes**")
+        _render_reconciliation_notes(review)
     with st.container(border=True):
         st.write("**Statement Adjustment evidence (separate)**")
         st.write(f"RM {batch.statement_adjustment_total:.2f}")
@@ -1813,6 +1947,19 @@ def _render_statement_review_content(
     else:
         st.subheader("Technical reconciliation evidence")
         _render_statement_technical_evidence(batch)
+
+
+def _render_reconciliation_notes(review: StatementImportReview) -> None:
+    st.caption(
+        "Identity, merchandise, and seller settlement are evaluated separately. "
+        "GROUP is valid source-level reconciliation, not a failed item match."
+    )
+    for limitation in review.limitations:
+        st.info(limitation, icon=":material/info:")
+    st.caption(
+        "Quantity evidence — Invoice quantity: available where captured. "
+        "Statement quantity: not provided by source. No quantity-match claim is made."
+    )
 
 
 def _render_statement_technical_evidence(batch: Any) -> None:

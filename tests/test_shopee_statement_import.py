@@ -960,7 +960,8 @@ def test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index(
     assert review_table.iloc[0]["Identity"] == "GROUP"
     assert review_table.iloc[0]["Allocation"] == "Group only"
     assert all("Matched Item" not in element.value.columns for element in app.dataframe)
-    assert any("product-group scope" in warning.value for warning in app.warning)
+    assert "Reconciliation notes" in {item.label for item in app.expander}
+    assert any("product-group scope" in info.value for info in app.info)
     assert not any("exactly one" in error.value.casefold() for error in app.error)
     assert not any("Quantity Matched" in caption.value for caption in app.caption)
     assert any(
@@ -1035,6 +1036,7 @@ def test_statement_back_is_navigation_only_and_forward_restores_staging(
     )
     assert forward.disabled is True
     assert forward.proto.type == "secondary"
+    assert any(button.label == "Back" for button in app.button)
     assert any(
         "still need attention before continuing" in caption.value
         for caption in app.caption

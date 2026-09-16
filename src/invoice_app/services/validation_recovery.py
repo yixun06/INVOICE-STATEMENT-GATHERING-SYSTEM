@@ -50,6 +50,7 @@ _INVOICE_STAGING_KEYS = (
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
+    "historical_validation_blocker",
     "validation_recovery_detail",
     "validation_recovery_notice",
     "invoice_commit_completed",

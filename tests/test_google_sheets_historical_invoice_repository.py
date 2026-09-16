@@ -378,8 +378,9 @@ def test_malformed_persisted_money_or_item_identity_fails_visibly():
     repository.import_invoice(_bundle())
     gateway.tabs[INVOICE_ITEMS_TAB][1][1] = "OTHER"
     repository.refresh()
-    with pytest.raises(HistoricalInvoiceStorageError, match="no matching"):
+    with pytest.raises(HistoricalInvoiceStorageError, match="no matching") as error:
         repository.list_orders()
+    assert error.value.affected_order_id == "OTHER"
 
 
 def test_product_master_readonly_scope_remains_separate_from_uat2_write_scope():

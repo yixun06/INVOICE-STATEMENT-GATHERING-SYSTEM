@@ -11,6 +11,11 @@ from .import_result_contract import ImportResult, RecoveryAction, ValidationIssu
 from .validation_recovery import REMOVE_SOURCE, recovery_actions_for_source
 
 
+MISSING_INVOICE_COVERAGE_REASON = (
+    "no persisted Invoice order coverage is available."
+)
+
+
 @dataclass(frozen=True)
 class PresentedException:
     category: str
@@ -51,6 +56,20 @@ class ExceptionWorkQueue:
     @property
     def blocking_issue_count(self) -> int:
         return sum(issue.blocking for item in self.items for issue in item.issues)
+
+
+def missing_invoice_order_ids(queue: ExceptionWorkQueue) -> tuple[str, ...]:
+    """Project existing missing-coverage blockers into a compact order list."""
+
+    return tuple(
+        item.order_id
+        for item in queue.items
+        if item.order_id
+        and any(
+            MISSING_INVOICE_COVERAGE_REASON in issue.reason
+            for issue in item.issues
+        )
+    )
 
 
 def build_exception_work_queue(result: ImportResult) -> ExceptionWorkQueue:

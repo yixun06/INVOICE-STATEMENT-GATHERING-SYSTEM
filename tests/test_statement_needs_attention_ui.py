@@ -4,6 +4,7 @@ from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.exception_presentation import (
     build_exception_work_queue,
+    missing_invoice_order_ids,
 )
 from src.invoice_app.services.import_result_contract import (
     CommitReadiness,
@@ -101,6 +102,24 @@ def test_same_order_issues_become_one_entry_and_preserve_every_message():
     assert queue.items[0].issue_count == 4
     assert tuple(issue.reason for issue in queue.items[0].issues) == messages
     assert queue.items[0].summary.endswith("+3 more")
+    assert queue.source_issue_count == queue.represented_issue_count == 4
+    assert missing_invoice_order_ids(queue) == ("ORDER-1",)
+
+
+def test_multiple_missing_invoice_orders_are_each_presented_once():
+    issues = (
+        _issue("ORDER-1: no persisted Invoice order coverage is available."),
+        _issue("ORDER-1: product identity is unresolved."),
+        _issue("ORDER-2: no persisted Invoice order coverage is available."),
+        _issue("ORDER-2: final seller settlement is unexplained."),
+    )
+
+    queue = build_exception_work_queue(
+        _result(issues, known_orders=("ORDER-1", "ORDER-2"))
+    )
+
+    assert missing_invoice_order_ids(queue) == ("ORDER-1", "ORDER-2")
+    assert len(queue.items) == 2
     assert queue.source_issue_count == queue.represented_issue_count == 4
 
 
@@ -361,7 +380,17 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
 
     assert app.exception == []
     assert len(app.error) == 1
-    assert "187 affected orders" in app.error[0].value
+    assert "Statement blocked" in app.error[0].value
+    assert "Missing Invoice Orders · 187" in app.error[0].value
+    assert "unresolved issue" not in app.error[0].value
+    missing_orders = next(
+        frame.value
+        for frame in app.dataframe
+        if "Missing Invoice Order ID" in frame.value.columns
+    )
+    assert tuple(missing_orders["Missing Invoice Order ID"]) == tuple(
+        f"ORDER-{index:03d}" for index in range(1, 188)
+    )
     assert {metric.label for metric in app.metric} == {
         "Statement Period",
         "Review status",
@@ -374,14 +403,14 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
     affected = next(
         frame.value
         for frame in app.dataframe
-        if "Order ID" in frame.value.columns
+        if "Issues" in frame.value.columns
     )
-    assert len(affected) == 188
-    order_rows = affected[affected["Order ID"] != "—"]
-    assert len(order_rows) == 187
-    assert order_rows["Order ID"].is_unique
-    assert set(order_rows["Issues"]) == {4}
-    assert affected["Issues"].sum() == 749
+    assert len(affected) == 1
+    assert affected.iloc[0]["Scope"] == "Statement"
+    assert affected.iloc[0]["Issues"] == 1
+    assert sum(
+        item.value.startswith("- ORDER-") for item in app.markdown
+    ) == 748
 
     app.session_state["statement_exception_queue_selected"] = "order:ORDER-001"
     app.run()
@@ -393,3 +422,98 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
         "- ORDER-001: merchandise Product Price is not reconciled.",
         "- ORDER-001: final seller settlement is unexplained.",
     } <= detail_messages
+
+
+def _single_missing_invoice_app() -> None:
+    from src.invoice_app.services.import_result_contract import (
+        CommitReadiness,
+        ImportResult,
+        ReconciliationException,
+        ReconciliationResult,
+        SessionState,
+        SourceSummary,
+        ValidationIssue,
+        ValidationResult,
+    )
+    from src.invoice_app.ui import data_import
+
+    issues = (
+        ValidationIssue(
+            layer="statement_reconciliation_v2",
+            severity="error",
+            blocking=True,
+            reason="ORDER-ONLY: no persisted Invoice order coverage is available.",
+            affected_item="statement.xlsx",
+        ),
+        ValidationIssue(
+            layer="statement_reconciliation_v2",
+            severity="error",
+            blocking=True,
+            reason="ORDER-ONLY: product identity is unresolved.",
+            affected_item="statement.xlsx",
+        ),
+        ValidationIssue(
+            layer="statement_reconciliation_v2",
+            severity="warning",
+            blocking=False,
+            reason=(
+                "Statement quantity is not provided by the source; "
+                "no quantity-match claim is made."
+            ),
+            affected_item="statement.xlsx",
+        ),
+    )
+    result = ImportResult(
+        source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
+        batch_status="Not Ready",
+        source_summary=SourceSummary(title="Statement"),
+        validation=ValidationResult(
+            blocking_issues=issues[:2],
+            warnings=issues[2:],
+        ),
+        reconciliation=ReconciliationResult(
+            available=True,
+            status="Available",
+            exceptions=(
+                ReconciliationException(
+                    status="Existing exception",
+                    affected_item="ORDER-ONLY",
+                ),
+            ),
+        ),
+        commit_readiness=CommitReadiness(ready=False, status="Not Ready"),
+        session_state=SessionState(
+            applied_to_current_session=True,
+            label="Applied to Current Session",
+        ),
+    )
+    data_import._render_validation_status(result)
+    data_import._render_contract_validation(result)
+    import streamlit as st
+
+    st.button("Continue to reconcile", disabled=True)
+
+
+def test_single_missing_invoice_is_primary_and_notes_are_secondary():
+    app = AppTest.from_function(_single_missing_invoice_app)
+
+    app.run()
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    blocker = app.error[0].value
+    assert "Statement blocked" in blocker
+    assert "Missing Invoice Order" in blocker
+    assert "ORDER-ONLY" in blocker
+    assert "Upload the missing invoice" in blocker
+    assert "unresolved issue" not in blocker
+    assert "work item" not in blocker
+    assert "Missing Invoice details" in {item.label for item in app.expander}
+    assert "Reconciliation notes" in {item.label for item in app.expander}
+    assert any(
+        "Statement quantity is not provided by the source" in item.value
+        for item in (*app.caption, *app.markdown)
+    )
+    assert next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    ).disabled
