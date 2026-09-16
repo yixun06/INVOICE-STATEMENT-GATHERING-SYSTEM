@@ -87,7 +87,9 @@ def test_pristine_upload_is_neutral_and_cannot_continue(tmp_path, monkeypatch):
     assert "Continue to validate" not in _button_labels(app)
     assert not any("Upload not completed" in error.value for error in app.error)
     assert "Back" in _button_labels(app)
-    assert next(button for button in app.button if button.label == "Process files").disabled
+    process = next(button for button in app.button if button.label == "Process files")
+    assert process.disabled
+    assert process.proto.type == "secondary"
     assert next(button for button in app.button if button.label == "Clear uploaded files").disabled
     assert invoice_upload_presentation_state(app.session_state.filtered_state) == "pristine"
 
@@ -105,7 +107,9 @@ def test_selected_upload_is_neutral_and_remains_blocked(tmp_path, monkeypatch):
     assert app.exception == []
     assert "Continue to validate" not in _button_labels(app)
     assert not any("Upload not completed" in error.value for error in app.error)
-    assert not next(button for button in app.button if button.label == "Process files").disabled
+    process = next(button for button in app.button if button.label == "Process files")
+    assert not process.disabled
+    assert process.proto.type == "primary"
     assert not next(button for button in app.button if button.label == "Clear uploaded files").disabled
     assert invoice_upload_presentation_state(app.session_state.filtered_state) == "selected"
 
@@ -140,7 +144,11 @@ def test_completed_invoice_upload_keeps_continue_to_validate_available(tmp_path,
 
     assert app.exception == []
     assert "Continue to validate" in _button_labels(app)
-    next(button for button in app.button if button.label == "Continue to validate").click().run(
+    continue_button = next(
+        button for button in app.button if button.label == "Continue to validate"
+    )
+    assert continue_button.proto.type == "primary"
+    continue_button.click().run(
         timeout=20
     )
     assert app.session_state.filtered_state["data_import_step"] == 3

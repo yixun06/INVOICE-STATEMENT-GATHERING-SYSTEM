@@ -1031,7 +1031,7 @@ def show_upload_panel() -> list[Any] | None:
             process_clicked = st.button(
                 "Process files",
                 disabled=not uploaded_files,
-                type="primary",
+                type="primary" if uploaded_files else "secondary",
                 icon=":material/play_arrow:",
             )
             clear_clicked = st.button(

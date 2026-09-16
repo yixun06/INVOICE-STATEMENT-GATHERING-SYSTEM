@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from streamlit.testing.v1 import AppTest
 
+from src.invoice_app.services.exception_presentation import (
+    build_exception_work_queue,
+)
 from src.invoice_app.services.import_result_contract import (
     CommitReadiness,
     ImportResult,
@@ -89,18 +92,16 @@ def test_same_order_issues_become_one_entry_and_preserve_every_message():
     )
     issues = tuple(_issue(message) for message in messages)
 
-    presentation = data_import._statement_issue_presentation(
-        _result(issues, known_orders=("ORDER-1",)),
-        issues,
+    queue = build_exception_work_queue(
+        _result(issues, known_orders=("ORDER-1",))
     )
 
-    assert len(presentation.order_groups) == 1
-    assert presentation.order_groups[0].order_id == "ORDER-1"
-    assert len(presentation.order_groups[0].issues) == 4
-    assert tuple(issue.reason for issue in presentation.order_groups[0].issues) == messages
-    assert data_import._statement_issue_summary(presentation.order_groups[0]).endswith(
-        "+3 more"
-    )
+    assert len(queue.items) == 1
+    assert queue.items[0].order_id == "ORDER-1"
+    assert queue.items[0].issue_count == 4
+    assert tuple(issue.reason for issue in queue.items[0].issues) == messages
+    assert queue.items[0].summary.endswith("+3 more")
+    assert queue.source_issue_count == queue.represented_issue_count == 4
 
 
 def test_different_orders_remain_separate_and_source_conflict_is_not_hidden():
@@ -113,16 +114,15 @@ def test_different_orders_remain_separate_and_source_conflict_is_not_hidden():
         ),
     )
 
-    presentation = data_import._statement_issue_presentation(
-        _result(issues, known_orders=("ORDER-1", "ORDER-2")),
-        issues,
+    queue = build_exception_work_queue(
+        _result(issues, known_orders=("ORDER-1", "ORDER-2"))
     )
 
-    assert tuple(group.order_id for group in presentation.order_groups) == (
+    assert tuple(item.order_id for item in queue.items) == (
         "ORDER-1",
         "ORDER-2",
     )
-    assert presentation.order_groups[1].issues[0] is issues[1]
+    assert queue.items[1].issues[0].reason == issues[1].reason
 
 
 def test_statement_issue_without_order_id_stays_at_statement_level():
@@ -130,13 +130,14 @@ def test_statement_issue_without_order_id_stays_at_statement_level():
         "Statement and Invoice product populations are not fully accounted for."
     )
 
-    presentation = data_import._statement_issue_presentation(
-        _result((issue,), known_orders=("ORDER-1",)),
-        (issue,),
+    queue = build_exception_work_queue(
+        _result((issue,), known_orders=("ORDER-1",))
     )
 
-    assert presentation.order_groups == ()
-    assert presentation.statement_issues == (issue,)
+    assert len(queue.items) == 1
+    assert queue.items[0].scope == "Statement"
+    assert queue.items[0].order_id is None
+    assert queue.items[0].issues[0].reason == issue.reason
 
 
 class _Context:
@@ -212,33 +213,41 @@ class _FakeStreamlit:
         raise AssertionError("No action was clicked in this test.")
 
 
-def test_needs_attention_renderer_keeps_actions_in_the_workflow_footer(monkeypatch):
+def test_needs_attention_renderer_is_one_compact_queue(monkeypatch):
     issues = (
         _issue("ORDER-1: product identity is unresolved."),
         _issue("ORDER-1: merchandise Product Price is not reconciled."),
     )
-    result = _result(issues, known_orders=("ORDER-1",))
+    queue = build_exception_work_queue(
+        _result(issues, known_orders=("ORDER-1",))
+    )
     fake = _FakeStreamlit()
     monkeypatch.setattr(data_import, "st", fake)
 
-    data_import._render_weekly_statement_needs_attention(result, issues)
+    data_import._render_needs_attention_queue(
+        queue,
+        key_prefix="statement_exception_queue",
+    )
 
-    assert len(fake.errors) == 1
-    assert "1 order" in fake.errors[0]
-    assert fake.buttons == []
+    assert fake.errors == []
+    assert fake.buttons == ["Remove staged source"]
     affected_rows = next(frame for frame in fake.frames if "Order ID" in frame[0])
     assert len(affected_rows) == 1
-    assert affected_rows[0]["Issue Count"] == 2
+    assert affected_rows[0]["Issues"] == 2
 
 
 def test_view_details_action_selects_the_clicked_order(monkeypatch):
     fake = _FakeStreamlit()
-    fake.session_state["weekly_statement_issue_order_click"] = {"row": 1}
+    fake.session_state["queue_click"] = {"row": 1}
     monkeypatch.setattr(data_import, "st", fake)
 
-    data_import._select_statement_issue_order(("ORDER-1", "ORDER-2"))
+    data_import._select_exception_queue_item(
+        ("order:ORDER-1", "order:ORDER-2"),
+        "queue_click",
+        "queue_selected",
+    )
 
-    assert fake.session_state["weekly_statement_issue_order_id"] == "ORDER-2"
+    assert fake.session_state["queue_selected"] == "order:ORDER-2"
 
 
 def test_ready_statement_keeps_existing_success_path(monkeypatch):
@@ -341,10 +350,8 @@ def _many_mismatch_statement_app() -> None:
         ),
     )
     data_import._render_source_summary(result)
-    data_import._render_weekly_statement_needs_attention(
-        result,
-        issues,
-    )
+    data_import._render_validation_status(result)
+    data_import._render_contract_validation(result)
 
 
 def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issues():
@@ -354,7 +361,7 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
 
     assert app.exception == []
     assert len(app.error) == 1
-    assert "187 orders" in app.error[0].value
+    assert "187 affected orders" in app.error[0].value
     assert {metric.label for metric in app.metric} == {
         "Statement Period",
         "Review status",
@@ -369,11 +376,14 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
         for frame in app.dataframe
         if "Order ID" in frame.value.columns
     )
-    assert len(affected) == 187
-    assert affected["Order ID"].is_unique
-    assert set(affected["Issue Count"]) == {4}
+    assert len(affected) == 188
+    order_rows = affected[affected["Order ID"] != "—"]
+    assert len(order_rows) == 187
+    assert order_rows["Order ID"].is_unique
+    assert set(order_rows["Issues"]) == {4}
+    assert affected["Issues"].sum() == 749
 
-    app.session_state["weekly_statement_issue_order_id"] = "ORDER-001"
+    app.session_state["statement_exception_queue_selected"] = "order:ORDER-001"
     app.run()
 
     detail_messages = {item.value for item in app.markdown}

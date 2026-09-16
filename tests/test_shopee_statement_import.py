@@ -444,10 +444,9 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     assert "Reconciliation V2 review" not in {
         element.value for element in app.subheader
     }
-    assert any(
-        button.label == "Commit Statement" and not button.disabled
-        for button in app.button
-    )
+    commit = next(button for button in app.button if button.label == "Commit Statement")
+    assert not commit.disabled
+    assert commit.proto.type == "primary"
     assert "Reconciliation review complete — V2 found no business blockers." in {
         element.value for element in app.success
     }
@@ -999,6 +998,9 @@ def test_stale_product_master_review_is_visible_and_commit_is_disabled(
         button.label == "Commit Statement" and button.disabled
         for button in app.button
     )
+    assert next(
+        button for button in app.button if button.label == "Commit Statement"
+    ).proto.type == "secondary"
 
 
 def test_statement_back_is_navigation_only_and_forward_restores_staging(
@@ -1032,6 +1034,7 @@ def test_statement_back_is_navigation_only_and_forward_restores_staging(
         if button.label == "Continue to reconcile"
     )
     assert forward.disabled is True
+    assert forward.proto.type == "secondary"
     assert any(
         "still need attention before continuing" in caption.value
         for caption in app.caption
@@ -1098,6 +1101,9 @@ def test_direct_statement_commit_access_remains_blocked_and_routes_to_review(
         button.label == "Commit Statement" and button.disabled
         for button in app.button
     )
+    assert next(
+        button for button in app.button if button.label == "Commit Statement"
+    ).proto.type == "secondary"
     assert "Reconciliation V2 review" not in {
         element.value for element in app.subheader
     }
@@ -1111,7 +1117,7 @@ def test_direct_statement_commit_access_remains_blocked_and_routes_to_review(
     assert state["data_import_step"] == 3
     assert state["weekly_statement_stage"] == review.stage
     assert state["weekly_statement_review"] == review
-    assert "Affected orders" in {element.value for element in app.subheader}
+    assert "Needs Attention" in {element.value for element in app.subheader}
     assert "All reconciliation evidence" in {
         expander.label for expander in app.expander
     }

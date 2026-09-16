@@ -709,10 +709,10 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert "View skipped items" in {expander.label for expander in app.expander}
     assert {
         "Validate",
+        "Needs Attention",
         "Current batch summary",
         "Current Batch — Order Level Data",
-        "Manual Review",
-        "Available recovery actions",
+        "Resolve Manual Review",
     } <= {
         element.value for element in app.subheader
     }

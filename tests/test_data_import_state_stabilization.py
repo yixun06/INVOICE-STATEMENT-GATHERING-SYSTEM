@@ -198,16 +198,22 @@ def test_resolved_upload_with_current_new_classification_allows_downstream_happy
 
     assert app.exception == []
     if step == 4:
-        assert any(
-            button.label == "Continue to review & commit" and not button.disabled
+        continue_button = next(
+            button
             for button in app.button
+            if button.label == "Continue to review & commit"
         )
+        assert not continue_button.disabled
+        assert continue_button.proto.type == "primary"
     else:
         assert any("Ready to Commit" in success.value for success in app.success)
-        assert any(
-            button.label == "Commit Accepted Shopee Invoices" and not button.disabled
+        commit = next(
+            button
             for button in app.button
+            if button.label == "Commit Accepted Shopee Invoices"
         )
+        assert not commit.disabled
+        assert commit.proto.type == "primary"
 
 
 def test_current_unresolved_upload_overrides_valid_new_historical_classification(

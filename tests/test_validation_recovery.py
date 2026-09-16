@@ -320,6 +320,7 @@ def test_review_commit_readiness_includes_historical_option_a_gate(tmp_path, mon
         if button.label == "Commit Accepted Shopee Invoices"
     )
     assert commit_button.disabled
+    assert commit_button.proto.type == "secondary"
     assert "Check Historical Status" not in {button.label for button in app.button}
 
 

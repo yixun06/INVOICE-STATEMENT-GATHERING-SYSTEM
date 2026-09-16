@@ -243,7 +243,7 @@ def test_validate_duplicate_only_source_offers_safe_removal_and_keeps_audit_expa
         app.session_state[key] = value
     app.run(timeout=20)
 
-    assert "View skipped duplicate files (1)" in {item.label for item in app.expander}
+    assert "Original issue evidence" in {item.label for item in app.expander}
     next(
         button
         for button in app.button

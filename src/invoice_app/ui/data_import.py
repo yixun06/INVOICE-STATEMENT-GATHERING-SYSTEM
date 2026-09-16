@@ -8,7 +8,6 @@ persistence rules.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
 from hashlib import sha256
 import io
 from typing import Any, Callable, MutableMapping
@@ -27,11 +26,16 @@ from ..services.import_result_adapters import (
     adapt_shopee_weekly_statement_import_result,
 )
 from ..services.import_result_contract import ImportResult, ReconciliationException, RecoveryAction, ValidationIssue
+from ..services.exception_presentation import (
+    ExceptionPresentationItem,
+    ExceptionWorkQueue,
+    build_exception_work_queue,
+    build_historical_exception_work_queue,
+)
 from ..services.validation_recovery import (
     REMOVE_INVOICE_STAGING,
     REMOVE_SOURCE,
     REMOVE_STAGED_SOURCE,
-    VIEW_DETAILS,
     execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
     plan_current_invoice_staging_exit,
@@ -128,27 +132,22 @@ _WORKFLOW_KEYS = (
     "validation_recovery_notice",
     "weekly_statement_issue_order_id",
     "weekly_statement_issue_order_click",
+    "invoice_exception_queue_click",
+    "invoice_exception_queue_selected",
+    "statement_exception_queue_click",
+    "statement_exception_queue_selected",
+    "historical_exception_queue_click",
+    "historical_exception_queue_selected",
+    "historical_commit_exception_queue_click",
+    "historical_commit_exception_queue_selected",
+    "statement_commit_exception_queue_click",
+    "statement_commit_exception_queue_selected",
 )
 
 _INVOICE_UPLOAD_PRISTINE = "pristine"
 _INVOICE_UPLOAD_SELECTED = "selected"
 _INVOICE_UPLOAD_NEEDS_ATTENTION = "needs_attention"
 _INVOICE_UPLOAD_RESOLVED = "resolved"
-
-
-@dataclass(frozen=True)
-class _StatementOrderIssueGroup:
-    order_id: str
-    issues: tuple[ValidationIssue, ...]
-
-
-@dataclass(frozen=True)
-class _StatementIssuePresentation:
-    order_groups: tuple[_StatementOrderIssueGroup, ...]
-    statement_issues: tuple[ValidationIssue, ...]
-    removal_action: RecoveryAction | None
-
-
 def initialize_data_import_state() -> None:
     """Initialize presentation-only state once per Streamlit session."""
     st.session_state.setdefault("data_import_step", 1)
@@ -381,7 +380,12 @@ def _render_weekly_statement_upload() -> None:
     else:
         st.session_state.pop("weekly_statement_upload_selected", None)
     with st.container(horizontal=True):
-        stage_clicked = st.button("Check statement", type="primary", icon=":material/upload_file:", disabled=uploaded_file is None)
+        stage_clicked = st.button(
+            "Check statement",
+            type="primary" if uploaded_file is not None else "secondary",
+            icon=":material/upload_file:",
+            disabled=uploaded_file is None,
+        )
         clear_clicked = st.button("Clear selected file", icon=":material/close:", disabled=uploaded_file is None)
     if clear_clicked:
         clear_statement_upload_attempt(st.session_state)
@@ -461,10 +465,9 @@ def _render_validation_step(
         render_platform_orders_validation_data()
         render_platform_orders_outcomes()
     else:
-        _render_source_summary(result)
         _render_contract_validation(result)
+        _render_source_summary(result)
         _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
-    _render_recovery_area()
 
 
 def _render_validation_status(result: ImportResult) -> None:
@@ -519,266 +522,177 @@ def _render_validation_status(result: ImportResult) -> None:
 
 
 def _render_contract_validation(result: ImportResult) -> None:
-    validation = result.validation
     _render_recovery_notice()
-    visible_warnings = tuple(
-        issue for issue in validation.warnings if issue.layer != "manual_review"
-    )
-    duplicate_warnings = tuple(issue for issue in visible_warnings if issue.layer == "duplicate")
-    other_warnings = tuple(issue for issue in visible_warnings if issue.layer != "duplicate")
-
-    if (
-        result.source_type == SHOPEE_WEEKLY_STATEMENT
-        and validation.blocking_issues
-    ):
-        _render_weekly_statement_needs_attention(
-            result,
-            (*validation.blocking_issues, *other_warnings),
-            include_status=False,
-        )
-    else:
-        for index, issue in enumerate(validation.blocking_issues):
-            _render_validation_issue(issue, index=index, is_blocking=True)
-        for index, issue in enumerate(
-            other_warnings,
-            start=len(validation.blocking_issues),
-        ):
-            _render_validation_issue(issue, index=index, is_blocking=False)
-    if duplicate_warnings:
-        _render_consolidated_duplicates(duplicate_warnings)
-
-
-def _statement_issue_presentation(
-    result: ImportResult,
-    issues: tuple[ValidationIssue, ...],
-) -> _StatementIssuePresentation:
-    """Group existing issues for display without changing their semantics."""
-
-    known_order_ids: list[str] = []
-    batch = result.source_specific_details.get("reconciliation_v2")
-    for order_result in getattr(batch, "orders", ()):
-        order_id = str(getattr(order_result.evidence, "order_id", "") or "").strip()
-        if order_id and order_id not in known_order_ids:
-            known_order_ids.append(order_id)
-    for exception in result.reconciliation.exceptions:
-        order_id = str(exception.affected_item or "").strip()
-        if order_id and order_id not in known_order_ids:
-            known_order_ids.append(order_id)
-
-    grouped: dict[str, list[ValidationIssue]] = {}
-    statement_issues: list[ValidationIssue] = []
-    removal_action: RecoveryAction | None = None
-    for issue in issues:
-        if removal_action is None:
-            removal_action = next(
-                (
-                    action
-                    for action in issue.recovery_actions
-                    if action.action_type == REMOVE_STAGED_SOURCE
-                ),
-                None,
-            )
-        order_id = _statement_issue_order_id(issue, tuple(known_order_ids))
-        if order_id is None:
-            statement_issues.append(issue)
-            continue
-        grouped.setdefault(order_id, []).append(issue)
-
-    return _StatementIssuePresentation(
-        order_groups=tuple(
-            _StatementOrderIssueGroup(order_id, tuple(order_issues))
-            for order_id, order_issues in grouped.items()
+    queue = build_exception_work_queue(result)
+    _render_needs_attention_queue(
+        queue,
+        key_prefix=(
+            "statement_exception_queue"
+            if result.source_type == SHOPEE_WEEKLY_STATEMENT
+            else "invoice_exception_queue"
         ),
-        statement_issues=tuple(statement_issues),
-        removal_action=removal_action,
     )
 
 
-def _statement_issue_order_id(
-    issue: ValidationIssue,
-    known_order_ids: tuple[str, ...],
-) -> str | None:
-    evidence_order_id = str(issue.evidence.get("order_id") or "").strip()
-    if evidence_order_id:
-        return evidence_order_id
-    affected_item = str(issue.affected_item or "").strip()
-    for order_id in known_order_ids:
-        if affected_item == order_id or affected_item.startswith(f"{order_id} /"):
-            return order_id
-        if issue.reason.startswith(f"{order_id}:"):
-            return order_id
-    return None
-
-
-def _render_weekly_statement_needs_attention(
-    result: ImportResult,
-    issues: tuple[ValidationIssue, ...],
+def _render_needs_attention_queue(
+    queue: ExceptionWorkQueue,
     *,
-    include_status: bool = True,
+    key_prefix: str,
+    allow_recovery: bool = True,
 ) -> None:
-    presentation = _statement_issue_presentation(result, issues)
-    affected_count = len(presentation.order_groups)
-    if include_status:
-        st.error(
-            "**Statement needs attention**\n\n"
-            f"{affected_count} order{'s' if affected_count != 1 else ''} contain "
-            "unresolved reconciliation issues. Review the affected orders and "
-            "Statement issues before this Statement can be committed.",
-            icon=":material/error:",
-        )
+    """Render one compact entry point while retaining every original issue."""
 
-    if presentation.statement_issues:
-        st.subheader("Statement issues")
-        st.dataframe(
-            [
-                {
-                    "Status": "Needs review" if issue.blocking else "Warning",
-                    "Issue": issue.reason,
-                }
-                for issue in presentation.statement_issues
-            ],
-            hide_index=True,
-            height=min(320, 36 * (len(presentation.statement_issues) + 1)),
-        )
-        with st.expander("Statement technical details", expanded=False):
-            _render_statement_issue_evidence(presentation.statement_issues)
-
-    if not presentation.order_groups:
+    if not queue.items:
         return
-    st.subheader("Affected orders")
-    order_ids = tuple(group.order_id for group in presentation.order_groups)
-    rows = [
-        {
-            "Order ID": group.order_id,
-            "Status": (
-                "Needs review"
-                if any(issue.blocking for issue in group.issues)
-                else "Warning"
-            ),
-            "Issue Count": len(group.issues),
-            "Issue Summary": _statement_issue_summary(group),
-            "Action": "View details",
-        }
-        for group in presentation.order_groups
-    ]
+    st.subheader("Needs Attention")
+    st.caption(
+        f"{queue.source_issue_count} issue"
+        f"{'s' if queue.source_issue_count != 1 else ''} across "
+        f"{len(queue.items)} work item{'s' if len(queue.items) != 1 else ''}. "
+        "Select an item to inspect its original evidence and available action."
+    )
+    item_keys = tuple(item.key for item in queue.items)
+    click_key = f"{key_prefix}_click"
     st.dataframe(
-        rows,
+        [
+            {
+                "Status": "Blocking" if item.blocking else "Review",
+                "Scope": item.scope,
+                "Order ID": item.order_id or "—",
+                "Source": item.source or "—",
+                "Platform": item.platform or "—",
+                "Issues": item.issue_count,
+                "Summary": item.summary,
+                "Available action": item.action_hint,
+                "Action": "View details",
+            }
+            for item in queue.items
+        ],
         hide_index=True,
-        height=min(420, 36 * (len(rows) + 1)),
+        height=min(420, 36 * (len(queue.items) + 1)),
         column_config={
             "Order ID": st.column_config.TextColumn("Order ID", pinned=True),
-            "Issue Count": st.column_config.NumberColumn("Issue Count", format="%d"),
+            "Issues": st.column_config.NumberColumn("Issues", format="%d"),
             "Action": st.column_config.ButtonColumn(
                 "Action",
                 type="tertiary",
-                on_click=_select_statement_issue_order,
-                args=(order_ids,),
-                key="weekly_statement_issue_order_click",
+                on_click=_select_exception_queue_item,
+                args=(item_keys, click_key, f"{key_prefix}_selected"),
+                key=click_key,
             ),
         },
     )
-    selected_order_id = st.session_state.get("weekly_statement_issue_order_id")
-    selected = next(
-        (
-            group
-            for group in presentation.order_groups
-            if group.order_id == selected_order_id
-        ),
-        None,
-    )
-    if selected is None:
-        return
-    with st.container(border=True):
-        st.write(f"**{selected.order_id}**")
-        st.caption(f"{len(selected.issues)} issue{'s' if len(selected.issues) != 1 else ''}")
-        st.write("Issues")
-        for issue in selected.issues:
-            st.markdown(f"- {issue.reason}")
-        with st.expander("Technical details", expanded=False):
-            _render_statement_issue_evidence(selected.issues)
+    selected_key = st.session_state.get(f"{key_prefix}_selected")
+    selected = next((item for item in queue.items if item.key == selected_key), None)
+    if selected is None and len(queue.items) == 1:
+        selected = queue.items[0]
+    if selected is not None:
+        _render_exception_queue_detail(
+            selected,
+            key_prefix=key_prefix,
+            allow_recovery=allow_recovery,
+        )
 
 
-def _statement_issue_summary(group: _StatementOrderIssueGroup) -> str:
-    first = group.issues[0].reason
-    prefix = f"{group.order_id}:"
-    if first.startswith(prefix):
-        first = first[len(prefix):].strip()
-    if len(first) > 100:
-        first = f"{first[:97].rstrip()}..."
-    remaining = len(group.issues) - 1
-    return f"{first} +{remaining} more" if remaining else first
-
-
-def _select_statement_issue_order(order_ids: tuple[str, ...]) -> None:
-    click = st.session_state.get("weekly_statement_issue_order_click")
+def _select_exception_queue_item(
+    item_keys: tuple[str, ...],
+    click_key: str,
+    selected_key: str,
+) -> None:
+    click = st.session_state.get(click_key)
     if click is None:
         return
     try:
         row = int(click["row"])
     except (KeyError, TypeError, ValueError):
         return
-    if 0 <= row < len(order_ids):
-        st.session_state["weekly_statement_issue_order_id"] = order_ids[row]
+    if 0 <= row < len(item_keys):
+        st.session_state[selected_key] = item_keys[row]
 
 
-def _render_statement_issue_evidence(
-    issues: tuple[ValidationIssue, ...],
+def _render_exception_queue_detail(
+    item: ExceptionPresentationItem,
+    *,
+    key_prefix: str,
+    allow_recovery: bool,
 ) -> None:
-    for index, issue in enumerate(issues, start=1):
-        st.caption(f"Issue {index}: {issue.reason}")
-        if issue.evidence:
-            st.write(dict(issue.evidence))
-        if issue.suggested_action:
-            st.caption(f"Suggested action: {issue.suggested_action}")
+    with st.container(border=True):
+        st.write(f"**{item.title}**")
+        context = [item.scope]
+        if item.source:
+            context.append(f"Source: {item.source}")
+        if item.platform:
+            context.append(f"Platform: {item.platform}")
+        st.caption(" · ".join(context))
+        for issue in item.issues:
+            st.markdown(f"- {issue.reason}")
+        with st.expander("Original issue evidence", expanded=False):
+            for index, issue in enumerate(item.issues, start=1):
+                st.caption(f"Issue {index}: {issue.reason}")
+                if issue.evidence:
+                    st.write(dict(issue.evidence))
+        categories = {issue.category for issue in item.issues}
+        if "manual_review" in categories:
+            st.caption("Use the existing Manual Review form below to resolve this item.")
+        if not allow_recovery:
+            return
+        if categories == {"duplicate"}:
+            _render_duplicate_queue_actions(item, key_prefix=key_prefix)
+        else:
+            _render_queue_recovery_actions(item, key_prefix=key_prefix)
 
 
-def _render_consolidated_duplicates(duplicate_warnings: tuple[ValidationIssue, ...]) -> None:
-    count = len(duplicate_warnings)
-    st.info(
-        f"**Duplicate Orders Skipped ({count} file{'s' if count > 1 else ''})** — "
-        "These orders were already detected in the batch and safely skipped during import. "
-        "They do not affect accepted totals or validation readiness.",
-        icon=":material/info:",
-    )
-    duplicate_sources = [
-        str(w.affected_item or "").strip()
-        for w in duplicate_warnings
-        if w.affected_item
-    ]
-    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
-        _render_weekly_statement_duplicate_removal(duplicate_sources)
-    else:
-        removal_plan = plan_duplicate_source_removal(
-            st.session_state,
-            duplicate_sources,
-        )
-        with st.container(horizontal=True):
-            if removal_plan.safe_sources and st.button(
-                f"Remove {len(removal_plan.safe_sources)} safe duplicate source(s)",
-                icon=":material/delete_sweep:",
-                key="remove_all_duplicate_sources",
+def _render_queue_recovery_actions(
+    item: ExceptionPresentationItem,
+    *,
+    key_prefix: str,
+) -> None:
+    actions = tuple(action for action in item.recovery_actions if action.destructive)
+    if not actions:
+        return
+    st.caption("Source recovery")
+    with st.container(horizontal=True):
+        for action in actions:
+            if st.button(
+                action.label,
+                icon=":material/delete_outline:",
+                key=f"{key_prefix}_{item.key}_{action.action_id}",
+                disabled=not action.allowed,
             ):
-                _queue_bulk_recovery(
-                    list(removal_plan.safe_sources),
-                    label="Remove safe duplicate sources",
-                    confirmation_kind="duplicate_sources",
-                )
-        if removal_plan.retained_sources:
-            st.caption(
-                "Some duplicate PDFs also contain valid or reviewable orders, so "
-                "they are being kept. Duplicate orders are already skipped "
-                "automatically."
-            )
-    with st.expander(f"View skipped duplicate files ({count})", expanded=False):
-        st.dataframe(
-            [
-                {
-                    "Affected Source": w.affected_item or "Unavailable",
-                    "Reason": w.reason,
-                }
-                for w in duplicate_warnings
-            ],
-            hide_index=True,
+                st.session_state.pending_validation_recovery_action = action
+                st.rerun()
+
+
+def _render_duplicate_queue_actions(
+    item: ExceptionPresentationItem,
+    *,
+    key_prefix: str,
+) -> None:
+    duplicate_sources = tuple(
+        dict.fromkeys(
+            str(action.affected_item).strip()
+            for action in item.recovery_actions
+            if action.affected_item
+        )
+    )
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        _render_weekly_statement_duplicate_removal(list(duplicate_sources))
+        return
+    removal_plan = plan_duplicate_source_removal(st.session_state, duplicate_sources)
+    if removal_plan.safe_sources and st.button(
+        f"Remove {len(removal_plan.safe_sources)} safe duplicate source(s)",
+        icon=":material/delete_sweep:",
+        key=f"{key_prefix}_remove_safe_duplicates",
+    ):
+        _queue_bulk_recovery(
+            list(removal_plan.safe_sources),
+            label="Remove safe duplicate sources",
+            confirmation_kind="duplicate_sources",
+        )
+    if removal_plan.retained_sources:
+        st.caption(
+            "Some duplicate PDFs also contain valid or reviewable orders, so "
+            "they are being kept. Duplicate orders are already skipped automatically."
         )
 
 
@@ -808,43 +722,6 @@ def _render_weekly_statement_duplicate_removal(
         st.session_state.pending_validation_recovery_action = action
         st.session_state.pending_validation_recovery_context = "remove_statement"
         st.rerun()
-
-
-def _render_validation_issue(
-    issue: ValidationIssue,
-    *,
-    index: int,
-    is_blocking: bool,
-    show_message: bool = True,
-) -> None:
-    if show_message:
-        message = f"{'Needs attention' if is_blocking else 'Warning'} — {issue.reason}"
-        if is_blocking:
-            st.error(message, icon=":material/error:")
-        else:
-            st.warning(message, icon=":material/warning:")
-    if issue.affected_item:
-        st.caption(f"Affected file or order: {issue.affected_item}")
-    if not issue.recovery_actions:
-        return
-    with st.container(horizontal=True):
-        for action in issue.recovery_actions:
-            if st.button(
-                action.label,
-                icon=":material/visibility:" if action.action_type == VIEW_DETAILS else ":material/delete_outline:",
-                key=f"recovery_action_{index}_{action.action_id}",
-                disabled=not action.allowed,
-            ):
-                if action.action_type == VIEW_DETAILS:
-                    st.session_state.validation_recovery_detail = action.action_id
-                else:
-                    st.session_state.pending_validation_recovery_action = action
-                st.rerun()
-    if st.session_state.get("validation_recovery_detail") == next(
-        (action.action_id for action in issue.recovery_actions if action.action_type == VIEW_DETAILS),
-        None,
-    ):
-        _render_issue_details(issue)
 
 
 def _render_issue_details(issue: ValidationIssue) -> None:
@@ -1085,21 +962,15 @@ def _render_recovery_notice() -> None:
     if notice:
         st.success(f"Recovery complete — {notice}", icon=":material/check_circle:")
 
-def _render_recovery_area() -> None:
-    st.subheader("Available recovery actions")
-    st.caption("Use the available action to remove the identified source from the current batch and check it again. Original source files remain unchanged.")
-
-
 def _render_manual_review_resolution() -> None:
     synchronize_correction_drafts(st.session_state)
     reviews = [item for item in st.session_state.get("reviews", []) if str(item.get("status", "")).strip() in {"", "Manual Review"}]
-    st.subheader("Manual Review")
     notice = st.session_state.pop("manual_resolution_notice", None)
     if notice:
         (st.success if notice.startswith("Correction applied") else st.warning)(notice)
     if not reviews:
-        st.caption("No current-batch sources require Manual Review.")
         return
+    st.subheader("Resolve Manual Review")
 
     review_sources = [str(item.get("source_pdf") or "").strip() for item in reviews]
     unfixable_reviews = [r for r in reviews if resolution_plan(r) is None]
@@ -1495,6 +1366,10 @@ def _render_reconciliation_step() -> None:
                 else _historical_forward_reason(entries)
             ),
         )
+        _render_needs_attention_queue(
+            build_historical_exception_work_queue(entries),
+            key_prefix="historical_exception_queue",
+        )
         _render_historical_status_details(
             entries,
             allow_removal=True,
@@ -1555,7 +1430,6 @@ def _render_review_and_commit_step() -> None:
     if _has_pending_recovery():
         _render_recovery_confirmation()
     result = _current_import_result()
-    _render_source_summary(result)
     readiness = result.commit_readiness
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
@@ -1585,14 +1459,20 @@ def _render_review_and_commit_step() -> None:
                 "Return to Reconcile and resolve/remove all non-NEW sources before Commit.",
                 icon=":material/warning:",
             )
-        with st.container(horizontal=True):
-            _render_back_button(4, key="invoice_commit_back")
-            _render_invoice_exit_button(key="exit_invoice_commit")
+        _render_needs_attention_queue(
+            build_historical_exception_work_queue(entries),
+            key_prefix="historical_commit_exception_queue",
+            allow_recovery=False,
+        )
         _render_historical_invoice_commit()
+        _render_back_button(4, key="invoice_commit_back")
+        _render_invoice_exit_button(key="exit_invoice_commit")
+        _render_source_summary(result)
         return
     if st.session_state.get("weekly_statement_commit_completed"):
         st.success("Statement Commit Complete.", icon=":material/check_circle:")
         _render_back_button(4, key="completed_statement_back")
+        _render_source_summary(result)
         return
     review = _weekly_review()
     if (
@@ -1611,9 +1491,10 @@ def _render_review_and_commit_step() -> None:
                 "No row-to-item allocation has been invented for GROUP evidence.",
                 icon=":material/info:",
             )
-        with st.container(horizontal=True):
-            _render_back_button(4, key="ready_statement_commit_back")
-            _render_statement_exit_button(key="exit_ready_statement_commit")
+        _render_statement_commit(readiness.ready)
+        _render_back_button(4, key="ready_statement_commit_back")
+        _render_statement_exit_button(key="exit_ready_statement_commit")
+        _render_source_summary(result)
     else:
         affected_orders, unresolved_issues = _statement_blocker_counts(result)
         st.error(
@@ -1632,16 +1513,21 @@ def _render_review_and_commit_step() -> None:
             )
         elif not unresolved_issues and readiness.reasons:
             st.caption(readiness.reasons[0])
-        with st.container(horizontal=True):
-            if st.button(
-                "Back to Statement Review",
-                icon=":material/arrow_back:",
-                key="back_to_statement_review",
-            ):
-                _set_step(3)
-                st.rerun()
-            _render_statement_exit_button(key="exit_blocked_statement_commit")
-    _render_statement_commit(readiness.ready)
+        _render_needs_attention_queue(
+            build_exception_work_queue(result),
+            key_prefix="statement_commit_exception_queue",
+            allow_recovery=False,
+        )
+        _render_statement_commit(readiness.ready)
+        if st.button(
+            "Back to Statement Review",
+            icon=":material/arrow_back:",
+            key="back_to_statement_review",
+        ):
+            _set_step(3)
+            st.rerun()
+        _render_statement_exit_button(key="exit_blocked_statement_commit")
+        _render_source_summary(result)
 
 
 def _render_source_summary(result: ImportResult) -> None:
@@ -1699,7 +1585,14 @@ def _render_historical_invoice_commit() -> None:
     if refresh_required:
         st.warning("Return to Reconcile and revalidate historical status before retrying.")
     clean_batch = _historical_commit_ready(entries)
-    if st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", type="primary", disabled=not clean_batch or refresh_required, key="uat2_historical_commit"):
+    commit_allowed = clean_batch and not refresh_required
+    if st.button(
+        "Commit Accepted Shopee Invoices",
+        icon=":material/upload:",
+        type="primary" if commit_allowed else "secondary",
+        disabled=not commit_allowed,
+        key="uat2_historical_commit",
+    ):
         try:
             repository = configured_uat2_data_settings().create_repository()
             outcome = import_new_staging(entries, repository)
@@ -1762,51 +1655,54 @@ def _render_historical_status_details(
     allow_removal: bool,
     key_prefix: str,
 ) -> None:
-    st.subheader("Historical Invoice Status")
     if not entries:
         st.caption("No target Shopee Invoice source is ready for historical classification.")
         return
-    st.dataframe(
-        [
-            {
-                "Source PDF": entry.source_filename,
-                "Order ID": entry.order_id or "N/A",
-                "Historical Status": entry.status.value,
-                "Reason / Message": entry.message or "Ready for Review & Commit.",
-            }
-            for entry in entries
-        ],
-        hide_index=True,
-    )
-    if not allow_removal:
-        return
-    needs_review_sources = [
-        entry.source_filename
-        for entry in entries
-        if entry.status is IntakeStatus.NEEDS_REVIEW and entry.source_filename
-    ]
-    if needs_review_sources and st.button(
-        "Remove all NEEDS_REVIEW sources from current batch",
-        icon=":material/delete_sweep:",
-        key=f"{key_prefix}_remove_all_needs_review",
-    ):
-        _queue_bulk_recovery(needs_review_sources, label="Remove all NEEDS_REVIEW sources")
-    for entry in entries:
-        if entry.status is IntakeStatus.NEW:
-            continue
-        actions = recovery_actions_for_source(
-            source=entry.source_filename,
-            action_type=REMOVE_SOURCE,
-            remove_label="Remove source from current batch",
-            include_details=False,
+    with st.expander("Historical classification details", expanded=False):
+        st.dataframe(
+            [
+                {
+                    "Source PDF": entry.source_filename,
+                    "Order ID": entry.order_id or "N/A",
+                    "Historical Status": entry.status.value,
+                    "Reason / Message": entry.message or "Ready for Review & Commit.",
+                }
+                for entry in entries
+            ],
+            hide_index=True,
         )
-        if actions and st.button(
-            f"Remove {entry.source_filename} from current batch",
-            icon=":material/delete_outline:",
-            key=f"{key_prefix}_{entry.staging_id}",
+        if not allow_removal:
+            return
+        needs_review_sources = [
+            entry.source_filename
+            for entry in entries
+            if entry.status is IntakeStatus.NEEDS_REVIEW and entry.source_filename
+        ]
+        if needs_review_sources and st.button(
+            "Remove all NEEDS_REVIEW sources from current batch",
+            icon=":material/delete_sweep:",
+            key=f"{key_prefix}_remove_all_needs_review",
         ):
-            st.session_state.pending_validation_recovery_action = actions[0]
-            st.rerun()
+            _queue_bulk_recovery(
+                needs_review_sources,
+                label="Remove all NEEDS_REVIEW sources",
+            )
+        for entry in entries:
+            if entry.status is IntakeStatus.NEW:
+                continue
+            actions = recovery_actions_for_source(
+                source=entry.source_filename,
+                action_type=REMOVE_SOURCE,
+                remove_label="Remove source from current batch",
+                include_details=False,
+            )
+            if actions and st.button(
+                f"Remove {entry.source_filename} from current batch",
+                icon=":material/delete_outline:",
+                key=f"{key_prefix}_{entry.staging_id}",
+            ):
+                st.session_state.pending_validation_recovery_action = actions[0]
+                st.rerun()
 
 
 def _historical_commit_ready(entries: tuple[Any, ...]) -> bool:
@@ -1941,22 +1837,23 @@ def _render_statement_commit(ready: bool) -> None:
     if review is None:
         st.button("Commit Statement", disabled=True, key="statement_commit")
         return
+    commit_allowed = (
+        ready
+        and review.commit_ready
+        and not _statement_review_stale()
+    )
     with st.container(horizontal=True):
+        commit_clicked = st.button(
+            "Commit Statement",
+            type="primary" if commit_allowed else "secondary",
+            icon=":material/upload:",
+            disabled=not commit_allowed,
+            key="statement_commit",
+        )
         refresh_clicked = st.button(
             "Refresh validation",
             icon=":material/refresh:",
             key="statement_refresh_validation",
-        )
-        commit_clicked = st.button(
-            "Commit Statement",
-            type="primary",
-            icon=":material/upload:",
-            disabled=(
-                not ready
-                or not review.commit_ready
-                or _statement_review_stale()
-            ),
-            key="statement_commit",
         )
     if refresh_clicked:
         if _refresh_statement_review(review):
@@ -2037,19 +1934,19 @@ def _render_statement_next_step(
 
     allowed, disabled_reason = _statement_forward_gate()
     with st.container(horizontal=True):
+        next_clicked = st.button(
+            label,
+            type="primary" if allowed else "secondary",
+            icon=":material/arrow_forward:",
+            key=f"statement_next_{step}",
+            disabled=not allowed,
+        )
         back_clicked = st.button(
             "Back",
             icon=":material/arrow_back:",
             key=f"statement_back_{step}",
         )
-        _render_statement_exit_button(key=f"statement_exit_before_{step}")
-        next_clicked = st.button(
-            label,
-            type="primary",
-            icon=":material/arrow_forward:",
-            key=f"statement_next_{step}",
-            disabled=not allowed,
-        )
+    _render_statement_exit_button(key=f"statement_exit_before_{step}")
     if not allowed and disabled_reason:
         st.caption(disabled_reason)
     if back_clicked:
@@ -2072,18 +1969,18 @@ def _render_statement_next_step(
 
 def _render_statement_resume_actions(*, back_step: int) -> None:
     with st.container(horizontal=True):
-        back_clicked = st.button(
-            "Back",
-            icon=":material/arrow_back:",
-            key="statement_resume_back",
-        )
-        _render_statement_exit_button(key="statement_resume_exit")
         continue_clicked = st.button(
             "Continue to validate",
             type="primary",
             icon=":material/arrow_forward:",
             key="statement_resume_validation",
         )
+        back_clicked = st.button(
+            "Back",
+            icon=":material/arrow_back:",
+            key="statement_resume_back",
+        )
+    _render_statement_exit_button(key="statement_resume_exit")
     if back_clicked:
         _set_step(back_step)
         st.rerun()
@@ -2117,14 +2014,27 @@ def _statement_forward_gate() -> tuple[bool, str | None]:
 
 def _statement_blocker_counts(result: ImportResult) -> tuple[int, int]:
     issues = result.validation.blocking_issues
-    presentation = _statement_issue_presentation(result, issues)
-    return len(presentation.order_groups), len(issues)
+    queue = build_exception_work_queue(result)
+    affected_orders = {
+        item.order_id
+        for item in queue.items
+        if item.order_id and any(issue.blocking for issue in item.issues)
+    }
+    return len(affected_orders), len(issues)
 
 
 def _statement_removal_action() -> RecoveryAction | None:
     result = _current_import_result()
-    issues = (*result.validation.blocking_issues, *result.validation.warnings)
-    action = _statement_issue_presentation(result, issues).removal_action
+    queue = build_exception_work_queue(result)
+    action = next(
+        (
+            action
+            for item in queue.items
+            for action in item.recovery_actions
+            if action.action_type == REMOVE_STAGED_SOURCE
+        ),
+        None,
+    )
     if action is not None:
         return action
     stage = _weekly_stage()
@@ -2148,6 +2058,7 @@ def _render_statement_exit_button(*, key: str) -> None:
     action = _statement_removal_action()
     if action is None:
         return
+    st.caption("Source recovery")
     if st.button(
         "Exit Statement Review",
         icon=":material/logout:",
@@ -2164,6 +2075,7 @@ def _render_invoice_exit_button(*, key: str) -> None:
     action = plan_current_invoice_staging_exit(st.session_state)
     if action is None:
         return
+    st.caption("Source recovery")
     if st.button(
         "Exit Invoice Import",
         icon=":material/logout:",
@@ -2303,7 +2215,7 @@ def _render_blocked_invoice_destination(step: int) -> None:
         ):
             _set_step(2)
             st.rerun()
-        _render_invoice_exit_button(key=f"blocked_invoice_exit_{step}")
+    _render_invoice_exit_button(key=f"blocked_invoice_exit_{step}")
 
 
 def _render_inconsistent_statement_destination(step: int) -> None:
@@ -2320,6 +2232,7 @@ def _render_inconsistent_statement_destination(step: int) -> None:
     with st.container(horizontal=True):
         if st.button(
             "Clear incomplete Statement attempt",
+            type="primary",
             icon=":material/refresh:",
             key=f"clear_inconsistent_statement_{step}",
         ):
@@ -2346,6 +2259,7 @@ def _render_unresolved_invoice_upload_actions(*, back_step: int) -> None:
     with st.container(horizontal=True):
         if st.button(
             "Clear incomplete upload attempt",
+            type="primary",
             icon=":material/refresh:",
             key=f"clear_invoice_upload_attempt_{back_step}",
         ):
@@ -2360,7 +2274,7 @@ def _render_unresolved_invoice_upload_actions(*, back_step: int) -> None:
             reset_invoice_upload_attempt(st.session_state)
             _set_step(back_step)
             st.rerun()
-        _render_invoice_exit_button(key=f"invoice_exit_upload_{back_step}")
+    _render_invoice_exit_button(key=f"invoice_exit_upload_{back_step}")
 
 
 def _render_invoice_upload_back_actions(*, back_step: int) -> None:
@@ -2376,9 +2290,7 @@ def _render_invoice_upload_back_actions(*, back_step: int) -> None:
                 reset_invoice_upload_attempt(st.session_state)
             _set_step(back_step)
             st.rerun()
-        _render_invoice_exit_button(
-            key=f"invoice_exit_upload_{back_step}"
-        )
+    _render_invoice_exit_button(key=f"invoice_exit_upload_{back_step}")
 
 
 def _render_next_step(
@@ -2391,6 +2303,13 @@ def _render_next_step(
     disabled_reason: str | None = None,
 ) -> None:
     with st.container(horizontal=True):
+        next_clicked = st.button(
+            label,
+            type="primary" if allowed else "secondary",
+            icon=":material/arrow_forward:",
+            key=f"data_import_next_{step}",
+            disabled=not allowed,
+        )
         back_clicked = (
             st.button(
                 "Back",
@@ -2400,15 +2319,8 @@ def _render_next_step(
             if back_step is not None
             else False
         )
-        if include_invoice_exit:
-            _render_invoice_exit_button(key=f"invoice_exit_before_{step}")
-        next_clicked = st.button(
-            label,
-            type="primary",
-            icon=":material/arrow_forward:",
-            key=f"data_import_next_{step}",
-            disabled=not allowed,
-        )
+    if include_invoice_exit:
+        _render_invoice_exit_button(key=f"invoice_exit_before_{step}")
     if not allowed and disabled_reason:
         st.caption(disabled_reason)
     if back_clicked:

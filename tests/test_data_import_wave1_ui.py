@@ -89,10 +89,13 @@ def test_blocked_validate_is_blocker_first_and_keeps_forward_gate(tmp_path, monk
         button for button in app.button if button.label == "Continue to reconcile"
     )
     assert continue_button.disabled is True
+    assert continue_button.proto.type == "secondary"
     assert _position(app, element_type="error", text="Needs Attention") < _position(
         app, element_type="button", text="Continue to reconcile"
     ) < _position(app, element_type="subheader", text="Current batch summary")
-    assert _position(app, element_type="error", text="PDF processing failed") < _position(
+    queue = next(frame.value for frame in app.dataframe if "Issues" in frame.value.columns)
+    assert queue.iloc[0]["Summary"] == "PDF processing failed."
+    assert _position(app, element_type="subheader", text="Needs Attention") < _position(
         app, element_type="subheader", text="Current Batch — Order Level Data"
     )
 
@@ -113,6 +116,7 @@ def test_ready_validate_puts_usable_continue_next_to_status(tmp_path, monkeypatc
         button for button in app.button if button.label == "Continue to reconcile"
     )
     assert continue_button.disabled is False
+    assert continue_button.proto.type == "primary"
     assert _position(app, element_type="success", text="Ready") < _position(
         app, element_type="button", text="Continue to reconcile"
     ) < _position(app, element_type="subheader", text="Current batch summary")
