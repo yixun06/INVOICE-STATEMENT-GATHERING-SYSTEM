@@ -40,7 +40,7 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
     rows = [
         ProductSummaryRow(
             number=1,
-            nav="060328",
+            nav="5000000",
             product_name="Oil | 1000ml",
             uom=None,
             unit_price=Decimal("42.90"),
@@ -52,7 +52,7 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
         ),
         ProductSummaryRow(
             number=2,
-            nav="060328",
+            nav="5000000",
             product_name="Oil | 1000ml",
             uom=None,
             unit_price=Decimal("43.90"),
@@ -154,8 +154,8 @@ def test_staging_mapper_is_one_to_one_and_conserves_golden_quantity():
         summary.product_rows[0].unit_price,
     )
     assert [(row.nav, row.unit_price_rsp_excl_gst) for row in rows[:2]] == [
-        ("060328", Decimal("42.90")),
-        ("060328", Decimal("43.90")),
+        ("5000000", Decimal("42.90")),
+        ("5000000", Decimal("43.90")),
     ]
     assert rows[2].nav == "000123"
 
@@ -250,8 +250,8 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 2).value.date() == GENERATION_DATE
     assert staging.cell(2, 11).value.date() == GENERATION_DATE
     assert staging.cell(2, 12).value.date() == GENERATION_DATE
-    assert staging.cell(2, 6).value == "060328"
-    assert staging.cell(3, 6).value == "060328"
+    assert staging.cell(2, 6).value == "5000000"
+    assert staging.cell(3, 6).value == "5000000"
     assert staging.cell(4, 6).value == "000123"
     assert staging.cell(2, 8).value == 539
     assert staging.cell(2, 10).value == 42.9
@@ -273,6 +273,6 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 5).alignment.horizontal == "left"
     assert staging.cell(2, 5).alignment.vertical == "top"
     assert sum(staging.cell(row, 8).value for row in range(2, 179)) == 715
-    assert product.cell(2, 2).value == "060328"
+    assert product.cell(2, 2).value == "5000000"
     assert product.cell(2, 6).value == 42.9
     assert financial.cell(2, 2).value == 14767.32

@@ -236,6 +236,25 @@ def test_normal_items_with_different_seller_skus_remain_separate():
     assert summary.source_items[0].actual_selling_amount_basis is ActualSellingAmountBasis.DIRECT
 
 
+def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
+    summary = build_weekly_billing_summary(
+        _dataset(
+            _item("ORDER-1", 0, nav="5000000", sku="SKU-A", variation="Original", price="10.00"),
+            _item("ORDER-2", 0, nav="5000000", sku="SKU-B", variation="Original", price="10.00"),
+            _item("ORDER-3", 0, nav="5000000", sku="SKU-A", variation="Large", price="10.00"),
+            _item("ORDER-4", 0, nav="5000000", sku="SKU-A", variation="Original", price="11.00"),
+        ),
+        PERIOD,
+    )
+
+    assert len(summary.product_rows) == 4
+    assert {row.nav for row in summary.product_rows} == {"5000000"}
+    assert {row.unit_price for row in summary.product_rows} == {
+        Decimal("10.00"),
+        Decimal("11.00"),
+    }
+
+
 @pytest.mark.parametrize(
     ("case", "first", "second", "expected_rows", "description"),
     (
@@ -282,9 +301,9 @@ def test_normal_items_with_different_seller_skus_remain_separate():
             "Simply Natural Organic Handmade Sweet Potato Mee Sua 200g Malaysia | Sweet Potato Mee Sua",
         ),
         (
-            "L-07 keeps historical price changes separate",
-            _item("ORDER-1", 0, nav="060328", sku="9555208105145-1Lter", variation="1000ml", price="42.90"),
-            _item("ORDER-2", 0, nav="060328", sku="9555208105145-1Lter", variation="1000ml", price="43.90"),
+            "L-07 keeps placeholder NAV historical price changes separate",
+            _item("ORDER-1", 0, nav="5000000", sku="9555208105145-1Lter", variation="1000ml", price="42.90"),
+            _item("ORDER-2", 0, nav="5000000", sku="9555208105145-1Lter", variation="1000ml", price="43.90"),
             2,
             None,
         ),
