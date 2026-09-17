@@ -16,6 +16,10 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
 from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
+from src.invoice_app.services.product_master_source import (
+    ProductMasterSourceError,
+    load_configured_product_price_master,
+)
 from src.invoice_app.services.weekly_billing import (
     WeeklyBillingDataset,
     WeeklyBillingError,
@@ -24,6 +28,7 @@ from src.invoice_app.services.weekly_billing import (
 from src.invoice_app.services.weekly_billing_export import (
     export_weekly_billing_report,
 )
+from src.invoice_app.services.weekly_billing_staging import StagingDataError
 
 
 WEEKLY_BILLING_PAGE = "Weekly Billing"
@@ -107,7 +112,19 @@ def render_weekly_billing(
         },
     )
     _render_financial_readiness(report)
-    export_bytes = export_weekly_billing_report(report)
+    try:
+        product_master, _source_label = load_configured_product_price_master()
+    except ProductMasterSourceError as error:
+        st.error(f"Weekly Billing export is unavailable: {error}")
+        return
+    try:
+        export_bytes = export_weekly_billing_report(
+            report,
+            product_master_records=product_master.records,
+        )
+    except StagingDataError as error:
+        st.error(f"Weekly Billing export is unavailable: {error}")
+        return
     st.download_button(
         "Export Weekly Billing Excel",
         export_bytes,

@@ -86,16 +86,16 @@ class StagingDataRow:
     unit_price_rsp_excl_gst: Decimal
     order_date: date
     shipment_date: date
-    external_doc_no: int
+    external_doc_no: str
     customer_outlet_code: None
     business_unit_code_erp: str
     project_code_erp: str
-    transfer_to_code: int
+    transfer_to_code: None
     customer_remark: None
-    customer: None
-    usoft_code: None
-    usoft_product_description: None
-    plan_date: None
+    customer: str
+    usoft_code: str
+    usoft_product_description: str
+    plan_date: date
     am_pm: None
     secondary_type: None
     quantity_per_unit_of_measure: None

@@ -25,6 +25,7 @@ from src.invoice_app.services.weekly_billing_staging import (
     StagingDataError,
     build_staging_data_rows,
 )
+from src.invoice_app.services.product_price_master import ProductPriceMasterRecord
 
 
 PERIOD = BillingPeriod(
@@ -34,6 +35,51 @@ PERIOD = BillingPeriod(
     "a" * 64,
 )
 GENERATION_DATE = date(2026, 9, 15)
+
+
+def _product_master_records() -> tuple[ProductPriceMasterRecord, ...]:
+    return (
+        ProductPriceMasterRecord(
+            seller_sku="SKU-PLACEHOLDER",
+            parent_sku="",
+            product_name="Placeholder source row",
+            variation_name="",
+            unit_selling_price=Decimal("42.90"),
+            source_row=1,
+            nav_code="5000000",
+            usoft_product_description="Must not be exported for placeholder NAV",
+        ),
+        ProductPriceMasterRecord(
+            seller_sku="SKU-000123",
+            parent_sku="",
+            product_name="Identity fallback row",
+            variation_name="Original",
+            unit_selling_price=Decimal("10.00"),
+            source_row=2,
+            nav_code="000123",
+            usoft_product_description="USOFT Identity Product",
+        ),
+        ProductPriceMasterRecord(
+            seller_sku="SKU-000123-SECOND",
+            parent_sku="",
+            product_name="Same NAV second listing",
+            variation_name="",
+            unit_selling_price=Decimal("10.00"),
+            source_row=3,
+            nav_code="000123",
+            usoft_product_description="USOFT Identity Product",
+        ),
+        ProductPriceMasterRecord(
+            seller_sku="SKU-5000004",
+            parent_sku="",
+            product_name="Product 4",
+            variation_name="",
+            unit_selling_price=Decimal("1.00"),
+            source_row=4,
+            nav_code="5000004",
+            usoft_product_description="USOFT Product 4",
+        ),
+    )
 
 
 def _product_rows() -> tuple[ProductSummaryRow, ...]:
@@ -140,11 +186,15 @@ def _report() -> WeeklyBillingReport:
 def test_staging_mapper_is_one_to_one_and_conserves_golden_quantity():
     summary = _summary()
 
-    rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
+    rows = build_staging_data_rows(
+        summary,
+        generation_date=GENERATION_DATE,
+        product_master_records=_product_master_records(),
+    )
 
     assert len(summary.product_rows) == len(rows) == 177
     assert summary.total_quantity == sum(row.quantity for row in rows) == 715
-    assert {row.your_reference for row in rows} == {"DF20260831-20260906"}
+    assert {row.your_reference for row in rows} == {"SP202608310906"}
     assert {row.posting_date for row in rows} == {GENERATION_DATE}
     assert {row.order_date for row in rows} == {GENERATION_DATE}
     assert {row.shipment_date for row in rows} == {GENERATION_DATE}
@@ -158,11 +208,17 @@ def test_staging_mapper_is_one_to_one_and_conserves_golden_quantity():
         ("5000000", Decimal("43.90")),
     ]
     assert rows[2].nav == "000123"
+    assert rows[0].usoft_product_description == "N/A"
+    assert rows[1].usoft_product_description == "N/A"
+    assert rows[2].usoft_product_description == "USOFT Identity Product"
+    assert rows[3].usoft_product_description == "USOFT Product 4"
 
 
 def test_staging_mapper_applies_exact_erp_constants_and_blank_outlet():
     row = build_staging_data_rows(
-        _summary(), generation_date=GENERATION_DATE
+        _summary(),
+        generation_date=GENERATION_DATE,
+        product_master_records=_product_master_records(),
     )[0]
 
     assert (
@@ -176,7 +232,24 @@ def test_staging_mapper_applies_exact_erp_constants_and_blank_outlet():
         row.project_code_erp,
         row.external_doc_no,
         row.transfer_to_code,
-    ) == ("HC001543", "MYR", "ITEM", "JH02", "EA", None, "RETAIL", "JH02", 0, 0)
+        row.customer,
+        row.usoft_code,
+        row.plan_date,
+    ) == (
+        "HC001543",
+        "MYR",
+        "Item",
+        "JH02",
+        "EA",
+        None,
+        "RETAIL",
+        "JH02",
+        "Shopee",
+        None,
+        "RETAIL",
+        "5000000",
+        GENERATION_DATE,
+    )
 
 
 def test_staging_mapper_fails_when_quantity_control_differs():
@@ -186,7 +259,60 @@ def test_staging_mapper_fails_when_quantity_control_differs():
         build_staging_data_rows(
             replace(summary, total_quantity=714),
             generation_date=GENERATION_DATE,
+            product_master_records=_product_master_records(),
         )
+
+
+def test_staging_mapper_rejects_conflicting_descriptions_for_one_nav():
+    records = (
+        ProductPriceMasterRecord(
+            seller_sku="SKU-A", parent_sku="", product_name="A", variation_name="",
+            unit_selling_price=Decimal("1.00"), source_row=10, nav_code="000123",
+            usoft_product_description="Description A",
+        ),
+        ProductPriceMasterRecord(
+            seller_sku="SKU-B", parent_sku="", product_name="B", variation_name="",
+            unit_selling_price=Decimal("1.00"), source_row=11, nav_code="000123",
+            usoft_product_description="Description B",
+        ),
+    )
+
+    with pytest.raises(StagingDataError, match="conflicting USOFT product descriptions"):
+        build_staging_data_rows(
+            _summary(),
+            generation_date=GENERATION_DATE,
+            product_master_records=records,
+        )
+
+
+def test_staging_mapper_uses_approved_row_106_description_for_nav_4001971():
+    summary = replace(
+        _summary(),
+        product_rows=(
+            replace(_summary().product_rows[2], nav="4001971"),
+        ),
+        total_quantity=1,
+    )
+    records = (
+        ProductPriceMasterRecord(
+            seller_sku="SKU-ROW-1016", parent_sku="", product_name="Pumpkin", variation_name="",
+            unit_selling_price=Decimal("10.00"), source_row=1016, nav_code="4001971",
+            usoft_product_description="SN ORG Pumpkin Seed Cube BTL 150g",
+        ),
+        ProductPriceMasterRecord(
+            seller_sku="", parent_sku="PARENT-ROW-106", product_name="Pumpkin", variation_name="",
+            unit_selling_price=Decimal("10.00"), source_row=106, nav_code="4001971",
+            usoft_product_description="SN Org Pumpkin Seed Cube BTL 150g",
+        ),
+    )
+
+    rows = build_staging_data_rows(
+        summary,
+        generation_date=GENERATION_DATE,
+        product_master_records=records,
+    )
+
+    assert rows[0].usoft_product_description == "SN Org Pumpkin Seed Cube BTL 150g"
 
 
 def test_unified_workbook_writes_exact_staging_contract_and_types():
@@ -196,6 +322,7 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
             export_weekly_billing_report(
                 report,
                 generation_date=GENERATION_DATE,
+                product_master_records=_product_master_records(),
             )
         ),
         data_only=True,
@@ -238,15 +365,35 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.max_column == 26
     assert staging.freeze_panes is None
     assert staging.auto_filter.ref is None
-    assert staging.column_dimensions["A"].width == pytest.approx(20.28515625)
-    assert staging.column_dimensions["I"].width == pytest.approx(20.7109375)
-    assert staging.column_dimensions["U"].width == pytest.approx(55.140625)
+    expected_widths = {
+        "A": 27.28515625,
+        "B": 22.28515625,
+        "H": 18.85546875,
+        "I": 20.7109375,
+        "J": 23.140625,
+        "K": 26.5703125,
+        "M": 15.7109375,
+        "Q": 16.0,
+        "R": 16.85546875,
+        "T": 19.85546875,
+        "U": 66.7109375,
+        "Y": 23.42578125,
+        "Z": 15.0,
+    }
+    for column, width in expected_widths.items():
+        assert staging.column_dimensions[column].width == pytest.approx(width)
+    assert {
+        column
+        for column in expected_widths
+        if staging.column_dimensions[column].bestFit
+    } == {"A", "B", "H", "I", "J", "K", "M", "Q", "R", "T", "Y", "Z"}
     assert staging.cell(1, 1).font.name == "Calibri"
     assert staging.cell(1, 1).font.sz == 11
     assert staging.cell(1, 1).font.bold is True
+    assert staging.cell(1, 1).font.color.rgb == "FF000000"
     assert staging.cell(1, 1).alignment.horizontal == "left"
     assert staging.cell(1, 17).alignment.horizontal is None
-    assert staging.cell(2, 1).value == "DF20260831-20260906"
+    assert staging.cell(2, 1).value == "SP202608310906"
     assert staging.cell(2, 2).value.date() == GENERATION_DATE
     assert staging.cell(2, 11).value.date() == GENERATION_DATE
     assert staging.cell(2, 12).value.date() == GENERATION_DATE
@@ -256,9 +403,17 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 8).value == 539
     assert staging.cell(2, 10).value == 42.9
     assert staging.cell(3, 10).value == 43.9
+    assert staging.cell(2, 5).value == "Item"
+    assert staging.cell(2, 13).value == "Shopee"
     assert staging.cell(2, 14).value is None
-    assert staging.cell(2, 17).value == 0
-    assert all(staging.cell(2, column).value is None for column in range(18, 27))
+    assert staging.cell(2, 17).value is None
+    assert staging.cell(2, 18).value is None
+    assert staging.cell(2, 19).value == "RETAIL"
+    assert staging.cell(2, 20).value == "5000000"
+    assert staging.cell(2, 21).value == "N/A"
+    assert staging.cell(4, 21).value == "USOFT Identity Product"
+    assert staging.cell(2, 22).value.date() == GENERATION_DATE
+    assert all(staging.cell(2, column).value is None for column in range(23, 27))
     assert staging.cell(2, 2).data_type == "d"
     assert staging.cell(2, 6).data_type == "s"
     assert staging.cell(2, 8).data_type == "n"
@@ -270,6 +425,8 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 22).number_format == "yyyy\\-mm\\-dd"
     assert staging.cell(2, 5).font.name == "Arial"
     assert staging.cell(2, 5).font.sz == 10
+    assert staging.cell(2, 5).font.color.rgb == "FF000000"
+    assert staging.cell(2, 1).font.color.rgb == "FF000000"
     assert staging.cell(2, 5).alignment.horizontal == "left"
     assert staging.cell(2, 5).alignment.vertical == "top"
     assert sum(staging.cell(row, 8).value for row in range(2, 179)) == 715

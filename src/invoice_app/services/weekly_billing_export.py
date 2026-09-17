@@ -9,6 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from src.invoice_app.domain.weekly_billing import WeeklyBillingReport, WeeklyBillingSummary
+from src.invoice_app.services.product_price_master import ProductPriceMasterRecord
 from src.invoice_app.services.weekly_billing_staging import (
     STAGING_DATA_HEADERS,
     build_staging_data_rows,
@@ -78,6 +79,7 @@ def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
 def export_weekly_billing_report(
     report: WeeklyBillingReport,
     *,
+    product_master_records: tuple[ProductPriceMasterRecord, ...],
     generation_date: date | None = None,
 ) -> bytes:
     """Export the exact Product/Financial previews from one committed batch."""
@@ -90,6 +92,7 @@ def export_weekly_billing_report(
     staging_rows = build_staging_data_rows(
         report.product_summary,
         generation_date=export_date,
+        product_master_records=product_master_records,
     )
 
     workbook = Workbook()
@@ -137,7 +140,7 @@ def export_weekly_billing_report(
 def _write_staging_data(sheet, rows) -> None:
     sheet.append(STAGING_DATA_HEADERS)
     for column_index, cell in enumerate(sheet[1], start=1):
-        cell.font = Font(name="Calibri", size=11, bold=True)
+        cell.font = Font(name="Calibri", size=11, bold=True, color="FF000000")
         if column_index <= 16:
             cell.alignment = Alignment(horizontal="left")
     for row in rows:
@@ -170,29 +173,31 @@ def _write_staging_data(sheet, rows) -> None:
             row.line_discount_percent,
         ))
     for row_number in range(2, sheet.max_row + 1):
+        for cell in sheet[row_number]:
+            cell.font = Font(name="Calibri", size=11, color="FF000000")
         for column in (2, 11, 12, 22):
             sheet.cell(row_number, column).number_format = "yyyy\\-mm\\-dd"
             sheet.cell(row_number, column).alignment = Alignment(horizontal="right")
         for column in (8, 10, 13):
             sheet.cell(row_number, column).alignment = Alignment(horizontal="right")
         item_type = sheet.cell(row_number, 5)
-        item_type.font = Font(name="Arial", size=10)
+        item_type.font = Font(name="Arial", size=10, color="FF000000")
         item_type.alignment = Alignment(horizontal="left", vertical="top")
     sheet.sheet_format.defaultRowHeight = 15.75
     for column, width in {
-        "A": 20.28515625,
-        "B": 13,
+        "A": 27.28515625,
+        "B": 22.28515625,
         "C": 13,
         "D": 13,
         "E": 13,
         "F": 13,
         "G": 13,
-        "H": 13,
+        "H": 18.85546875,
         "I": 20.7109375,
-        "J": 13,
-        "K": 13,
+        "J": 23.140625,
+        "K": 26.5703125,
         "L": 13,
-        "M": 13,
+        "M": 15.7109375,
         "N": 13,
         "O": 13,
         "P": 13,
@@ -200,7 +205,7 @@ def _write_staging_data(sheet, rows) -> None:
         "R": 16.85546875,
         "S": 13,
         "T": 19.85546875,
-        "U": 55.140625,
+        "U": 66.7109375,
         "V": 13,
         "W": 13,
         "X": 13,
@@ -208,6 +213,8 @@ def _write_staging_data(sheet, rows) -> None:
         "Z": 15,
     }.items():
         sheet.column_dimensions[column].width = width
+    for column in ("A", "B", "H", "I", "J", "K", "M", "Q", "R", "T", "Y", "Z"):
+        sheet.column_dimensions[column].bestFit = True
 
 
 def _write_product_summary(sheet, summary: WeeklyBillingSummary) -> None:

@@ -91,6 +91,7 @@ financial = WeeklyBillingFinancialSummary(
     export_ready=True, validation_failures=(),
 )
 billing_ui.build_weekly_billing_report = lambda _dataset, _period: WeeklyBillingReport(product, financial)
+billing_ui.load_configured_product_price_master = lambda: (type("Master", (), {"records": ()})(), "Test")
 render_weekly_billing(dataset)
 """
     )
@@ -128,10 +129,10 @@ def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
         / "weekly_billing.py"
     ).read_text(encoding="utf-8").casefold()
 
-    assert "product_master" not in source
+    assert "load_configured_product_price_master" in source
     assert "process_pdf_file_with_outcome" not in source
     assert "file_uploader" not in source
     assert "create_repository" not in source
     assert "statement_financial_components" not in source
     assert "build_weekly_billing_report" in source
-    assert "export_weekly_billing_report(report)" in source
+    assert "product_master_records=product_master.records" in source

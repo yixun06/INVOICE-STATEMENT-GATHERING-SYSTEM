@@ -19,14 +19,29 @@ from src.invoice_app.services.product_price_master import PriceLookupStatus
 
 
 def _sheet_rows(*, include_price=True):
-    headers = ["Product Name", "Variation Name", "Parent SKU", "SKU"]
+    headers = [
+        "Product Name",
+        "Variation Name",
+        "Parent SKU",
+        "SKU",
+        "NAV CODE",
+        "USOFT product description",
+    ]
     if include_price:
         headers.append("Price")
     return [
         ["Shopee Product Listing"],
         headers,
-        ["Fresh Oil", "500ml", "000PARENT", "00123", "RM 12.50"],
-        ["Bad price", "", "PARENT-2", "SKU-2", "not a price"],
+        [
+            "Fresh Oil",
+            "500ml",
+            "000PARENT",
+            "00123",
+            "000456",
+            "USOFT Fresh Oil 500ml",
+            "RM 12.50",
+        ],
+        ["Bad price", "", "PARENT-2", "SKU-2", "5000000", "", "not a price"],
     ]
 
 
@@ -55,6 +70,8 @@ def test_google_sheet_rows_become_canonical_records_with_text_skus(tmp_path):
     assert isinstance(record.seller_sku, str)
     assert isinstance(record.parent_sku, str)
     assert record.unit_selling_price == Decimal("12.50")
+    assert record.nav_code == "000456"
+    assert record.usoft_product_description == "USOFT Fresh Oil 500ml"
 
 
 def test_google_and_excel_sources_produce_equivalent_canonical_records(tmp_path):

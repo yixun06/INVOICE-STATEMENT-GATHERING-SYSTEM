@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Sequence
 
 from src.invoice_app.domain.weekly_billing import (
     StagingDataRow,
     WeeklyBillingSummary,
 )
+from src.invoice_app.services.product_price_master import ProductPriceMasterRecord
 
 
 STAGING_DATA_HEADERS = (
@@ -41,13 +43,18 @@ STAGING_DATA_HEADERS = (
 
 SELL_TO_CUSTOMER_NO = "HC001543"
 CURRENCY_CODE = "MYR"
-ITEM_TYPE = "ITEM"
+ITEM_TYPE = "Item"
 LOCATION_CODE = "JH02"
 UNIT_OF_MEASURE_CODE = "EA"
 BUSINESS_UNIT_CODE_ERP = "RETAIL"
 PROJECT_CODE_ERP = "JH02"
-EXTERNAL_DOC_NO = 0
-TRANSFER_TO_CODE = 0
+EXTERNAL_DOC_NO = "Shopee"
+CUSTOMER = "RETAIL"
+MISSING_USOFT_DESCRIPTION = "N/A"
+PLACEHOLDER_NAV = "5000000"
+APPROVED_USOFT_DESCRIPTIONS = {
+    "4001971": "SN Org Pumpkin Seed Cube BTL 150g",
+}
 
 
 class StagingDataError(RuntimeError):
@@ -58,10 +65,12 @@ def build_staging_data_rows(
     summary: WeeklyBillingSummary,
     *,
     generation_date: date,
+    product_master_records: Sequence[ProductPriceMasterRecord] = (),
 ) -> tuple[StagingDataRow, ...]:
     """Map every finalized Product Summary row exactly once without regrouping."""
 
     reference = _your_reference(summary)
+    descriptions_by_nav = _usoft_descriptions_by_nav(product_master_records)
     rows = tuple(
         StagingDataRow(
             your_reference=reference,
@@ -80,12 +89,14 @@ def build_staging_data_rows(
             customer_outlet_code=None,
             business_unit_code_erp=BUSINESS_UNIT_CODE_ERP,
             project_code_erp=PROJECT_CODE_ERP,
-            transfer_to_code=TRANSFER_TO_CODE,
+            transfer_to_code=None,
             customer_remark=None,
-            customer=None,
-            usoft_code=None,
-            usoft_product_description=None,
-            plan_date=None,
+            customer=CUSTOMER,
+            usoft_code=str(product.nav),
+            usoft_product_description=_usoft_description(
+                str(product.nav), descriptions_by_nav
+            ),
+            plan_date=generation_date,
             am_pm=None,
             secondary_type=None,
             quantity_per_unit_of_measure=None,
@@ -101,10 +112,50 @@ def _your_reference(summary: WeeklyBillingSummary) -> str:
     period = summary.period
     if period.statement_period_from > period.statement_period_to:
         raise StagingDataError("Staging Data Statement period is invalid.")
-    return (
-        f"DF{period.statement_period_from:%Y%m%d}-"
-        f"{period.statement_period_to:%Y%m%d}"
-    )
+    return f"SP{period.statement_period_from:%Y%m%d}{period.statement_period_to:%m%d}"
+
+
+def _usoft_descriptions_by_nav(
+    records: Sequence[ProductPriceMasterRecord],
+) -> dict[str, str]:
+    candidates: dict[str, set[str]] = {}
+    for record in records:
+        nav = str(record.nav_code or "").strip()
+        description = str(record.usoft_product_description or "").strip()
+        if not nav or nav == PLACEHOLDER_NAV or not description:
+            continue
+        candidates.setdefault(nav, set()).add(description)
+
+    for nav, approved_description in APPROVED_USOFT_DESCRIPTIONS.items():
+        descriptions = candidates.get(nav)
+        if descriptions is None:
+            continue
+        if approved_description not in descriptions:
+            raise StagingDataError(
+                "Product Master does not contain the approved USOFT product "
+                f"description for NAV {nav}."
+            )
+        candidates[nav] = {approved_description}
+
+    conflicts = {
+        nav: descriptions
+        for nav, descriptions in candidates.items()
+        if len(descriptions) > 1
+    }
+    if conflicts:
+        nav = sorted(conflicts)[0]
+        raise StagingDataError(
+            "Product Master contains conflicting USOFT product descriptions "
+            f"for NAV {nav}."
+        )
+    return {nav: next(iter(descriptions)) for nav, descriptions in candidates.items()}
+
+
+def _usoft_description(nav: str, descriptions_by_nav: dict[str, str]) -> str:
+    clean_nav = nav.strip()
+    if not clean_nav or clean_nav == PLACEHOLDER_NAV:
+        return MISSING_USOFT_DESCRIPTION
+    return descriptions_by_nav.get(clean_nav, MISSING_USOFT_DESCRIPTION)
 
 
 def _validate_staging_rows(
