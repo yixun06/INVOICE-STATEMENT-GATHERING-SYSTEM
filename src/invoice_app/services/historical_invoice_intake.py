@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from hashlib import sha256
@@ -20,6 +21,7 @@ from src.invoice_app.services.product_price_master import PriceLookupStatus, Pro
 
 
 DEFAULT_BULK_CHUNK_SIZE = 50
+PRODUCT_MASTER_ENRICHMENT_REQUIRED = "PRODUCT_MASTER_ENRICHMENT_REQUIRED"
 
 
 class IntakeStatus(str, Enum):
@@ -51,6 +53,7 @@ class InvoiceIntakeImportOutcome:
 def build_current_batch_staging(
     *, batch_id: str | None, orders: Iterable[dict], products: Iterable[dict], reviews: Iterable[dict],
     price_master: ProductPriceMaster | None = None,
+    source_hashes: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[InvoiceIntakeEntry, ...]:
     """Map existing Data Import staging without parsing a source document again."""
     all_products = tuple(products)
@@ -61,15 +64,17 @@ def build_current_batch_staging(
             continue
         source_pdf = str(order.get("source_pdf", "")).strip()
         order_id = str(order.get("order_id", "")).strip() or None
-        source_path = resolve_archived_pdf_path(batch_id, source_pdf)
-        if source_path is None:
-            entries.append(_review_entry(source_pdf, source_pdf, "", order_id, "Archived source is unavailable for historical source hashing."))
-            continue
-        try:
-            source_hash = sha256(source_path.read_bytes()).hexdigest()
-        except OSError as error:
-            entries.append(_review_entry(source_pdf, source_pdf, "", order_id, f"Archived source cannot be read: {error}"))
-            continue
+        source_hash = (source_hashes or {}).get((source_pdf, order_id or ""), "")
+        if not source_hash:
+            source_path = resolve_archived_pdf_path(batch_id, source_pdf)
+            if source_path is None:
+                entries.append(_review_entry(source_pdf, source_pdf, "", order_id, "Archived source is unavailable for historical source hashing."))
+                continue
+            try:
+                source_hash = sha256(source_path.read_bytes()).hexdigest()
+            except OSError as error:
+                entries.append(_review_entry(source_pdf, source_pdf, "", order_id, f"Archived source cannot be read: {error}"))
+                continue
         staging_id = f"{source_pdf}:{source_hash}:{order_id or 'unknown'}"
         related_review = any(
             str(review.get("source_pdf", "")).strip() == source_pdf
@@ -80,7 +85,14 @@ def build_current_batch_staging(
             entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, "Source has a related Manual Review record."))
             continue
         if price_master is None:
-            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, "Product Master is unavailable for required Unit Price and NAV CODE enrichment."))
+            entries.append(_review_entry(
+                staging_id,
+                source_pdf,
+                source_hash,
+                order_id,
+                "Product Master is unavailable for required Unit Price and NAV CODE enrichment.",
+                reason_code=PRODUCT_MASTER_ENRICHMENT_REQUIRED,
+            ))
             continue
         candidate_products = [
             product for product in all_products
@@ -103,7 +115,14 @@ def build_current_batch_staging(
                 break
             enriched_items.append({"unit_price": lookup.unit_selling_price, "nav": lookup.nav_code})
         if enrichment_error:
-            entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, enrichment_error))
+            entries.append(_review_entry(
+                staging_id,
+                source_pdf,
+                source_hash,
+                order_id,
+                enrichment_error,
+                reason_code=PRODUCT_MASTER_ENRICHMENT_REQUIRED,
+            ))
             continue
         try:
             bundle = map_accepted_shopee_invoice(order, candidate_products, source_hash=source_hash, enriched_items=enriched_items)
@@ -230,9 +249,19 @@ def _duplicate_candidate_ids(entries: Iterable[InvoiceIntakeEntry]) -> set[tuple
 
 
 def _review_entry(
-    staging_id: str, source_filename: str, source_hash: str, order_id: str | None, message: str
+    staging_id: str,
+    source_filename: str,
+    source_hash: str,
+    order_id: str | None,
+    message: str,
+    *,
+    reason_code: str | None = None,
 ) -> InvoiceIntakeEntry:
     return InvoiceIntakeEntry(
         staging_id=staging_id, source_filename=source_filename, source_hash=source_hash,
-        order_id=order_id, status=IntakeStatus.NEEDS_REVIEW, message=message, bundle=None,
+        order_id=order_id,
+        status=IntakeStatus.NEEDS_REVIEW,
+        message=message,
+        bundle=None,
+        reason_code=reason_code,
     )

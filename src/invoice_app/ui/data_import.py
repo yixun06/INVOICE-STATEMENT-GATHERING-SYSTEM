@@ -49,7 +49,15 @@ from ..services.historical_invoice_intake import (
 )
 from ..services.application_commit_lock import ApplicationCommitInProgress
 from ..services.uat2_data_settings import configured_uat2_data_settings
-from ..services.product_master_source import ProductMasterSourceError, load_configured_product_price_master
+from ..services.product_master_source import (
+    ProductMasterSourceError,
+    clear_product_master_source_cache,
+    load_configured_product_price_master,
+)
+from ..services.invoice_product_master_revalidation import (
+    has_product_master_dependent_blocker,
+    revalidate_current_invoice_batch,
+)
 from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
 from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
 from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
@@ -127,6 +135,8 @@ _WORKFLOW_KEYS = (
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
     "historical_validation_blocker",
+    "product_master_revalidation_notice",
+    "product_master_revalidation_error",
     "manual_review_correction_drafts",
     "pending_validation_recovery_action",
     "pending_validation_bulk_recovery",
@@ -1517,6 +1527,7 @@ def _render_reconciliation_step() -> None:
             ),
             state="ready" if historical_ready else "blocked",
         )
+        _render_product_master_revalidation(entries)
         _render_next_step(
             "Continue to review & commit",
             5,
@@ -1581,6 +1592,64 @@ def _render_reconciliation_step() -> None:
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
     _render_statement_review_tables(collapsed=not allowed)
+
+
+def _render_product_master_revalidation(entries: tuple[Any, ...]) -> None:
+    notice = st.session_state.pop("product_master_revalidation_notice", None)
+    if notice:
+        st.success(notice, icon=":material/check_circle:")
+    error_message = st.session_state.get("product_master_revalidation_error")
+    if error_message:
+        st.error(error_message, icon=":material/error:")
+    if not has_product_master_dependent_blocker(entries):
+        return
+    st.caption(
+        "Product Master recovery uses the latest configured source and keeps "
+        "the current uploaded Invoice staging."
+    )
+    if not st.button(
+        "Revalidate with latest Product Master",
+        icon=":material/refresh:",
+        key="revalidate_invoice_latest_product_master",
+    ):
+        return
+
+    begin_workflow_activity(st.session_state, "Revalidating")
+    try:
+        clear_product_master_source_cache()
+        master, source_label = load_configured_product_price_master()
+        result = revalidate_current_invoice_batch(
+            st.session_state,
+            price_master=master,
+            repository=configured_uat2_data_settings().create_repository(),
+            staging_signature=_historical_commit_signature(),
+        )
+    except Exception as error:
+        message = (
+            f"Product Master revalidation failed: {error} "
+            "Current Invoice staging was kept; retry when the latest Product "
+            "Master is available."
+        )
+        st.session_state.product_master_revalidation_error = message
+        st.error(message, icon=":material/error:")
+    else:
+        st.session_state.pop("product_master_revalidation_error", None)
+        if result.remaining_pm_blockers:
+            message = (
+                f"Revalidated the current batch from {source_label}. "
+                f"{result.remaining_pm_blockers} Product Master-dependent "
+                "source(s) still need attention."
+            )
+        else:
+            message = (
+                f"Revalidated the current batch from {source_label}. Product "
+                "Master-dependent blockers were resolved; normal readiness "
+                "checks now apply."
+            )
+        st.session_state.product_master_revalidation_notice = message
+        st.rerun()
+    finally:
+        end_workflow_activity(st.session_state)
 
 
 def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationException, ...]) -> None:
