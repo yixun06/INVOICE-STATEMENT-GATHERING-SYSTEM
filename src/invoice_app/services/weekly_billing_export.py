@@ -136,11 +136,10 @@ def export_weekly_billing_report(
 
 def _write_staging_data(sheet, rows) -> None:
     sheet.append(STAGING_DATA_HEADERS)
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:Z{max(1, len(rows) + 1)}"
+    for column_index, cell in enumerate(sheet[1], start=1):
+        cell.font = Font(name="Calibri", size=11, bold=True)
+        if column_index <= 16:
+            cell.alignment = Alignment(horizontal="left")
     for row in rows:
         sheet.append((
             row.your_reference,
@@ -171,39 +170,42 @@ def _write_staging_data(sheet, rows) -> None:
             row.line_discount_percent,
         ))
     for row_number in range(2, sheet.max_row + 1):
-        sheet.cell(row_number, 2).number_format = "yyyy-mm-dd"
-        sheet.cell(row_number, 6).number_format = "@"
-        sheet.cell(row_number, 8).number_format = "#,##0"
-        sheet.cell(row_number, 10).number_format = "#,##0.00"
-        sheet.cell(row_number, 11).number_format = "yyyy-mm-dd"
-        sheet.cell(row_number, 12).number_format = "yyyy-mm-dd"
+        for column in (2, 11, 12, 22):
+            sheet.cell(row_number, column).number_format = "yyyy\\-mm\\-dd"
+            sheet.cell(row_number, column).alignment = Alignment(horizontal="right")
+        for column in (8, 10, 13):
+            sheet.cell(row_number, column).alignment = Alignment(horizontal="right")
+        item_type = sheet.cell(row_number, 5)
+        item_type.font = Font(name="Arial", size=10)
+        item_type.alignment = Alignment(horizontal="left", vertical="top")
+    sheet.sheet_format.defaultRowHeight = 15.75
     for column, width in {
-        "A": 27,
-        "B": 14,
-        "C": 22,
-        "D": 15,
-        "E": 12,
-        "F": 18,
-        "G": 16,
-        "H": 12,
-        "I": 24,
-        "J": 25,
-        "K": 14,
-        "L": 15,
-        "M": 18,
-        "N": 22,
-        "O": 24,
-        "P": 18,
-        "Q": 18,
-        "R": 20,
-        "S": 18,
-        "T": 22,
-        "U": 28,
-        "V": 14,
-        "W": 12,
-        "X": 12,
-        "Y": 26,
-        "Z": 18,
+        "A": 20.28515625,
+        "B": 13,
+        "C": 13,
+        "D": 13,
+        "E": 13,
+        "F": 13,
+        "G": 13,
+        "H": 13,
+        "I": 20.7109375,
+        "J": 13,
+        "K": 13,
+        "L": 13,
+        "M": 13,
+        "N": 13,
+        "O": 13,
+        "P": 13,
+        "Q": 16,
+        "R": 16.85546875,
+        "S": 13,
+        "T": 19.85546875,
+        "U": 55.140625,
+        "V": 13,
+        "W": 13,
+        "X": 13,
+        "Y": 23.42578125,
+        "Z": 15,
     }.items():
         sheet.column_dimensions[column].width = width
 

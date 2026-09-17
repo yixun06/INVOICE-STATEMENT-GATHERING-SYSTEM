@@ -206,11 +206,46 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     staging = workbook["Staging Data"]
     financial = workbook["Financial Summary"]
     assert tuple(cell.value for cell in product[1]) == PRODUCT_SUMMARY_HEADERS
-    assert tuple(cell.value for cell in staging[1]) == STAGING_DATA_HEADERS
+    assert tuple(cell.value for cell in staging[1]) == (
+        "Your Reference",
+        "Posting Date",
+        "Sell-To Customer No.",
+        "Currency Code",
+        "Type",
+        "No.",
+        "Location Code",
+        "Quantity",
+        "Unit of Measure Code",
+        "Unit Price [RSP] Excl.GST",
+        "Order Date",
+        "Shipment Date",
+        "External Doc No.",
+        "Customer Outlet Code",
+        "Business Unit Code ERP",
+        "Project Code ERP",
+        "Transfer-to Code",
+        "Customer ",
+        "Customer",
+        "USOFT - USOFT CODE",
+        "USOFT product description",
+        "Plan Date",
+        "AM/PM",
+        "TYPE",
+        "Qty. per Unit of Measure",
+        "Line Discount %",
+    )
     assert staging.max_row == product.max_row == 178
     assert staging.max_column == 26
-    assert staging.freeze_panes == "A2"
-    assert staging.auto_filter.ref == "A1:Z178"
+    assert staging.freeze_panes is None
+    assert staging.auto_filter.ref is None
+    assert staging.column_dimensions["A"].width == pytest.approx(20.28515625)
+    assert staging.column_dimensions["I"].width == pytest.approx(20.7109375)
+    assert staging.column_dimensions["U"].width == pytest.approx(55.140625)
+    assert staging.cell(1, 1).font.name == "Calibri"
+    assert staging.cell(1, 1).font.sz == 11
+    assert staging.cell(1, 1).font.bold is True
+    assert staging.cell(1, 1).alignment.horizontal == "left"
+    assert staging.cell(1, 17).alignment.horizontal is None
     assert staging.cell(2, 1).value == "DF20260831-20260906"
     assert staging.cell(2, 2).value.date() == GENERATION_DATE
     assert staging.cell(2, 11).value.date() == GENERATION_DATE
@@ -228,8 +263,15 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 6).data_type == "s"
     assert staging.cell(2, 8).data_type == "n"
     assert staging.cell(2, 10).data_type == "n"
-    assert staging.cell(2, 2).number_format == "yyyy-mm-dd"
-    assert staging.cell(2, 10).number_format == "#,##0.00"
+    assert staging.cell(2, 2).number_format == "yyyy\\-mm\\-dd"
+    assert staging.cell(2, 6).number_format == "General"
+    assert staging.cell(2, 8).number_format == "General"
+    assert staging.cell(2, 10).number_format == "General"
+    assert staging.cell(2, 22).number_format == "yyyy\\-mm\\-dd"
+    assert staging.cell(2, 5).font.name == "Arial"
+    assert staging.cell(2, 5).font.sz == 10
+    assert staging.cell(2, 5).alignment.horizontal == "left"
+    assert staging.cell(2, 5).alignment.vertical == "top"
     assert sum(staging.cell(row, 8).value for row in range(2, 179)) == 715
     assert product.cell(2, 2).value == "060328"
     assert product.cell(2, 6).value == 42.9

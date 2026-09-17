@@ -28,7 +28,7 @@ STAGING_DATA_HEADERS = (
     "Business Unit Code ERP",
     "Project Code ERP",
     "Transfer-to Code",
-    "Customer Remark",
+    "Customer ",
     "Customer",
     "USOFT - USOFT CODE",
     "USOFT product description",
