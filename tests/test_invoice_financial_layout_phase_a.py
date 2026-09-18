@@ -20,6 +20,7 @@ from src.invoice_app.parsers.shopee_financial_parser import (
     parse_income_details,
 )
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
+from src.invoice_app.review_reason_codes import INCOME_DETAILS_REQUIRED_FIELD_MISSING
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     _deserialize_item,
     _deserialize_order,
@@ -174,14 +175,32 @@ def test_valid_refund_layout_is_accepted_without_normal_fee_labels():
     assert find_shopee_review_issue(extracted) is None
 
 
-def test_visible_optional_label_with_missing_value_reviews_but_absent_is_none():
-    malformed = extract_shopee_data(
+def test_blank_ads_escrow_value_remains_unavailable_without_manual_review():
+    blank_ads = extract_shopee_data(
         NORMAL_TEXT.replace("Estimated Order Income", "Ads Escrow Top Up Fee ???\nEstimated Order Income"),
-        "malformed-ads.pdf",
+        "blank-ads.pdf",
     )
-    issue = find_shopee_review_issue(malformed)
+    assert blank_ads.income["ads_escrow_top_up_fee"] == "N/A"
+    assert find_shopee_review_issue(blank_ads) is None
+
+
+def test_blank_ads_escrow_does_not_mask_another_required_income_blocker():
+    missing_product_price = extract_shopee_data(
+        NORMAL_TEXT.replace(
+            "Product Price RM25.00",
+            "Product Price ???\nAds Escrow Top Up Fee ???",
+        ),
+        "blank-ads-missing-product-price.pdf",
+    )
+    issue = find_shopee_review_issue(missing_product_price)
+
     assert issue is not None
-    assert "Ads Escrow Top Up Fee" in issue.reason
+    assert issue.reason_code == INCOME_DETAILS_REQUIRED_FIELD_MISSING
+    assert "Product Price" in issue.reason
+    assert "Ads Escrow Top Up Fee" not in issue.reason
+
+
+def test_absent_ads_escrow_value_stays_unavailable_without_manual_review():
     clean = extract_shopee_data(NORMAL_TEXT, "absent-ads.pdf")
     assert clean.income["ads_escrow_top_up_fee"] == "N/A"
     assert find_shopee_review_issue(clean) is None

@@ -70,6 +70,10 @@ RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS = (
 # Backwards-compatible public name for callers that only describe normal orders.
 REQUIRED_INCOME_DETAIL_FIELDS = NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS
 
+# A visible Ads Escrow label without a captured value is optional source
+# evidence.  It must remain unavailable rather than becoming a review blocker.
+OPTIONAL_LABEL_PRESENCE_FIELDS = frozenset({"ads_escrow_top_up_fee"})
+
 
 def parse_income_details(text: str, *, document: PdfDocument | None = None) -> dict[str, str]:
     section = extract_section(
@@ -256,7 +260,11 @@ def missing_income_detail_fields(
 
     if label_presence is not None:
         for field in sorted(label_presence):
-            if field in INCOME_ALIASES and is_missing_financial_value(income.get(field)):
+            if (
+                field in INCOME_ALIASES
+                and field not in OPTIONAL_LABEL_PRESENCE_FIELDS
+                and is_missing_financial_value(income.get(field))
+            ):
                 label = INCOME_ALIASES[field][0]
                 if label not in missing:
                     missing.append(label)

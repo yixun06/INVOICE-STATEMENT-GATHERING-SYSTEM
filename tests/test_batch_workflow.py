@@ -284,6 +284,38 @@ def test_process_pdf_text_for_declarative_shopee_input():
     assert reviews == []
 
 
+def test_shopee_blank_ads_escrow_fee_is_accepted_without_manual_review():
+    text = """
+    Order ID: SHP123
+    SHP123 07/08/2026
+    New Order
+    Hide Income Details
+    No. Product(s) Unit Price Quantity Subtotal
+    Test Product 1
+    1 Variation: Original 12.50 2 25.00
+    SKU: ABC-001
+    Total 1 products
+    Merchandise Subtotal RM25.00
+    Shipping Fee Paid by Buyer (excl. SST) RM0.00
+    Product Price RM25.00
+    Shipping Subtotal RM0.00
+    Shipping Fee Charged by Logistic Provider RM0.00
+    Seller Paid Shipping Fee SST RM0.00
+    Fees & Charges -RM3.00
+    Commission Fee (Incl.SST) -RM1.00
+    Service Fee -RM1.00
+    Transaction Fee (Incl. SST) -RM1.00
+    Ads Escrow Top Up Fee ???
+    Estimated Order Income RM22.00
+    """
+
+    orders, products, reviews = process_pdf_text("blank-ads-shopee.pdf", text, "batch-optional-ads")
+
+    assert orders[0]["ads_escrow_top_up_fee"] == "N/A"
+    assert products[0]["status"] == "Accepted"
+    assert reviews == []
+
+
 def test_prepare_uploaded_invoice_files_archives_direct_and_zipped_pdfs(tmp_path, monkeypatch):
     monkeypatch.setattr(batch_service, "ARCHIVE_DIR", tmp_path / "archive")
     uploaded_files = [
