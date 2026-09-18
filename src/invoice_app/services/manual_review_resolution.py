@@ -12,7 +12,11 @@ from .batch_service import apply_batch_rules, is_manual_review_record
 from .product_price_master import ProductPriceMaster
 from .shopee_invoice_revalidation import revalidate_shopee_invoice
 from ..parsers.shopee_mapper import resolve_shopee_payment_status
-from ..parsers.validation import validate_product_items
+from ..parsers.shopee_financial_parser import INCOME_ALIASES, is_missing_financial_value
+from ..parsers.validation import (
+    financial_reconciliation_evidence_notes,
+    validate_product_items,
+)
 from ..review_reason_codes import INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE, FINAL_AMOUNT_EXTRACTION_MISSING
 
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
@@ -21,6 +25,9 @@ FINAL_AMOUNT = "FINAL_AMOUNT_EXTRACTION"
 PROMOTION_SUBTOTAL = "PROMOTION_SUBTOTAL"
 CORRECTION_DRAFTS_KEY = "manual_review_correction_drafts"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
+_FINANCIAL_ENRICHMENT_FIELDS = tuple(
+    field for field in INCOME_ALIASES if field != "estimated_order_income"
+)
 
 @dataclass(frozen=True)
 class ResolutionPlan:
@@ -85,6 +92,47 @@ def draft_products(state: MutableMapping[str, Any], review: Mapping[str, Any]) -
 def draft_promotion_subtotals(state: MutableMapping[str, Any], review: Mapping[str, Any]) -> dict[str, str]:
     synchronize_correction_drafts(state)
     return dict(_ensure_draft(state, review)["promotion_subtotals"])
+
+
+def draft_financial_enrichment(
+    state: MutableMapping[str, Any], review: Mapping[str, Any]
+) -> dict[str, str]:
+    """Return the session-only optional financial corrections for one review."""
+    synchronize_correction_drafts(state)
+    return dict(_ensure_draft(state, review)["financial_enrichment"])
+
+
+def financial_enrichment_fields(
+    review: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    """Expose only parser-recognized monetary fields that are currently missing."""
+    order = review.get("order_payload") or {}
+    return tuple(
+        (field, INCOME_ALIASES[field][0])
+        for field in _FINANCIAL_ENRICHMENT_FIELDS
+        if is_missing_financial_value(order.get(field))
+    )
+
+
+def set_financial_enrichment(
+    state: MutableMapping[str, Any],
+    *,
+    key: str,
+    values: Mapping[str, Any],
+    source_confirmed: bool,
+) -> ResolutionOutcome:
+    review = _find_review(state, key)
+    if review is None:
+        return ResolutionOutcome(False, "The selected Manual Review record is no longer in the current batch.")
+    if resolution_plan(review) is None:
+        return ResolutionOutcome(False, "This source issue cannot be resolved safely from a manual correction.")
+    if not source_confirmed:
+        return ResolutionOutcome(False, "Confirm that these optional values are visible in the original Invoice source.")
+    normalized, error = _normalize_financial_enrichment(review, values)
+    if error:
+        return ResolutionOutcome(False, error)
+    _ensure_draft(state, review)["financial_enrichment"].update(normalized)
+    return ResolutionOutcome(True, None)
 
 def draft_summary(state: MutableMapping[str, Any], review: Mapping[str, Any]) -> CorrectionDraftSummary:
     plan = resolution_plan(review)
@@ -186,7 +234,16 @@ def apply_product_draft(state: MutableMapping[str, Any], *, key: str, price_mast
     products = [dict(product) for product in [*(review.get("product_payloads") or []), *draft["products"]]]
     for group_id, subtotal in draft["promotion_subtotals"].items():
         _apply_confirmed_promotion_subtotal(products, group_id, subtotal)
-    return _revalidate_and_accept(state, review, products, price_master, expected_product_count=plan.expected_products)
+    order = dict(review.get("order_payload") or {})
+    order.update(draft["financial_enrichment"])
+    return _revalidate_and_accept(
+        state,
+        review,
+        products,
+        price_master,
+        expected_product_count=plan.expected_products,
+        corrected_order=order,
+    )
 
 def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mapping[str, Any], price_master: ProductPriceMaster) -> ResolutionOutcome:
     """Apply income/subtotal corrections; retain legacy one-product compatibility."""
@@ -240,6 +297,15 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         order["payment_status"] = resolve_shopee_payment_status(order.get("fund_transfer_date"), income_type)
         order["net_income"] = final_amount or income
         order["net_amount"] = order["net_income"]
+    direct_enrichment = values.get("financial_enrichment")
+    if direct_enrichment is not None:
+        if values.get("source_confirmed") is not True:
+            return ResolutionOutcome(False, "Confirm that these optional values are visible in the original Invoice source.")
+        normalized, error = _normalize_financial_enrichment(review, direct_enrichment)
+        if error:
+            return ResolutionOutcome(False, error)
+        _ensure_draft(state, review)["financial_enrichment"].update(normalized)
+    order.update(_ensure_draft(state, review)["financial_enrichment"])
     return _revalidate_and_accept(
         state,
         review,
@@ -263,6 +329,11 @@ def _revalidate_and_accept(
     if revalidated.error:
         return ResolutionOutcome(False, revalidated.error)
     order["invoice_financial_layout"] = revalidated.invoice_financial_layout
+    order["_financial_evidence_notes"] = financial_reconciliation_evidence_notes(
+        order,
+        order.get("refund_amount"),
+        layout=revalidated.invoice_financial_layout or "",
+    )
     accepted_products = [dict(product) for product in revalidated.products]
     for product, enrichment in zip(accepted_products, revalidated.master_enrichment):
         product["master_unit_price"] = enrichment["unit_price"]
@@ -354,10 +425,34 @@ def _ensure_draft(state: MutableMapping[str, Any], review: Mapping[str, Any]) ->
     key, identity = review_key(review), _draft_identity(review)
     draft = drafts.get(key)
     if not isinstance(draft, dict) or draft.get("identity") != identity:
-        draft = {"identity": identity, "products": [], "promotion_subtotals": {}}
+        draft = {
+            "identity": identity,
+            "products": [],
+            "promotion_subtotals": {},
+            "financial_enrichment": {},
+        }
         drafts[key] = draft
     draft.setdefault("promotion_subtotals", {})
+    draft.setdefault("financial_enrichment", {})
     return draft
+
+
+def _normalize_financial_enrichment(
+    review: Mapping[str, Any], values: Any
+) -> tuple[dict[str, str], str | None]:
+    if not isinstance(values, Mapping):
+        return {}, "Optional financial details must be entered as source-visible monetary values."
+    available = {field for field, _ in financial_enrichment_fields(review)}
+    normalized: dict[str, str] = {}
+    for field, raw in values.items():
+        if field not in available:
+            return {}, "Only currently missing parser-recognized financial fields may be enriched."
+        amount = _source_money(raw, optional=True)
+        if amount is None:
+            return {}, f"{INCOME_ALIASES[field][0]} must be a source-visible numeric amount."
+        if amount != "":
+            normalized[field] = amount
+    return normalized, None
 
 def _source_money(value: Any, *, optional: bool = False) -> str | None:
     text = str(value or "").replace(",", "").replace("RM", "").strip()

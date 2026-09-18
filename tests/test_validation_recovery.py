@@ -512,6 +512,10 @@ def test_source_supported_income_manual_review_renders_confirmation_form(tmp_pat
     assert {"Order Income", "Income Type"} <= {
         widget.label for widget in (*app.text_input, *app.selectbox)
     }
+    assert "Additional source-visible financial details (optional)" in {
+        expander.label for expander in app.expander
+    }
+    assert "Shipping Subtotal" in {widget.label for widget in app.text_input}
 
 
 def test_product_count_manual_review_renders_session_draft_without_derived_fields(tmp_path, monkeypatch):

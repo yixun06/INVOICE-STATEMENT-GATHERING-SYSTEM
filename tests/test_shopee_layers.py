@@ -19,6 +19,7 @@ from src.invoice_app.parsers.shopee_review_policy import (
 )
 from src.invoice_app.parsers.validation import (
     extract_expected_product_count,
+    financial_reconciliation_evidence_notes,
     validate_shopee_financial_reconciliation,
     validate_shopee_product_amounts,
 )
@@ -265,25 +266,33 @@ def test_shopee_refund_financial_reconciliation_starts_from_net_merchandise_subt
 def test_shopee_refund_is_not_double_subtracted_in_financial_reconciliation():
     extracted = refund_order_data(Decimal("-27.67"), order_income="222.17")
 
-    error = validate_shopee_financial_reconciliation(
+    assert validate_shopee_financial_reconciliation(
         extracted.income,
         extracted.refund_amount,
+    ) is None
+
+    assert financial_reconciliation_evidence_notes(
+        extracted.income,
+        extracted.refund_amount,
+    ) == (
+        "Financial Reconciliation Failed: seller components total 249.84, but Order Income is 222.17.",
     )
 
-    assert error is not None
-    assert error.startswith("Financial Reconciliation Failed:")
 
-
-def test_shopee_refund_financial_reconciliation_still_rejects_wrong_totals():
+def test_shopee_refund_financial_reconciliation_reports_wrong_totals_without_blocking():
     extracted = refund_order_data(Decimal("-27.67"), order_income="249.87")
 
-    error = validate_shopee_financial_reconciliation(
+    assert validate_shopee_financial_reconciliation(
         extracted.income,
         extracted.refund_amount,
-    )
+    ) is None
 
-    assert error is not None
-    assert error.startswith("Financial Reconciliation Failed:")
+    assert financial_reconciliation_evidence_notes(
+        extracted.income,
+        extracted.refund_amount,
+    ) == (
+        "Financial Reconciliation Failed: seller components total 249.84, but Order Income is 249.87.",
+    )
 
 
 def test_shopee_product_count_mismatch_requires_manual_review():
@@ -339,7 +348,7 @@ def test_shopee_product_subtotal_mismatch_requires_manual_review():
     assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
 
 
-def test_shopee_financial_reconciliation_tolerance_and_failure_boundary():
+def test_shopee_financial_component_reconciliation_difference_is_non_blocking_evidence():
     extracted = extract_shopee_data(VALID_SHOPEE_TEXT, "financial-tolerance.pdf")
     within_tolerance = replace(
         extracted,
@@ -351,9 +360,10 @@ def test_shopee_financial_reconciliation_tolerance_and_failure_boundary():
     )
 
     assert find_shopee_review_issue(within_tolerance) is None
-    issue = find_shopee_review_issue(outside_tolerance)
-    assert issue is not None
-    assert issue.reason.startswith("Financial Reconciliation Failed:")
+    assert find_shopee_review_issue(outside_tolerance) is None
+    assert financial_reconciliation_evidence_notes(outside_tolerance.income) == (
+        "Financial Reconciliation Failed: seller components total 22.00, but Order Income is 22.03.",
+    )
 
 
 def test_shopee_product_amount_tolerance_accepts_two_cents():
@@ -413,6 +423,17 @@ def test_shopee_missing_ads_escrow_fee_stays_missing_but_is_not_incomplete():
     assert extracted.income["ads_escrow_top_up_fee"] == "N/A"
     assert validate_shopee_financial_reconciliation(extracted.income) is None
     assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_missing_fee_component_is_non_blocking_financial_evidence():
+    text = VALID_SHOPEE_TEXT.replace("Commission Fee (Incl.SST) -RM1.00\n", "")
+    extracted = extract_shopee_data(text, "missing-commission-fee.pdf")
+
+    assert extracted.income["commission_fee"] == "N/A"
+    assert find_shopee_review_issue(extracted) is None
+    assert financial_reconciliation_evidence_notes(extracted.income) == (
+        "Financial Reconciliation Failed: source-present fee components total -2.00, but Fees & Charges is -3.00.",
+    )
 
 
 def test_shopee_na_required_financial_value_is_not_treated_as_zero():

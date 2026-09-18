@@ -10,6 +10,7 @@ from .shopee_financial_parser import (
     is_missing_financial_value,
     invoice_financial_layout_signals,
 )
+from .validation import financial_reconciliation_evidence_notes
 
 
 SHOPEE_PLATFORM = "Shopee"
@@ -79,6 +80,11 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
             label_presence=data.income_label_presence,
             product_items=data.product_items,
         ))),
+        "_financial_evidence_notes": financial_reconciliation_evidence_notes(
+            income,
+            data.refund_amount,
+            layout=data.invoice_financial_layout,
+        ),
         "source_pdf": data.source_pdf,
         "gross_sales": _financial_value(income, "merchandise_subtotal"),
         "delivery_fee": _financial_value(income, "shipping_fee_paid_by_buyer"),

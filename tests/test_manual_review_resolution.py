@@ -140,6 +140,42 @@ def test_income_extraction_missing_has_a_source_confirmed_resolution_plan_and_re
     assert state["orders"][0]["source_hash"] == "original-source-hash"
 
 
+def test_income_resolution_persists_optional_source_visible_financial_enrichment_without_synthetic_zero():
+    review = _income_review()
+    review["order_payload"].update(
+        {
+            "service_fee": "N/A",
+            "shipping_fee_rebate_from_shopee": "N/A",
+            "ads_escrow_top_up_fee": "N/A",
+        }
+    )
+    plan = resolution_plan(review)
+    assert plan is not None and plan.issue_type == MISSING_INCOME
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "order_income": "22.00",
+            "income_type": "Estimated",
+            "final_amount": "",
+            "financial_enrichment": {
+                "service_fee": "-1.00",
+                "shipping_fee_rebate_from_shopee": "",
+                "ads_escrow_top_up_fee": "0.00",
+            },
+        },
+        price_master=_master(),
+    )
+
+    assert outcome.resolved is True
+    assert state["orders"][0]["service_fee"] == "-1.00"
+    assert state["orders"][0]["shipping_fee_rebate_from_shopee"] == "N/A"
+    assert state["orders"][0]["ads_escrow_top_up_fee"] == "0.00"
+
+
 def test_income_resolution_requires_source_confirmation_and_keeps_the_review():
     review = _income_review()
     plan = resolution_plan(review)
@@ -163,14 +199,14 @@ def test_income_resolution_requires_source_confirmation_and_keeps_the_review():
     assert state["reviews"] == [review]
 
 
-def test_income_resolution_preserves_final_income_type_and_rejects_unreconciled_amounts():
+def test_income_resolution_preserves_final_income_type_and_keeps_component_difference_as_note():
     review = _income_review()
     plan = resolution_plan(review)
     assert plan is not None
-    state = {"orders": [], "products": [], "reviews": [review]}
+    differing_state = {"orders": [], "products": [], "reviews": [review]}
 
-    rejected = apply_resolution(
-        state,
+    differing = apply_resolution(
+        differing_state,
         key=plan.key,
         values={
             "source_confirmed": True,
@@ -181,10 +217,13 @@ def test_income_resolution_preserves_final_income_type_and_rejects_unreconciled_
         price_master=_master(),
     )
 
-    assert rejected.resolved is False
-    assert "Financial Reconciliation Failed" in str(rejected.reason)
-    assert state["reviews"] == [review]
+    assert differing.resolved is True
+    assert differing_state["reviews"] == []
+    assert differing_state["orders"][0]["_financial_evidence_notes"] == (
+        "Financial Reconciliation Failed: seller components total 22.00, but Order Income is 23.00.",
+    )
 
+    state = {"orders": [], "products": [], "reviews": [_income_review()]}
     resolved = apply_resolution(
         state,
         key=plan.key,
@@ -476,11 +515,13 @@ def test_case_one_source_visible_subtotal_reruns_full_revalidation():
     assert state["products"][0]["nav"] == "NAV-1"
 
 
-def test_case_one_subtotal_cannot_bypass_financial_or_product_master_failure():
+def test_case_one_subtotal_keeps_financial_difference_as_non_blocking_note():
     review = _promotion_review()
     plan = resolution_plan(review)
     review["order_payload"]["order_income"] = "19.00"
     state = {"orders": [], "products": [], "reviews": [review]}
-    failed = apply_resolution(state, key=plan.key, values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "20.00"}, price_master=_promotion_master())
-    assert failed.resolved is False
-    assert "Financial Reconciliation Failed" in failed.reason
+    outcome = apply_resolution(state, key=plan.key, values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "20.00"}, price_master=_promotion_master())
+    assert outcome.resolved is True
+    assert state["orders"][0]["_financial_evidence_notes"] == (
+        "Financial Reconciliation Failed: seller components total 20.00, but Order Income is 19.00.",
+    )

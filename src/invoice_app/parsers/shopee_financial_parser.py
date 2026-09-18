@@ -48,23 +48,11 @@ INCOME_ALIASES: dict[str, tuple[str, ...]] = {
 NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS = (
     "merchandise_subtotal",
     "product_price",
-    "shipping_subtotal",
-    "shipping_fee_paid_by_buyer",
-    "shipping_fee_charged_by_logistic_provider",
-    "seller_paid_shipping_fee_sst",
-    "fees_charges_total",
-    "commission_fee",
-    "service_fee",
-    "transaction_fee",
 )
 
 RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS = (
     "merchandise_subtotal",
     "product_price",
-    "shipping_subtotal",
-    "shipping_fee_paid_by_buyer",
-    "shipping_fee_charged_by_logistic_provider",
-    "seller_paid_shipping_fee_sst",
 )
 
 # Backwards-compatible public name for callers that only describe normal orders.
@@ -254,12 +242,12 @@ def missing_income_detail_fields(
     elif is_missing_financial_value(income.get("order_income")):
         missing.append("Estimated Order Income or Order Income")
 
-    if label_presence is not None:
-        for field in sorted(label_presence):
-            if field in INCOME_ALIASES and is_missing_financial_value(income.get(field)):
-                label = INCOME_ALIASES[field][0]
-                if label not in missing:
-                    missing.append(label)
+    if (
+        label_presence is not None
+        and "final_amount" in label_presence
+        and is_missing_financial_value(income.get("final_amount"))
+    ):
+        missing.append(INCOME_ALIASES["final_amount"][0])
     return missing
 
 

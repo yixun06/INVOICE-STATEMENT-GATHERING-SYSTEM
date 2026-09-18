@@ -174,14 +174,13 @@ def test_valid_refund_layout_is_accepted_without_normal_fee_labels():
     assert find_shopee_review_issue(extracted) is None
 
 
-def test_visible_optional_label_with_missing_value_reviews_but_absent_is_none():
+def test_visible_optional_ads_label_with_missing_value_does_not_require_review():
     malformed = extract_shopee_data(
         NORMAL_TEXT.replace("Estimated Order Income", "Ads Escrow Top Up Fee ???\nEstimated Order Income"),
         "malformed-ads.pdf",
     )
-    issue = find_shopee_review_issue(malformed)
-    assert issue is not None
-    assert "Ads Escrow Top Up Fee" in issue.reason
+    assert malformed.income["ads_escrow_top_up_fee"] == "N/A"
+    assert find_shopee_review_issue(malformed) is None
     clean = extract_shopee_data(NORMAL_TEXT, "absent-ads.pdf")
     assert clean.income["ads_escrow_top_up_fee"] == "N/A"
     assert find_shopee_review_issue(clean) is None

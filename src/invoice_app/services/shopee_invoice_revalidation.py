@@ -171,11 +171,8 @@ def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -
         missing.append("Estimated Order Income or Order Income")
 
     visible = set(order.get("_income_label_presence") or ())
-    for field in sorted(visible):
-        if field in INCOME_ALIASES and is_missing_financial_value(order.get(field)):
-            label = INCOME_ALIASES[field][0]
-            if label not in missing:
-                missing.append(label)
+    if "final_amount" in visible and is_missing_financial_value(order.get("final_amount")):
+        missing.append(INCOME_ALIASES["final_amount"][0])
     if missing:
         return "Income Details require source review before validation. Missing: " + ", ".join(missing) + "."
     return None

@@ -191,18 +191,24 @@ def validate_shopee_financial_reconciliation(
     *,
     layout: str = NORMAL_ORDER,
 ) -> str | None:
-    required_fields = ["merchandise_subtotal", "product_price", "shipping_subtotal", "order_income"]
-    if layout != RETURN_REFUND:
-        required_fields.append("fees_charges_total")
-    if any(_is_missing_money(income.get(field)) for field in required_fields):
-        return None
+    """Return only authoritative financial blockers; component gaps are evidence notes."""
+    required_fields = ["merchandise_subtotal", "product_price", "order_income"]
+    for field in required_fields:
+        value = income.get(field)
+        if not _is_missing_money(value) and _decimal_value(value) is None:
+            label = field.replace("_", " ").title()
+            return f"Financial Reconciliation Failed: {label} is not numeric."
+    return None
 
-    required_values = {
-        field: _decimal_value(income.get(field))
-        for field in required_fields
-    }
-    if any(value is None for value in required_values.values()):
-        return "Financial Reconciliation Failed: a seller financial component is not numeric."
+
+def financial_reconciliation_evidence_notes(
+    income: dict[str, str],
+    refund_amount: Any = None,
+    *,
+    layout: str = NORMAL_ORDER,
+) -> tuple[str, ...]:
+    """Describe incomplete or mismatched component evidence without blocking entry."""
+    notes: list[str] = []
 
     shipping_fields = (
         "shipping_fee_paid_by_buyer",
@@ -214,14 +220,14 @@ def validate_shopee_financial_reconciliation(
     )
     shipping_values = _present_decimal_values(income, shipping_fields)
     if isinstance(shipping_values, str):
-        return shipping_values
-    if shipping_values:
+        notes.append(shipping_values)
+    elif shipping_values and (shipping_subtotal := _decimal_value(income.get("shipping_subtotal"))) is not None:
         shipping_components = sum(shipping_values, Decimal("0"))
-        if abs(shipping_components - required_values["shipping_subtotal"]) > MONEY_TOLERANCE:
-            return (
+        if abs(shipping_components - shipping_subtotal) > MONEY_TOLERANCE:
+            notes.append(
                 "Financial Reconciliation Failed: "
                 f"source-present shipping components total {shipping_components:.2f}, "
-                f"but Shipping Subtotal is {required_values['shipping_subtotal']:.2f}."
+                f"but Shipping Subtotal is {shipping_subtotal:.2f}."
             )
 
     fee_fields = (
@@ -233,40 +239,41 @@ def validate_shopee_financial_reconciliation(
     )
     fee_values = _present_decimal_values(income, fee_fields)
     if isinstance(fee_values, str):
-        return fee_values
+        notes.append(fee_values)
     fees_aggregate = _decimal_value(income.get("fees_charges_total"))
-    if fees_aggregate is not None and fee_values:
+    if fees_aggregate is not None and isinstance(fee_values, list) and fee_values:
         fee_components = sum(fee_values, Decimal("0"))
         if abs(fee_components - fees_aggregate) > MONEY_TOLERANCE:
-            return (
+            notes.append(
                 "Financial Reconciliation Failed: "
                 f"source-present fee components total {fee_components:.2f}, "
                 f"but Fees & Charges is {fees_aggregate:.2f}."
             )
 
     applicable_fees = fees_aggregate
-    if applicable_fees is None:
+    if applicable_fees is None and isinstance(fee_values, list):
         applicable_fees = sum(fee_values, Decimal("0"))
-    expected_income = (
-        required_values["merchandise_subtotal"]
-        + required_values["shipping_subtotal"]
-        + applicable_fees
-    )
+    merchandise = _decimal_value(income.get("merchandise_subtotal"))
+    shipping = _decimal_value(income.get("shipping_subtotal"))
+    order_income = _decimal_value(income.get("order_income"))
+    if merchandise is None or shipping is None or applicable_fees is None or order_income is None:
+        return tuple(notes)
+    expected_income = merchandise + shipping + applicable_fees
     vouchers = income.get("vouchers_rebates_total")
     if not _is_missing_money(vouchers):
         voucher_value = _decimal_value(vouchers)
         if voucher_value is None:
-            return "Financial Reconciliation Failed: Vouchers & Rebates is not numeric."
-        expected_income += voucher_value
+            notes.append("Financial Reconciliation Failed: Vouchers & Rebates is not numeric.")
+        else:
+            expected_income += voucher_value
 
-    order_income = required_values["order_income"]
     if abs(expected_income - order_income) > MONEY_TOLERANCE:
-        return (
+        notes.append(
             "Financial Reconciliation Failed: "
             f"seller components total {expected_income:.2f}, "
             f"but Order Income is {order_income:.2f}."
         )
-    return None
+    return tuple(notes)
 
 
 def _present_decimal_values(

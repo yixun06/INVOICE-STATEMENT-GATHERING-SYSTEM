@@ -93,14 +93,17 @@ from ..services.manual_review_resolution import (
     apply_product_draft,
     apply_resolution,
     clear_correction_draft,
+    draft_financial_enrichment,
     draft_products,
     draft_promotion_subtotals,
     draft_summary,
     edit_draft_product,
+    financial_enrichment_fields,
     promotion_group_options,
     promotion_subtotal_groups,
     remove_draft_product,
     resolution_plan,
+    set_financial_enrichment,
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
 )
@@ -1292,6 +1295,7 @@ def _render_manual_review_resolution() -> None:
                                         st.session_state.pending_validation_recovery_action = act
                                         st.rerun()
                     st.caption(f"Source: {review.get('source_pdf') or 'Unavailable'}")
+                    st.caption("Required to resolve")
                     if plan.issue_type == PRODUCT_COUNT_MISMATCH:
                         if review.get("product_payloads"):
                             st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
@@ -1302,6 +1306,7 @@ def _render_manual_review_resolution() -> None:
                         _render_final_amount_form(plan.key, review)
                     else:
                         _render_income_form(plan.key, review)
+                    _render_financial_enrichment_draft(plan.key, review)
 
 
 def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
@@ -1315,6 +1320,44 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
             "Correction applied and revalidated. Continue to Reconcile." if outcome.resolved else f"Still needs review — {outcome.reason}"
         )
     st.rerun()
+
+
+def _render_financial_enrichment_draft(key: str, review: dict[str, Any]) -> None:
+    fields = financial_enrichment_fields(review)
+    if not fields:
+        return
+    saved = draft_financial_enrichment(st.session_state, review)
+    with st.expander("Additional source-visible financial details (optional)"):
+        st.caption(
+            "These values are optional enrichment only. Leave a source-absent value blank; "
+            "enter 0.00 only when the Invoice visibly shows 0.00."
+        )
+        with st.form(f"financial_enrichment_{key}", border=False):
+            values = {
+                field: st.text_input(
+                    label,
+                    value=saved.get(field, ""),
+                    key=f"mr_financial_{key}_{field}",
+                )
+                for field, label in fields
+            }
+            source_confirmed = st.checkbox(
+                "I verified these optional values are visible in the original Invoice source",
+                key=f"mr_financial_confirm_{key}",
+            )
+            if st.form_submit_button("Save optional financial details"):
+                outcome = set_financial_enrichment(
+                    st.session_state,
+                    key=key,
+                    values=values,
+                    source_confirmed=source_confirmed,
+                )
+                st.session_state.manual_resolution_notice = (
+                    "Optional financial details saved for Apply & Revalidate."
+                    if outcome.resolved
+                    else f"Still needs review â€” {outcome.reason}"
+                )
+                st.rerun()
 
 
 def _render_missing_product_draft(key: str, review: dict[str, Any]) -> None:
@@ -1482,9 +1525,8 @@ def _render_income_form(key: str, review: dict[str, Any]) -> None:
         )
         income = st.text_input("Order Income", key=f"mr_income_{key}")
         income_type = st.selectbox("Income Type", ("Estimated", "Final"), key=f"mr_income_type_{key}")
-        final_amount = st.text_input("Final Amount (optional — only when visible in source)", key=f"mr_final_{key}")
         if st.form_submit_button("Apply & Revalidate", type="primary"):
-            _apply_manual_resolution(key, {"source_confirmed": source_confirmed, "order_income": income, "income_type": income_type, "final_amount": final_amount})
+            _apply_manual_resolution(key, {"source_confirmed": source_confirmed, "order_income": income, "income_type": income_type, "final_amount": ""})
 
 
 def _render_final_amount_form(key: str, review: dict[str, Any]) -> None:
