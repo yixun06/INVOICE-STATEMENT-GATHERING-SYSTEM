@@ -206,6 +206,80 @@ def test_seller_sku_matches_master_parent_sku_without_column_priority():
     assert result.matched_parent_sku == "SOURCE-SKU"
 
 
+def test_exact_sea_buckthorn_seller_sku_wins_over_parent_sku_bundle():
+    result = _master([
+        _row(
+            seller_sku="9555208013938",
+            parent_sku="",
+            product_name="Sea Buckthorn Elixir",
+            variation_name="500ml",
+            unit_selling_price="58.80",
+        ) | {"nav_code": "3005462"},
+        _row(
+            seller_sku="9555208013938-bundle",
+            parent_sku="9555208013938",
+            product_name="Sea Buckthorn Elixir Bundle",
+            variation_name="500ml x 4",
+            unit_selling_price="235.20",
+        ) | {"nav_code": "3005462"},
+    ]).lookup(
+        seller_sku="9555208013938",
+        product_name="Invoice text wrapped by PDF layout",
+        variation_name=None,
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.unit_selling_price == Decimal("58.80")
+    assert result.nav_code == "3005462"
+
+
+def test_exact_perilla_seller_sku_wins_over_parent_sku_bundle():
+    result = _master([
+        _row(
+            seller_sku="8809143642021",
+            parent_sku="",
+            product_name="Perilla Oil",
+            variation_name="180ml",
+            unit_selling_price="148.00",
+        ) | {"nav_code": "5000000"},
+        _row(
+            seller_sku="8809143642021-2",
+            parent_sku="8809143642021",
+            product_name="Perilla Oil Bundle",
+            variation_name="Bundle 180ml x2btl",
+            unit_selling_price="289.00",
+        ) | {"nav_code": "5000000"},
+    ]).lookup(
+        seller_sku="8809143642021",
+        product_name="Perilla Oil",
+        variation_name=None,
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.unit_selling_price == Decimal("148.00")
+    assert result.nav_code == "5000000"
+
+
+def test_parent_sku_only_resolved_sku_still_matches_sunshine_detox_identity():
+    result = _master([
+        _row(
+            seller_sku="",
+            parent_sku="9555208010500",
+            product_name="SImply Natural Organic Sunshine Detox Muesli Oat 500g",
+            variation_name="",
+            unit_selling_price="19.50",
+        ) | {"nav_code": "5000309"},
+    ]).lookup(
+        seller_sku="9555208010500",
+        product_name="SImply Natural Organic Sunshine Detox Muesli Oat 500g",
+        variation_name=None,
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.unit_selling_price == Decimal("19.50")
+    assert result.nav_code == "5000309"
+
+
 def test_less_alias_is_only_used_after_the_original_sku_has_no_candidates():
     result = _master([
         _row(seller_sku="9555208106654", variation_name="25% Less Sweet"),

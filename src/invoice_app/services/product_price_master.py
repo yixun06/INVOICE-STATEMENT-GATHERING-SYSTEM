@@ -221,10 +221,20 @@ class ProductPriceMaster:
         if _is_invalid_sku(requested_seller_sku):
             return self._resolve_name_variation(product_name, variation_name)
 
-        candidates = self._sku_candidates(requested_seller_sku)
-        if candidates:
+        exact_seller_sku_candidates = self._seller_sku_index.get(
+            requested_seller_sku, ()
+        )
+        if exact_seller_sku_candidates:
             return self._resolve_sku_candidates(
-                candidates,
+                exact_seller_sku_candidates,
+                product_name=product_name,
+                variation_name=variation_name,
+            )
+
+        parent_sku_candidates = self._parent_sku_index.get(requested_seller_sku, ())
+        if parent_sku_candidates:
+            return self._resolve_sku_candidates(
+                parent_sku_candidates,
                 product_name=product_name,
                 variation_name=variation_name,
             )
