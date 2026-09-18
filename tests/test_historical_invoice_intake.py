@@ -90,6 +90,30 @@ def test_current_batch_builds_only_accepted_shopee_from_archived_bytes(tmp_path,
     assert entries[0].bundle.items[0].actual_selling_unit_price is None
 
 
+def test_current_batch_uses_validated_resolved_sku_when_source_sku_is_blank(tmp_path, monkeypatch):
+    from src.invoice_app.services.product_price_master import ProductPriceMaster
+
+    archived = tmp_path / "resolved-sku.pdf"
+    archived.write_bytes(b"source")
+    monkeypatch.setattr("src.invoice_app.services.historical_invoice_intake.resolve_archived_pdf_path", lambda *_: archived)
+    order = {"platform": "Shopee", "order_id": "SHP-RESOLVED", "source_pdf": "resolved-sku.pdf", "status": "Accepted"}
+    product = {
+        "platform": "Shopee", "order_id": "SHP-RESOLVED", "source_pdf": "resolved-sku.pdf", "status": "Accepted",
+        "seller_sku": "", "sku_missing_in_source": True, "resolved_seller_sku": "RESOLVED-SKU",
+        "product_name": "Ambiguous source name", "quantity": 1,
+    }
+    master = ProductPriceMaster.from_rows([
+        {"seller_sku": "RESOLVED-SKU", "parent_sku": "", "product_name": "Ambiguous source name", "variation_name": "", "unit_selling_price": "10.00", "nav_code": "NAV-1"},
+        {"seller_sku": "OTHER-SKU", "parent_sku": "", "product_name": "Ambiguous source name", "variation_name": "", "unit_selling_price": "12.00", "nav_code": "NAV-2"},
+    ])
+
+    entries = build_current_batch_staging(batch_id="batch", orders=[order], products=[product], reviews=[], price_master=master)
+
+    assert entries[0].status is IntakeStatus.NEW
+    assert entries[0].bundle.items[0].seller_sku is None
+    assert entries[0].bundle.items[0].resolved_seller_sku == "RESOLVED-SKU"
+
+
 def test_current_batch_fails_closed_for_related_manual_review_or_unavailable_archive(tmp_path, monkeypatch):
     archived = tmp_path / "member.pdf"
     archived.write_bytes(b"source")

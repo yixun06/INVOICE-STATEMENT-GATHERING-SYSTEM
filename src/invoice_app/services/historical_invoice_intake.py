@@ -104,7 +104,7 @@ def build_current_batch_staging(
         enrichment_error = None
         for product in candidate_products:
             lookup = price_master.lookup(
-                seller_sku=product.get("seller_sku"), product_name=product.get("product_name"),
+                seller_sku=product.get("seller_sku") or product.get("resolved_seller_sku"), product_name=product.get("product_name"),
                 variation_name=product.get("variation") or product.get("variation_name"),
             )
             if lookup.status in {PriceLookupStatus.PRICE_NOT_FOUND, PriceLookupStatus.PRICING_CONFLICT, PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS} or lookup.unit_selling_price is None:
