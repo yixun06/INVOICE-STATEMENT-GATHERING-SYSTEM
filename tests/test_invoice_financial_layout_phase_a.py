@@ -184,6 +184,20 @@ def test_blank_ads_escrow_value_remains_unavailable_without_manual_review():
     assert find_shopee_review_issue(blank_ads) is None
 
 
+def test_captured_ads_escrow_value_is_preserved_without_manual_review():
+    text = (
+            NORMAL_TEXT.replace(
+                "Estimated Order Income RM22.00",
+                "Ads Escrow Top Up Fee -RM4.25\nEstimated Order Income RM17.75",
+        )
+        .replace("Fees & Charges -RM3.00", "Fees & Charges -RM7.25")
+    )
+    captured_ads = extract_shopee_data(text, "captured-ads.pdf")
+
+    assert captured_ads.income["ads_escrow_top_up_fee"] == "-4.25"
+    assert find_shopee_review_issue(captured_ads) is None
+
+
 def test_blank_ads_escrow_does_not_mask_another_required_income_blocker():
     missing_product_price = extract_shopee_data(
         NORMAL_TEXT.replace(
