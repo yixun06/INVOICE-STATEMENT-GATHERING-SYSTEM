@@ -352,7 +352,7 @@ def test_runtime_refund_quantity_is_not_persisted_or_fingerprinted(
     assert source_fact_fingerprint(bundle) != source_fact_fingerprint(polluted)
     assert not hasattr(bundle.items[1], "source_return_refund_quantity")
     assert len(INVOICE_ORDERS_HEADERS) == 44
-    assert len(INVOICE_ITEMS_HEADERS) == 22
+    assert len(INVOICE_ITEMS_HEADERS) == 23
     assert len(STATEMENT_DATA_HEADERS) == 40
     assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
     assert len(STATEMENT_SUMMARY_HEADERS) == 14

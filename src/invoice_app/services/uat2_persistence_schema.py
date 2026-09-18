@@ -29,8 +29,12 @@ PRE_FINANCIAL_INVOICE_ITEMS_HEADERS = (
     "platform", "order_id", "item_index", "seller_sku", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
 )
 
-INVOICE_ITEMS_HEADERS = (
+PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS = (
     "platform", "order_id", "item_index", "seller_sku", "sku_missing_in_source", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "promotion_advertised_amount", "promotion_discount_percent", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
+)
+
+INVOICE_ITEMS_HEADERS = (
+    "platform", "order_id", "item_index", "seller_sku", "sku_missing_in_source", "resolved_seller_sku", "nav", "product_name", "variation", "quantity", "unit_price", "actual_selling_unit_price", "line_subtotal", "promotion_group_id", "promotion_label", "promotion_advertised_amount", "promotion_discount_percent", "source_group_total", "statement_product_price", "statement_refund_amount", "statement_net_selling_amount", "source_pdf", "source_hash",
 )
 
 STATEMENT_DATA_HEADERS = (
@@ -71,7 +75,8 @@ assert len(PRE_FINANCIAL_INVOICE_ORDERS_HEADERS) == 40
 assert PRE_FINANCIAL_INVOICE_ORDERS_HEADERS[INVOICE_ORDERS_DIFFERENCE_INDEX] == "difference"
 assert len(INVOICE_ORDERS_HEADERS) == 44
 assert len(PRE_FINANCIAL_INVOICE_ITEMS_HEADERS) == 19
-assert len(INVOICE_ITEMS_HEADERS) == 22
+assert len(PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS) == 22
+assert len(INVOICE_ITEMS_HEADERS) == 23
 assert len(STATEMENT_DATA_HEADERS) == 40
 assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
 assert len(STATEMENT_SUMMARY_HEADERS) == 14

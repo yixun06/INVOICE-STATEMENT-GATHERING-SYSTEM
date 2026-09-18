@@ -104,7 +104,7 @@ def revalidate_shopee_invoice(
     enrichment: list[dict[str, Any]] = []
     for product in working:
         lookup = price_master.lookup(
-            seller_sku=product.get("seller_sku"),
+            seller_sku=_effective_seller_sku(product),
             product_name=product.get("product_name"),
             variation_name=product.get("variation") or product.get("variation_name"),
         )
@@ -113,7 +113,10 @@ def revalidate_shopee_invoice(
         if not lookup.nav_code:
             return _failed(working, "Resolved Product Master row has blank NAV CODE.")
         enrichment.append({"unit_price": lookup.unit_selling_price, "nav": lookup.nav_code})
-    pricing = calculate_shopee_product_pricing(working, price_master)
+    pricing = calculate_shopee_product_pricing(
+        [dict(product, seller_sku=_effective_seller_sku(product)) for product in working],
+        price_master,
+    )
     invalid_promotion = next(
         (
             result
@@ -131,6 +134,10 @@ def revalidate_shopee_invoice(
             layout=layout,
         )
     return ShopeeInvoiceRevalidationResult(tuple(working), tuple(enrichment), layout)
+
+
+def _effective_seller_sku(product: Mapping[str, Any]) -> Any:
+    return product.get("seller_sku") or product.get("resolved_seller_sku")
 
 
 def _refresh_promotion_membership_quantities(products: list[dict[str, Any]]) -> None:

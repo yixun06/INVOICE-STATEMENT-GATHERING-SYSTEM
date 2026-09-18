@@ -17,6 +17,7 @@ from src.invoice_app.services.manual_review_resolution import (
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
 )
+from src.invoice_app.review_reason_codes import SKU_RESOLUTION_REQUIRED
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.review_reason_codes import (
     INCOME_COMPLETION_ANCHOR_MISSING,
@@ -35,6 +36,47 @@ def _master():
 def _review():
     order = {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "invoice_financial_layout": "NORMAL_ORDER", "merchandise_subtotal": "30.00", "product_price": "30.00", "shipping_subtotal": "0.00", "shipping_fee_paid_by_buyer": "0.00", "shipping_fee_charged_by_logistic_provider": "0.00", "seller_paid_shipping_fee_sst": "0.00", "fees_charges_total": "0.00", "commission_fee": "0.00", "service_fee": "0.00", "transaction_fee": "0.00", "order_income": "30.00", "income_type": "Estimated"}
     return {"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "status": "Manual Review", "reason_code": PRODUCT_COUNT_MISMATCH, "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.", "order_payload": order, "product_payloads": [{"batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1", "seller_sku": "SKU-1", "product_name": "First", "quantity": 1, "unit_price": "10.00", "line_total": "10.00", "line_subtotal": "10.00", "source_line_subtotal": "10.00"}]}
+
+
+def _sku_resolution_review():
+    review = _review()
+    review["reason_code"] = SKU_RESOLUTION_REQUIRED
+    review["reason"] = "Seller SKU Resolution Required: Source Missing SKU has no Seller SKU in the original Invoice source."
+    review["product_payloads"] = [{
+        "batch_id": "batch", "source_pdf": "source.pdf", "platform": "Shopee", "order_id": "SHP-1",
+        "seller_sku": "", "sku_missing_in_source": True, "product_name": "Second", "variation": "Blue",
+        "quantity": 1, "unit_price": "20.00", "line_total": "20.00", "line_subtotal": "20.00", "source_line_subtotal": "20.00",
+    }]
+    review["order_payload"].update({"merchandise_subtotal": "20.00", "product_price": "20.00", "order_income": "20.00"})
+    return review
+
+
+def test_manual_sku_resolution_preserves_blank_source_sku_and_requires_product_master_validation():
+    review = _sku_resolution_review()
+    plan = resolution_plan(review)
+    assert plan is not None
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    rejected = apply_resolution(
+        state,
+        key=plan.key,
+        values={"source_confirmed": True, "resolved_seller_skus": {"0": "UNKNOWN"}},
+        price_master=_master(),
+    )
+    assert rejected.resolved is False
+    assert state["reviews"] == [review]
+
+    accepted = apply_resolution(
+        state,
+        key=plan.key,
+        values={"source_confirmed": True, "resolved_seller_skus": {"0": "SKU-2"}},
+        price_master=_master(),
+    )
+    assert accepted.resolved is True
+    assert state["reviews"] == []
+    assert state["products"][0]["seller_sku"] == ""
+    assert state["products"][0]["sku_missing_in_source"] is True
+    assert state["products"][0]["resolved_seller_sku"] == "SKU-2"
 
 
 def _income_review():

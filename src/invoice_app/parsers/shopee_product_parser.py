@@ -184,6 +184,34 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
                 columns,
                 page.number,
             )
+        else:
+            metric_items = _parse_positioned_items_without_sku(
+                rows[header_index + 1 : section_end],
+                columns,
+                page.number,
+            )
+            by_metric_top = {
+                item["metric_top"]: item
+                for item in metric_items
+                if item.get("metric_top") is not None
+            }
+            anchored_metric_tops = {
+                item["metric_top"]
+                for item in section_items
+                if item.get("metric_top") is not None
+            }
+            for item in section_items:
+                candidate = by_metric_top.get(item.get("metric_top"))
+                if candidate is not None and candidate.get("product_name"):
+                    item["product_name"] = candidate["product_name"]
+                    item["variation"] = candidate.get("variation", "")
+            section_items.extend(
+                item
+                for item in metric_items
+                if item.get("metric_top") not in anchored_metric_tops
+                and _is_reliable_source_missing_sku_item(item)
+            )
+            section_items.sort(key=lambda item: float(item.get("metric_top") or 0))
 
         _apply_group_promotion(
             section_items,
@@ -537,6 +565,7 @@ def _parse_positioned_items_without_sku(
             "evidence": "positioned-no-sku",
             "source_page": page_number,
             "sku_missing_in_source": True,
+            "metric_top": row.top,
         }
         _attach_source_return_refund_evidence(
             item,
@@ -547,6 +576,16 @@ def _parse_positioned_items_without_sku(
         items.append(item)
         previous_metric = metric_index
     return items
+
+
+def _is_reliable_source_missing_sku_item(item: Mapping[str, Any]) -> bool:
+    return bool(
+        item.get("metric_top") is not None
+        and str(item.get("product_name") or "").strip()
+        and int(item.get("quantity") or 0) > 0
+        and item.get("line_total") is not None
+        and not str(item.get("seller_sku") or "").strip()
+    )
 
 
 def _apply_group_promotion(
@@ -1047,6 +1086,8 @@ def _is_product_noise(value: str) -> bool:
     }:
         return True
     if _promotion_details(value) is not None:
+        return True
+    if re.fullmatch(r"SKU\s*:\s*.+", value, flags=re.IGNORECASE):
         return True
     return bool(re.fullmatch(r"(?:no\.?)?\s*product\(s\)", lowered))
 

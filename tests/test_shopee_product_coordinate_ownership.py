@@ -1,10 +1,11 @@
 from decimal import Decimal
 
-from src.invoice_app.pdf_document import PdfWord
+from src.invoice_app.pdf_document import PdfDocument, PdfPage, PdfWord
 from src.invoice_app.parsers.shopee_product_parser import (
     _Columns,
     _Row,
     _parse_positioned_item_block,
+    parse_positioned_products,
     reconcile_product_candidates,
 )
 
@@ -123,3 +124,35 @@ def test_coordinate_product_name_keeps_space_for_an_ordinary_wrapped_word():
 
     assert item is not None
     assert item["product_name"] == "[HALAL] Organic Sea Buckthorn Elixir"
+
+
+def test_mixed_sku_rows_preserve_a_deterministic_source_missing_sku_item():
+    page = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Anchored One", 140, 250, 70), _word("10.00", 340, 370, 70),
+            _word("1", 405, 410, 70), _word("10.00", 455, 485, 70),
+            _word("SKU:", 140, 162, 80), _word("SKU-ONE", 165, 215, 80),
+            _word("Source Missing SKU", 140, 265, 95), _word("17.55", 340, 370, 95),
+            _word("1", 405, 410, 95), _word("17.55", 455, 485, 95),
+            _word("Anchored Two", 140, 250, 110), _word("20.00", 340, 370, 110),
+            _word("1", 405, 410, 110), _word("20.00", 455, 485, 110),
+            _word("SKU:", 140, 162, 120), _word("SKU-TWO", 165, 215, 120),
+            _word("Merchandise", 110, 190, 145), _word("Subtotal", 195, 245, 145),
+        ),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 3 products", pages=(page,)))
+
+    assert [(item["seller_sku"], item["product_name"], item["quantity"], item["line_total"]) for item in items] == [
+        ("SKU-ONE", "Anchored One", 1, Decimal("10.00")),
+        ("", "Source Missing SKU", 1, Decimal("17.55")),
+        ("SKU-TWO", "Anchored Two", 1, Decimal("20.00")),
+    ]
+    assert items[1]["sku_missing_in_source"] is True

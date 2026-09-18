@@ -26,6 +26,7 @@ from ..review_reason_codes import (
     NO_VALID_PRODUCTS,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
     PRODUCT_COUNT_MISMATCH,
+    SKU_RESOLUTION_REQUIRED,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +84,26 @@ def find_shopee_review_issue(
                 f"but {product_anchor_count} product anchors were extracted."
             ),
             reason_code=PRODUCT_COUNT_MISMATCH,
+        )
+
+    source_missing_sku = [
+        item
+        for item in product_items
+        if bool(item.get("sku_missing_in_source"))
+        and not str(item.get("seller_sku") or "").strip()
+    ]
+    if source_missing_sku:
+        names = ", ".join(
+            str(item.get("product_name") or "Product").strip()
+            for item in source_missing_sku
+        )
+        return ShopeeReviewIssue(
+            order_id=data.order_id,
+            reason=(
+                "Seller SKU Resolution Required: Seller SKU is not provided in the "
+                f"original Invoice source for {names}."
+            ),
+            reason_code=SKU_RESOLUTION_REQUIRED,
         )
 
     promotion_evidence_error = validate_shopee_promotion_evidence(product_items)

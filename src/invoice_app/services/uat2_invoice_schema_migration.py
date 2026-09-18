@@ -20,6 +20,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
     PRE_FINANCIAL_INVOICE_ITEMS_HEADERS,
+    PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS,
     PRE_FINANCIAL_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
@@ -38,6 +39,7 @@ class UAT2InvoiceSchemaMigrationError(RuntimeError):
 
 class UAT2InvoiceSchemaState(Enum):
     ELIGIBLE_FOR_MIGRATION = "ELIGIBLE_FOR_MIGRATION"
+    ELIGIBLE_FOR_RESOLVED_SKU_MIGRATION = "ELIGIBLE_FOR_RESOLVED_SKU_MIGRATION"
     ALREADY_MIGRATED = "ALREADY_MIGRATED"
 
 
@@ -86,6 +88,11 @@ def classify_uat2_invoice_schema(
         and items.headers == PRE_FINANCIAL_INVOICE_ITEMS_HEADERS
     ):
         return UAT2InvoiceSchemaState.ELIGIBLE_FOR_MIGRATION
+    if (
+        orders.headers == INVOICE_ORDERS_HEADERS
+        and items.headers == PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS
+    ):
+        return UAT2InvoiceSchemaState.ELIGIBLE_FOR_RESOLVED_SKU_MIGRATION
     if orders.headers == INVOICE_ORDERS_HEADERS and items.headers == INVOICE_ITEMS_HEADERS:
         return UAT2InvoiceSchemaState.ALREADY_MIGRATED
     raise UAT2InvoiceSchemaMigrationError(
@@ -96,7 +103,14 @@ def classify_uat2_invoice_schema(
 def build_uat2_invoice_schema_migration_requests(
     snapshot: SpreadsheetSchemaSnapshot,
 ) -> tuple[Mapping[str, Any], ...]:
-    if classify_uat2_invoice_schema(snapshot) is not UAT2InvoiceSchemaState.ELIGIBLE_FOR_MIGRATION:
+    state = classify_uat2_invoice_schema(snapshot)
+    if state is UAT2InvoiceSchemaState.ELIGIBLE_FOR_RESOLVED_SKU_MIGRATION:
+        items_id = snapshot.tabs[INVOICE_ITEMS_TAB].sheet_id
+        return (
+            _insert_columns_request(items_id, 5, 1),
+            _header_update_request(items_id, INVOICE_ITEMS_HEADERS),
+        )
+    if state is not UAT2InvoiceSchemaState.ELIGIBLE_FOR_MIGRATION:
         raise UAT2InvoiceSchemaMigrationError(
             "UAT2 Invoice schema is already migrated; no batch was built."
         )

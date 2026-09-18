@@ -332,19 +332,19 @@ def test_parse_real_shopee_promotional_bundle_allocation():
     assert reviews[0]["status"] == "Manual Review"
 
 
-def test_parse_real_shopee_without_source_sku_remains_accepted():
+def test_parse_real_shopee_without_source_sku_requires_resolution():
     pdf_path = SHOPEE_SAMPLES / "08082026" / "260808QURJ0K5F.pdf"
     orders, products, reviews = process_pdf_file(pdf_path.name, pdf_path, "batch-real")
     orders, products, reviews = apply_batch_rules(orders, products, reviews)
 
-    assert reviews == []
-    assert len(orders) == 1
-    assert len(products) == 1
-    assert products[0]["seller_sku"] == ""
-    assert products[0]["sku_missing_in_source"] is True
-    assert products[0]["quantity"] == 4
-    assert products[0]["line_total"] == "83.60"
-    assert "remarks" not in products[0]
+    assert orders == []
+    assert products == []
+    assert reviews[0]["reason_code"] == "SKU_RESOLUTION_REQUIRED"
+    item = reviews[0]["product_payloads"][0]
+    assert item["seller_sku"] == ""
+    assert item["sku_missing_in_source"] is True
+    assert item["quantity"] == 4
+    assert item["line_total"] == "83.60"
 
 
 def test_parse_real_zenxin_multi_page_sample():

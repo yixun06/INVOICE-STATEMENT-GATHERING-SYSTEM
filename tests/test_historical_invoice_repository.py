@@ -69,6 +69,20 @@ def test_material_refund_income_quantity_and_sku_changes_change_fingerprint():
     assert all(source_fact_fingerprint(original) != source_fact_fingerprint(variant) for variant in variants)
 
 
+def test_resolved_seller_sku_is_persisted_but_not_a_source_fact():
+    original = _bundle()
+    source_missing = replace(
+        original,
+        items=(replace(original.items[0], seller_sku="", sku_missing_in_source=True),),
+    )
+    resolved = replace(
+        source_missing,
+        items=(replace(source_missing.items[0], resolved_seller_sku="MANUAL-SKU-1"),),
+    )
+
+    assert source_fact_fingerprint(source_missing) == source_fact_fingerprint(resolved)
+
+
 def test_repository_import_statuses_no_duplicate_and_no_conflict_overwrite():
     repository = InMemoryHistoricalInvoiceRepository()
     original = _bundle()

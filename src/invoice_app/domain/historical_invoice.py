@@ -67,6 +67,7 @@ class CanonicalInvoiceItem:
     item_index: int
     seller_sku: str | None = None
     sku_missing_in_source: bool | None = None
+    resolved_seller_sku: str | None = None
     nav: str | None = None
     product_name: str | None = None
     variation: str | None = None
@@ -220,6 +221,7 @@ def _map_item(
         item_index=index,
         seller_sku=_optional_text(source.get("seller_sku")),
         sku_missing_in_source=_optional_bool(source.get("sku_missing_in_source")),
+        resolved_seller_sku=_optional_text(source.get("resolved_seller_sku")),
         nav=_optional_text(master.get("nav")),
         product_name=_optional_text(source.get("product_name")),
         variation=_first_present_text(

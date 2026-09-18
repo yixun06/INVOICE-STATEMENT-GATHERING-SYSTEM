@@ -11,7 +11,7 @@ import csv
 from dataclasses import replace
 from hashlib import sha256
 import io
-from typing import Any, Callable, MutableMapping
+from typing import Any, Callable, Mapping, MutableMapping
 
 import streamlit as st
 
@@ -88,6 +88,7 @@ from ..services.manual_review_resolution import (
     MISSING_INCOME,
     FINAL_AMOUNT,
     PRODUCT_COUNT_MISMATCH,
+    SKU_RESOLUTION,
     PROMOTION_SUBTOTAL,
     add_draft_product,
     apply_product_draft,
@@ -1300,6 +1301,8 @@ def _render_manual_review_resolution() -> None:
                         if review.get("product_payloads"):
                             st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
                         _render_missing_product_draft(plan.key, review)
+                    elif plan.issue_type == SKU_RESOLUTION:
+                        _render_sku_resolution_form(plan.key, review)
                     elif plan.issue_type == PROMOTION_SUBTOTAL:
                         _render_promotion_subtotal_form(plan.key, review)
                     elif plan.issue_type == FINAL_AMOUNT:
@@ -1320,6 +1323,37 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
             "Correction applied and revalidated. Continue to Reconcile." if outcome.resolved else f"Still needs review — {outcome.reason}"
         )
     st.rerun()
+
+
+def _render_sku_resolution_form(key: str, review: Mapping[str, Any]) -> None:
+    products = [
+        (index, item)
+        for index, item in enumerate(review.get("product_payloads") or [])
+        if bool(item.get("sku_missing_in_source"))
+        and not str(item.get("seller_sku") or "").strip()
+    ]
+    if not products:
+        st.warning("This review no longer contains a source-missing Seller SKU product.")
+        return
+    with st.form(f"mr_sku_resolution_{key}"):
+        st.caption("Seller SKU from source: Not provided. Enter only a SKU verified from an authoritative source outside this PDF.")
+        candidates: dict[str, str] = {}
+        for index, item in products:
+            st.write(str(item.get("product_name") or "Product"))
+            candidates[str(index)] = st.text_input(
+                "Resolved Seller SKU",
+                value="",
+                key=f"mr_resolved_sku_{key}_{index}",
+            )
+        confirmed = st.checkbox(
+            "I confirm these candidate SKUs were verified from an authoritative source and are not shown in this PDF.",
+            key=f"mr_resolved_sku_confirm_{key}",
+        )
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(
+                key,
+                {"source_confirmed": confirmed, "resolved_seller_skus": candidates},
+            )
 
 
 def _render_financial_enrichment_draft(key: str, review: dict[str, Any]) -> None:

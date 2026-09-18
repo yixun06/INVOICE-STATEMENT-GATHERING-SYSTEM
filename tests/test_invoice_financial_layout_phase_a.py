@@ -42,6 +42,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
     PRE_FINANCIAL_INVOICE_ITEMS_HEADERS,
+    PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS,
     PRE_FINANCIAL_INVOICE_ORDERS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
@@ -129,9 +130,10 @@ def test_exact_phase_a_invoice_headers_and_placements():
     assert INVOICE_ORDERS_HEADERS[7] == "invoice_financial_layout"
     assert INVOICE_ORDERS_HEADERS[15:17] == ("reverse_shipping_fee", "reverse_shipping_fee_sst")
     assert INVOICE_ORDERS_HEADERS[25] == "ams_commission_fee"
-    assert len(INVOICE_ITEMS_HEADERS) == 22
+    assert len(INVOICE_ITEMS_HEADERS) == 23
     assert INVOICE_ITEMS_HEADERS[4] == "sku_missing_in_source"
-    assert INVOICE_ITEMS_HEADERS[14:16] == (
+    assert INVOICE_ITEMS_HEADERS[5] == "resolved_seller_sku"
+    assert INVOICE_ITEMS_HEADERS[15:17] == (
         "promotion_advertised_amount",
         "promotion_discount_percent",
     )
@@ -275,6 +277,18 @@ def test_invoice_schema_migration_plan_accepts_only_exact_current_four_tab_state
     assert len(requests) == 7
     assert requests[0]["insertDimension"]["range"]["startIndex"] == 7
     assert requests[4]["insertDimension"]["range"]["startIndex"] == 4
+
+
+def test_invoice_schema_migration_adds_only_resolved_sku_column_to_current_invoice_items():
+    snapshot = SpreadsheetSchemaSnapshot(tabs={
+        INVOICE_ORDERS_TAB: SheetSchema(1, INVOICE_ORDERS_HEADERS),
+        INVOICE_ITEMS_TAB: SheetSchema(2, PRE_RESOLVED_SKU_INVOICE_ITEMS_HEADERS),
+        STATEMENT_DATA_TAB: SheetSchema(3, STATEMENT_DATA_HEADERS),
+        STATEMENT_FINANCIAL_COMPONENTS_TAB: SheetSchema(4, STATEMENT_FINANCIAL_COMPONENT_HEADERS),
+    })
+
+    assert classify_uat2_invoice_schema(snapshot) is UAT2InvoiceSchemaState.ELIGIBLE_FOR_RESOLVED_SKU_MIGRATION
+    assert build_uat2_invoice_schema_migration_requests(snapshot)[0]["insertDimension"]["range"]["startIndex"] == 5
 
 
 def test_invoice_schema_migrator_applies_one_batch_and_verifies_exact_target():

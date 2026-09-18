@@ -109,6 +109,23 @@ def test_exact_headers_and_full_bundle_round_trip_preserve_text_decimal_and_time
     assert len(gateway.tabs[INVOICE_ITEMS_TAB]) == 3
 
 
+def test_resolved_seller_sku_round_trips_without_rewriting_source_sku():
+    gateway = FakeGateway()
+    repository = _repository(gateway)
+    bundle = _bundle()
+    source_missing = replace(
+        bundle,
+        items=(replace(bundle.items[0], seller_sku=None, sku_missing_in_source=True, resolved_seller_sku="MANUAL-SKU-1"),),
+    )
+
+    assert repository.import_invoice(source_missing).status is ImportStatus.NEW
+    restored = repository.get_items_by_order_ids("Shopee", [source_missing.order.order_id])[source_missing.order.order_id][0]
+
+    assert restored.seller_sku is None
+    assert restored.sku_missing_in_source is True
+    assert restored.resolved_seller_sku == "MANUAL-SKU-1"
+
+
 @pytest.mark.parametrize("tab", [INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB])
 def test_missing_canonical_tab_fails_closed(tab):
     gateway = FakeGateway()

@@ -17,12 +17,13 @@ from ..parsers.validation import (
     financial_reconciliation_evidence_notes,
     validate_product_items,
 )
-from ..review_reason_codes import INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE, FINAL_AMOUNT_EXTRACTION_MISSING
+from ..review_reason_codes import FINAL_AMOUNT_EXTRACTION_MISSING, INCOME_COMPLETION_ANCHOR_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE, SKU_RESOLUTION_REQUIRED
 
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
 MISSING_INCOME = "MISSING_INCOME_INFORMATION"
 FINAL_AMOUNT = "FINAL_AMOUNT_EXTRACTION"
 PROMOTION_SUBTOTAL = "PROMOTION_SUBTOTAL"
+SKU_RESOLUTION = "SKU_RESOLUTION"
 CORRECTION_DRAFTS_KEY = "manual_review_correction_drafts"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
 _FINANCIAL_ENRICHMENT_FIELDS = tuple(
@@ -72,6 +73,8 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         return ResolutionPlan(review_key(review), MISSING_INCOME)
     if code == FINAL_AMOUNT_EXTRACTION_MISSING:
         return ResolutionPlan(review_key(review), FINAL_AMOUNT)
+    if code == SKU_RESOLUTION_REQUIRED:
+        return ResolutionPlan(review_key(review), SKU_RESOLUTION)
     if code == INCOMPLETE_PROMOTION_EVIDENCE and promotion_subtotal_groups(review):
         return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
     return None
@@ -262,6 +265,19 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if error:
             return ResolutionOutcome(False, error)
         products.append(added)
+    elif plan.issue_type == SKU_RESOLUTION:
+        if values.get("source_confirmed") is not True:
+            return ResolutionOutcome(False, "Confirm that every resolved Seller SKU was verified from an authoritative source outside the Invoice PDF.")
+        candidates = values.get("resolved_seller_skus")
+        if not isinstance(candidates, Mapping):
+            return ResolutionOutcome(False, "Provide a resolved Seller SKU for every source-missing SKU product.")
+        for index, product in enumerate(products):
+            if not bool(product.get("sku_missing_in_source")) or str(product.get("seller_sku") or "").strip():
+                continue
+            candidate = str(candidates.get(str(index)) or "").strip()
+            if not candidate:
+                return ResolutionOutcome(False, "Provide a resolved Seller SKU for every source-missing SKU product.")
+            product["resolved_seller_sku"] = candidate
     elif plan.issue_type == PROMOTION_SUBTOTAL:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(False, "Confirm that the subtotal is visible in the original Invoice source.")
