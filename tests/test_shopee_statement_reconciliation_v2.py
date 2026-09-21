@@ -172,14 +172,21 @@ def _item(
     promotion_group: str | None = None,
     source_group_total: str | None = None,
     source_pdf: str = "invoice.pdf",
+    nav: str | None = None,
+    variation: str | None = None,
+    quantity: int = 1,
+    unit_price: str | None = None,
 ) -> CanonicalInvoiceItem:
     return CanonicalInvoiceItem(
         platform="Shopee",
         order_id=order_id,
         item_index=index,
         seller_sku=sku,
+        nav=nav,
         product_name=name,
-        quantity=1,
+        variation=variation,
+        quantity=quantity,
+        unit_price=Decimal(unit_price) if unit_price is not None else None,
         line_subtotal=Decimal(subtotal) if subtotal is not None else None,
         promotion_group_id=promotion_group,
         promotion_label="Any 2" if promotion_group else None,
@@ -197,8 +204,18 @@ def _family(
     parent: str = "",
     name: str = "Green Tea",
     variation: str = "",
+    nav: str = "",
+    price: str | None = None,
 ) -> ProductFamilyCandidate:
-    return ProductFamilyCandidate(product_id, sku, parent, name, variation)
+    return ProductFamilyCandidate(
+        product_id,
+        sku,
+        parent,
+        name,
+        variation,
+        nav,
+        Decimal(price) if price is not None else None,
+    )
 
 
 def _resolver(*families: ProductFamilyCandidate) -> MappingProductFamilyResolver:
@@ -335,6 +352,179 @@ def test_promotion_group_uses_source_group_total_and_keeps_allocation_unknown():
     assert result.summary.allocation_resolved is False
     assert result.evidence.promotion.source_group_total_authority_used is True
     assert result.evidence.promotion.allocation_resolved is False
+
+
+def test_future_source_proven_promotion_and_normal_rows_reconcile_as_group():
+    order_id = "FUTURE-PROMO-SAME-PRODUCT"
+    rows = (
+        _sku_row(
+            order_id=order_id,
+            source_row=3,
+            sequence="1",
+            name="Source Haskap",
+            components=_components(product="178.00"),
+        ),
+        _sku_row(
+            order_id=order_id,
+            source_row=4,
+            sequence="2",
+            name="Source Haskap",
+            components=_components(product="58.80"),
+        ),
+    )
+    items = (
+        _item(
+            0,
+            order_id=order_id,
+            sku="HASKAP-500",
+            name="Source Haskap",
+            subtotal="58.80",
+            promotion_group="P1",
+            source_group_total="178.00",
+            nav="5000231",
+            variation="500ml",
+            quantity=4,
+            unit_price="58.80",
+        ),
+        _item(
+            1,
+            order_id=order_id,
+            sku="HASKAP-500",
+            name="Damaged extraction text",
+            subtotal="58.80",
+            nav="5000231",
+            variation="500ml",
+            unit_price="58.80",
+        ),
+    )
+    result = _evaluate(
+        rows,
+        items,
+        order=_order(
+            order_id=order_id,
+            product="236.80",
+            income="236.80",
+            final_amount="236.80",
+        ),
+        resolver=_resolver(
+            _family(
+                sku="HASKAP-500",
+                name="Canonical Haskap",
+                variation="500ml",
+                nav="5000231",
+                price="58.80",
+            )
+        ),
+    ).orders[0]
+
+    assert result.summary.identity_scope is IdentityScope.GROUP
+    assert result.summary.merchandise_reconciled is True
+    assert result.summary.allocation_resolved is False
+    assert result.evidence.identities[0].selected_pairs == ()
+    assert result.evidence.identities[0].diagnostic.startswith(
+        "Source-proven promotion product group"
+    )
+
+
+def test_source_proven_group_allows_different_statement_row_split():
+    order_id = "FUTURE-PROMO-DIFFERENT-SPLIT"
+    row = _sku_row(
+        order_id=order_id,
+        name="Source Haskap",
+        components=_components(product="236.80"),
+    )
+    items = (
+        _item(
+            0,
+            order_id=order_id,
+            sku="HASKAP-500",
+            name="Source Haskap",
+            subtotal="58.80",
+            promotion_group="P1",
+            source_group_total="178.00",
+            nav="5000231",
+            variation="500ml",
+            quantity=4,
+            unit_price="58.80",
+        ),
+        _item(
+            1,
+            order_id=order_id,
+            sku="HASKAP-500",
+            name="Damaged extraction text",
+            subtotal="58.80",
+            nav="5000231",
+            variation="500ml",
+            unit_price="58.80",
+        ),
+    )
+    result = _evaluate(
+        (row,),
+        items,
+        order=_order(order_id=order_id, product="236.80", income="236.80", final_amount="236.80"),
+        resolver=_resolver(
+            _family(sku="HASKAP-500", name="Canonical Haskap", variation="500ml", nav="5000231", price="58.80")
+        ),
+    ).orders[0]
+
+    assert result.summary.identity_scope is IdentityScope.GROUP
+    assert result.summary.merchandise_reconciled is True
+
+
+def test_promotion_group_missing_source_total_or_boundary_remains_blocked():
+    rows = (
+        _sku_row(source_row=3, sequence="1", name="Source Haskap", components=_components(product="178")),
+        _sku_row(source_row=4, sequence="2", name="Source Haskap", components=_components(product="58.80")),
+    )
+    base = dict(sku="HASKAP-500", nav="5000231", variation="500ml", unit_price="58.80", subtotal="58.80")
+    resolver = _resolver(
+        _family(sku="HASKAP-500", name="Canonical Haskap", variation="500ml", nav="5000231", price="58.80")
+    )
+    missing_total = _evaluate(
+        rows,
+        (
+            _item(0, name="Source Haskap", promotion_group="P1", quantity=4, **base),
+            _item(1, name="Damaged extraction text", **base),
+        ),
+        order=_order(product="236.80", income="236.80", final_amount="236.80"),
+        resolver=resolver,
+    ).orders[0]
+    unclear_boundary_item = replace(
+        _item(0, name="Source Haskap", quantity=4, source_group_total="178", **base),
+        promotion_label="Any 4 at RM178",
+    )
+    unclear_boundary = _evaluate(
+        rows,
+        (unclear_boundary_item, _item(1, name="Damaged extraction text", **base)),
+        order=_order(product="236.80", income="236.80", final_amount="236.80"),
+        resolver=resolver,
+    ).orders[0]
+
+    assert missing_total.summary.identity_scope is IdentityScope.UNRESOLVED
+    assert unclear_boundary.summary.identity_scope is IdentityScope.UNRESOLVED
+
+
+def test_promotion_group_different_nav_variation_or_master_price_remains_blocked():
+    rows = (
+        _sku_row(source_row=3, sequence="1", name="Source Haskap", components=_components(product="178")),
+        _sku_row(source_row=4, sequence="2", name="Source Haskap", components=_components(product="58.80")),
+    )
+    first = _item(
+        0, sku="HASKAP-500", name="Source Haskap", subtotal="58.80",
+        promotion_group="P1", source_group_total="178", nav="5000231",
+        variation="500ml", quantity=4, unit_price="58.80",
+    )
+    common = dict(sku="HASKAP-500", name="Damaged extraction text", subtotal="58.80", unit_price="58.80")
+    master = _family(sku="HASKAP-500", name="Canonical Haskap", variation="500ml", nav="5000231", price="58.80")
+    order = _order(product="236.80", income="236.80", final_amount="236.80")
+
+    different_nav = _evaluate(rows, (first, _item(1, nav="OTHER", variation="500ml", **common)), order=order, resolver=_resolver(master)).orders[0]
+    different_variation = _evaluate(rows, (first, _item(1, nav="5000231", variation="200ml", **common)), order=order, resolver=_resolver(master)).orders[0]
+    conflicting_price = _evaluate(rows, (first, _item(1, nav="5000231", variation="500ml", **common)), order=order, resolver=_resolver(replace(master, unit_selling_price=Decimal("59.80")))).orders[0]
+
+    assert different_nav.summary.identity_scope is IdentityScope.UNRESOLVED
+    assert different_variation.summary.identity_scope is IdentityScope.UNRESOLVED
+    assert conflicting_price.summary.identity_scope is IdentityScope.UNRESOLVED
 
 
 def test_refund_sensitive_group_does_not_fabricate_variation_or_allocation():

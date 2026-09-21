@@ -56,6 +56,8 @@ class ProductFamilyIdentity:
     parent_sku: str
     product_name: str
     variation: str
+    nav_code: str = ""
+    unit_selling_price: Decimal | None = None
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,8 @@ class ProductFamilyCandidate:
     parent_sku: str = ""
     product_name: str = ""
     variation: str = ""
+    nav_code: str = ""
+    unit_selling_price: Decimal | None = None
 
 
 class ProductFamilyResolver(Protocol):
@@ -69,6 +71,8 @@ def product_family_resolver_from_price_master(
                 parent_sku=record.parent_sku,
                 product_name=record.product_name,
                 variation=record.variation_name,
+                nav_code=record.nav_code or "",
+                unit_selling_price=record.unit_selling_price,
             )
         )
     return MappingProductFamilyResolver(

@@ -59,7 +59,7 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 from src.invoice_app.utils.normalize import normalize_sku_text
 
 
-RULE_VERSION = "SHOPEE_RECONCILIATION_V2_2"
+RULE_VERSION = "SHOPEE_RECONCILIATION_V2_3"
 
 _SHIPPING_COMPONENTS = (
     "Shipping Fee Paid by Buyer (excl. SST)",
@@ -163,7 +163,7 @@ def evaluate_statement_reconciliation(
         order = order_map.get(order_id)
         order_items = tuple(items_by_order.get(order_id, ()))
         contexts = tuple(contexts_by_order.get(order_id, ()))
-        identities = _evaluate_identity(contexts)
+        identities = _evaluate_identity(contexts, order_items)
         coverage = _coverage_for_order(contexts, order_items, identities)
         merchandise = _evaluate_merchandise(
             order,
@@ -495,12 +495,20 @@ def _preferred_edge(
 
 def _evaluate_identity(
     contexts: Sequence[_RowContext],
+    order_items: Sequence[CanonicalInvoiceItem],
 ) -> tuple[IdentityEvidence, ...]:
     identities: list[IdentityEvidence] = []
     selected_contexts: set[StatementMemberRef] = set()
     consumed: list[InvoiceItemRef] = []
+
+    source_proven_groups = _source_proven_promotion_groups(contexts, order_items)
+    for identity in source_proven_groups.values():
+        identities.append(identity)
+        selected_contexts.update(identity.statement_members)
+        consumed.extend(identity.invoice_members)
+
     for context in contexts:
-        if context.preferred is None:
+        if context.member in selected_contexts or context.preferred is None:
             continue
         edge = context.preferred.evidence
         selected_contexts.add(context.member)
@@ -642,6 +650,177 @@ def _evaluate_identity(
             ),
         )
     )
+
+
+def _source_proven_promotion_groups(
+    contexts: Sequence[_RowContext],
+    order_items: Sequence[CanonicalInvoiceItem],
+) -> dict[str, IdentityEvidence]:
+    """Prove aggregate identity when source rows cannot prove physical ownership."""
+
+    by_product_id: dict[str, list[_RowContext]] = defaultdict(list)
+    for context in contexts:
+        if context.family:
+            by_product_id[context.row.product_id].append(context)
+
+    result: dict[str, IdentityEvidence] = {}
+    for product_id, group_contexts in by_product_id.items():
+        family = group_contexts[0].family
+        group_items = _family_items(order_items, family)
+        if not _source_proven_promotion_group_eligible(
+            product_id,
+            group_contexts,
+            group_items,
+            by_product_id,
+        ):
+            continue
+
+        statement_refs = tuple(sorted(context.member for context in group_contexts))
+        invoice_refs = tuple(sorted(_invoice_ref(item) for item in group_items))
+        available_edges = {
+            context.member: tuple(context.edges) for context in group_contexts
+        }
+        edge_invoice_refs = tuple(
+            sorted(
+                {
+                    edge.evidence.invoice_member
+                    for edges in available_edges.values()
+                    for edge in edges
+                }
+            )
+        )
+        count, first_matching = _perfect_matchings(available_edges, edge_invoice_refs)
+
+        # Preserve existing complete deterministic ITEM allocation and complete
+        # ambiguous multiset behavior.  This route only repairs the evidence gap.
+        preferred_refs = tuple(
+            context.preferred.evidence.invoice_member
+            for context in group_contexts
+            if context.preferred is not None
+        )
+        complete_preferred = (
+            len(preferred_refs) == len(statement_refs) == len(invoice_refs)
+            and len(set(preferred_refs)) == len(preferred_refs)
+            and set(preferred_refs) == set(invoice_refs)
+        )
+        complete_existing_group = (
+            count >= 2
+            and len(statement_refs) == len(edge_invoice_refs) == len(invoice_refs)
+            and set(edge_invoice_refs) == set(invoice_refs)
+            and all(available_edges[context.member] for context in group_contexts)
+        )
+        if (
+            complete_preferred
+            or (
+                count == 1
+                and first_matching is not None
+                and len(statement_refs) == len(edge_invoice_refs) == len(invoice_refs)
+                and set(edge_invoice_refs) == set(invoice_refs)
+            )
+            or (complete_existing_group and not preferred_refs)
+        ):
+            continue
+
+        compatible_edges = tuple(
+            sorted(
+                (
+                    edge.evidence
+                    for context in group_contexts
+                    for edge in context.edges
+                ),
+                key=lambda value: (value.statement_member, value.invoice_member),
+            )
+        )
+        result[product_id] = IdentityEvidence(
+            identity_scope=IdentityScope.GROUP,
+            product_id=product_id,
+            statement_members=statement_refs,
+            invoice_members=invoice_refs,
+            compatible_edges=compatible_edges,
+            selected_pairs=(),
+            perfect_matching_count=count,
+            allocation_resolved=False,
+            diagnostic=(
+                "Source-proven promotion product group is complete; physical "
+                "Statement-to-Invoice row ownership remains unallocated."
+            ),
+        )
+    return result
+
+
+def _source_proven_promotion_group_eligible(
+    product_id: str,
+    contexts: Sequence[_RowContext],
+    group_items: Sequence[CanonicalInvoiceItem],
+    contexts_by_product_id: Mapping[str, Sequence[_RowContext]],
+) -> bool:
+    if not contexts or len(group_items) < 2:
+        return False
+    if any(not context.edges for context in contexts):
+        return False
+
+    promotion_items = tuple(item for item in group_items if _has_promotion(item))
+    if not promotion_items:
+        return False
+    if any(
+        not (item.promotion_group_id or "").strip()
+        or item.source_group_total is None
+        or item.quantity is None
+        or item.quantity <= 0
+        for item in promotion_items
+    ):
+        return False
+    normal_items = tuple(item for item in group_items if not _has_promotion(item))
+    if any(
+        item.line_subtotal is None
+        or item.quantity is None
+        or item.quantity <= 0
+        for item in normal_items
+    ):
+        return False
+
+    skus = {normalize_sku_text(item.seller_sku) for item in group_items}
+    navs = {(item.nav or "").strip().casefold() for item in group_items}
+    variations = {
+        normalize_statement_product_name(item.variation) for item in group_items
+    }
+    prices = {item.unit_price for item in group_items}
+    if "" in skus or "" in navs or len(skus) != 1 or len(navs) != 1:
+        return False
+    if len(variations) != 1 or None in prices or len(prices) != 1:
+        return False
+
+    expected_nav = next(iter(navs))
+    expected_variation = next(iter(variations))
+    expected_price = next(iter(prices))
+    for item in group_items:
+        linked = _family_candidates_for_item(item, contexts[0].family)
+        if not linked:
+            return False
+        candidate_identities = {
+            (
+                (candidate.nav_code or "").strip().casefold(),
+                normalize_statement_product_name(candidate.variation),
+                candidate.unit_selling_price,
+            )
+            for candidate in linked
+        }
+        if candidate_identities != {
+            (expected_nav, expected_variation, expected_price)
+        }:
+            return False
+
+    # A member that fits another Product ID family has ambiguous group ownership.
+    for item in group_items:
+        eligible_product_ids = {
+            other_product_id
+            for other_product_id, other_contexts in contexts_by_product_id.items()
+            if other_contexts
+            and item in _family_items((item,), other_contexts[0].family)
+        }
+        if eligible_product_ids != {product_id}:
+            return False
+    return True
 
 
 def _unresolved_identity(context: _RowContext) -> IdentityEvidence:
@@ -1231,10 +1410,23 @@ def _product_family_snapshot(
                     parent_sku=candidate.parent_sku,
                     product_name=candidate.product_name,
                     variation=candidate.variation,
+                    nav_code=candidate.nav_code,
+                    unit_selling_price=candidate.unit_selling_price,
                 )
                 for family in families
                 for candidate in family
-            }
+            },
+            key=lambda candidate: (
+                candidate.product_id,
+                candidate.seller_sku,
+                candidate.parent_sku,
+                candidate.product_name,
+                candidate.variation,
+                candidate.nav_code,
+                ""
+                if candidate.unit_selling_price is None
+                else str(candidate.unit_selling_price),
+            ),
         )
     )
     payload = [
@@ -1244,6 +1436,12 @@ def _product_family_snapshot(
             "product_name": candidate.product_name,
             "seller_sku": candidate.seller_sku,
             "variation": candidate.variation,
+            "nav_code": candidate.nav_code,
+            "unit_selling_price": (
+                str(candidate.unit_selling_price)
+                if candidate.unit_selling_price is not None
+                else None
+            ),
         }
         for candidate in candidates
     ]
