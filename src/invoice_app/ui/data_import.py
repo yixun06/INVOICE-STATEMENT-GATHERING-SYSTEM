@@ -66,6 +66,7 @@ from ..services.data_import_state import (
     INVOICE_UPLOAD_UNRESOLVED as _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS,
     clear_statement_upload_attempt,
     invoice_upload_downstream_eligibility,
+    mark_statement_review_stale_after_invoice_commit,
     reset_invoice_upload_attempt,
     statement_stage_review_consistency,
 )
@@ -1923,6 +1924,7 @@ def _render_historical_invoice_commit() -> None:
             else:
                 st.session_state.invoice_commit_completed = True
                 st.session_state.invoice_commit_completed_count = len(actual)
+                mark_statement_review_stale_after_invoice_commit(st.session_state)
                 st.rerun()
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True

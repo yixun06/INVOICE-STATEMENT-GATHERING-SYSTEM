@@ -18,6 +18,7 @@ from src.invoice_app.services.data_import_state import (
     clear_statement_upload_attempt,
     has_unfinished_session_work,
     invoice_upload_downstream_eligibility,
+    mark_statement_review_stale_after_invoice_commit,
     reset_invoice_upload_attempt,
     statement_stage_review_consistency,
 )
@@ -453,6 +454,27 @@ def test_statement_exit_clears_stale_activity_and_both_statement_facts():
     assert "weekly_statement_review" not in state
     assert "workflow_activity" not in state
     assert "workflow_navigation_blocked" not in state
+
+
+def test_invoice_commit_marks_an_existing_statement_review_stale():
+    state = {"weekly_statement_review": object()}
+
+    changed = mark_statement_review_stale_after_invoice_commit(state)
+
+    assert changed is True
+    assert state["weekly_statement_review_stale_reason"] == (
+        "Invoice data changed after this Statement review. "
+        "Refresh validation before continuing."
+    )
+
+
+def test_invoice_commit_does_not_create_a_statement_review_stale_marker_without_review():
+    state: dict[str, object] = {}
+
+    changed = mark_statement_review_stale_after_invoice_commit(state)
+
+    assert changed is False
+    assert "weekly_statement_review_stale_reason" not in state
 
 
 def test_invoice_exit_clears_stale_activity_with_uncommitted_staging():

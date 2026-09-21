@@ -135,6 +135,20 @@ def clear_statement_upload_attempt(state: MutableMapping[str, Any]) -> None:
     end_workflow_activity(state)
 
 
+def mark_statement_review_stale_after_invoice_commit(
+    state: MutableMapping[str, Any],
+) -> bool:
+    """Require a fresh Statement review after this session writes Invoice facts."""
+
+    if state.get("weekly_statement_review") is None:
+        return False
+    state["weekly_statement_review_stale_reason"] = (
+        "Invoice data changed after this Statement review. "
+        "Refresh validation before continuing."
+    )
+    return True
+
+
 def has_unfinished_session_work(state: MutableMapping[str, Any]) -> bool:
     """Derive whether Logout would discard meaningful session-only work."""
 
