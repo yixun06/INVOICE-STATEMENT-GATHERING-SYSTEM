@@ -163,6 +163,27 @@ def test_parent_sku_family_evidence_can_narrow_to_exact_name():
     assert result.matches[0].invoice_item_index == 1
 
 
+def test_exact_seller_sku_does_not_merge_parent_fallback_candidates():
+    result = match_statement_sku_rows(
+        [_row(product_name="Parent Product")],
+        [
+            _item(1, sku="EXACT-SKU", name="Exact Product"),
+            _item(2, sku="PARENT-SKU", name="Parent Product"),
+        ],
+        product_families=_resolver(
+            _family(seller_sku="EXACT-SKU", product_name="Exact Product"),
+            _family(
+                seller_sku="OTHER-SKU",
+                parent_sku="PARENT-SKU",
+                product_name="Parent Product",
+            ),
+        ),
+    )
+
+    assert result.eligible_for_commit is False
+    assert result.matches[0].status is StatementItemMatchStatus.NEEDS_REVIEW
+
+
 def test_non_promotion_same_name_uses_unique_line_subtotal_with_rm002_tolerance():
     result = match_statement_sku_rows(
         [_row(product_price=Decimal("12.02"))],

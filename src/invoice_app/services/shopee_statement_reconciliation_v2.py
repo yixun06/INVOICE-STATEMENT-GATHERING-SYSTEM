@@ -320,23 +320,33 @@ def _family_items(
     items: Sequence[CanonicalInvoiceItem],
     family: Sequence[ProductFamilyCandidate],
 ) -> tuple[CanonicalInvoiceItem, ...]:
-    family_skus = {
-        value
+    exact_skus = {
+        normalize_sku_text(candidate.seller_sku)
         for candidate in family
-        for value in (
-            normalize_sku_text(candidate.seller_sku),
-            normalize_sku_text(candidate.parent_sku),
-        )
-        if value
+        if normalize_sku_text(candidate.seller_sku)
     }
-    sku_matches = tuple(
+    exact_matches = tuple(
         item
         for item in items
-        if normalize_sku_text(item.seller_sku) in family_skus
+        if normalize_sku_text(item.seller_sku) in exact_skus
         and normalize_sku_text(item.seller_sku)
     )
-    if sku_matches:
-        return sku_matches
+    if exact_matches:
+        return exact_matches
+
+    parent_skus = {
+        normalize_sku_text(candidate.parent_sku)
+        for candidate in family
+        if normalize_sku_text(candidate.parent_sku)
+    }
+    parent_matches = tuple(
+        item
+        for item in items
+        if normalize_sku_text(item.seller_sku) in parent_skus
+        and normalize_sku_text(item.seller_sku)
+    )
+    if parent_matches:
+        return parent_matches
     return tuple(
         item
         for item in items
@@ -355,18 +365,22 @@ def _family_candidates_for_item(
     family: Sequence[ProductFamilyCandidate],
 ) -> tuple[ProductFamilyCandidate, ...]:
     item_sku = normalize_sku_text(item.seller_sku)
-    sku_candidates = tuple(
+    exact_candidates = tuple(
         candidate
         for candidate in family
         if item_sku
-        and item_sku
-        in {
-            normalize_sku_text(candidate.seller_sku),
-            normalize_sku_text(candidate.parent_sku),
-        }
+        and item_sku == normalize_sku_text(candidate.seller_sku)
     )
-    if sku_candidates:
-        return sku_candidates
+    if exact_candidates:
+        return exact_candidates
+
+    parent_candidates = tuple(
+        candidate
+        for candidate in family
+        if item_sku and item_sku == normalize_sku_text(candidate.parent_sku)
+    )
+    if parent_candidates:
+        return parent_candidates
     return tuple(
         candidate
         for candidate in family

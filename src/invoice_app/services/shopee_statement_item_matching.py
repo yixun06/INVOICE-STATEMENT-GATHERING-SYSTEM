@@ -241,23 +241,33 @@ def _filter_to_family(
     items: Sequence[CanonicalInvoiceItem],
     family: Sequence[ProductFamilyCandidate],
 ) -> tuple[CanonicalInvoiceItem, ...]:
-    exact_skus = {
-        sku
+    seller_skus = {
+        normalize_sku_text(candidate.seller_sku)
         for candidate in family
-        for sku in (
-            normalize_sku_text(candidate.seller_sku),
-            normalize_sku_text(candidate.parent_sku),
-        )
-        if sku
+        if normalize_sku_text(candidate.seller_sku)
     }
-    sku_matches = tuple(
+    exact_matches = tuple(
         item
         for item in items
         if normalize_sku_text(item.seller_sku)
-        and normalize_sku_text(item.seller_sku) in exact_skus
+        and normalize_sku_text(item.seller_sku) in seller_skus
     )
-    if sku_matches:
-        return sku_matches
+    if exact_matches:
+        return exact_matches
+
+    parent_skus = {
+        normalize_sku_text(candidate.parent_sku)
+        for candidate in family
+        if normalize_sku_text(candidate.parent_sku)
+    }
+    parent_matches = tuple(
+        item
+        for item in items
+        if normalize_sku_text(item.seller_sku)
+        and normalize_sku_text(item.seller_sku) in parent_skus
+    )
+    if parent_matches:
+        return parent_matches
 
     return tuple(
         item

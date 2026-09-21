@@ -545,6 +545,23 @@ def test_product_master_identity_missing_is_unresolved():
     assert result.evidence.identities[0].selected_pairs == ()
 
 
+def test_exact_seller_sku_does_not_merge_parent_fallback_candidates():
+    result = _evaluate(
+        (_sku_row(name="Parent Product"),),
+        (
+            _item(0, sku="EXACT-SKU", name="Exact Product"),
+            _item(1, sku="PARENT-SKU", name="Parent Product"),
+        ),
+        resolver=_resolver(
+            _family(sku="EXACT-SKU", name="Exact Product"),
+            _family(sku="OTHER-SKU", parent="PARENT-SKU", name="Parent Product"),
+        ),
+    ).orders[0]
+
+    assert result.summary.identity_scope is IdentityScope.UNRESOLVED
+    assert result.evidence.identities[0].invoice_members == ()
+
+
 def test_strong_identity_accepts_pm_confirmed_source_name_difference():
     result = _evaluate(
         (_sku_row(name="Current Product Name"),),
