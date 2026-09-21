@@ -24,6 +24,7 @@ from ..review_reason_codes import (
     FINAL_AMOUNT_EXTRACTION_MISSING,
     FINANCIAL_LAYOUT_UNRESOLVED,
     NO_VALID_PRODUCTS,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
     PRODUCT_COUNT_MISMATCH,
     SKU_RESOLUTION_REQUIRED,
@@ -172,6 +173,26 @@ def find_shopee_review_issue(
                     f"Missing: {', '.join(missing_income_fields)}."
                 ),
                 reason_code=INCOME_DETAILS_REQUIRED_FIELD_MISSING,
+            )
+
+    if data.post_order_adjustment_observed:
+        if data.post_order_adjustment_final_amount_consistent is None:
+            return ShopeeReviewIssue(
+                order_id=data.order_id,
+                reason=(
+                    "Post-order adjustment evidence requires source-visible Order Income "
+                    "and Final Amount; no missing value was reconstructed."
+                ),
+                reason_code=POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+            )
+        if not data.post_order_adjustment_final_amount_consistent:
+            return ShopeeReviewIssue(
+                order_id=data.order_id,
+                reason=(
+                    "Post-order adjustment evidence conflicts: source Order Income plus "
+                    "the completed adjustment does not equal source Final Amount."
+                ),
+                reason_code=POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
             )
 
     product_amount_error = validate_shopee_product_amounts(

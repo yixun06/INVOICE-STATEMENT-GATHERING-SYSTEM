@@ -15,6 +15,22 @@ MISSING_FINANCIAL_VALUE = "N/A"
 NORMAL_ORDER = "NORMAL_ORDER"
 RETURN_REFUND = "RETURN_REFUND"
 UNKNOWN_OR_MIXED = "UNKNOWN_OR_MIXED"
+RETURN_REFUND_AFTER_ORDER_COMPLETED = "RETURN_REFUND_AFTER_ORDER_COMPLETED"
+
+_ORDER_ADJUSTMENT_HEADER = re.compile(
+    r"\bAdjustment\s+Complete\s+Date\s+Adjustment\s+Reason\s+Released\s+Amount\b",
+    flags=re.IGNORECASE,
+)
+_RETURN_REFUND_AFTER_COMPLETED_ROW = re.compile(
+    rf"\b(?P<date>\d{{2}}/\d{{2}}/\d{{4}})\s+"
+    r"Return\s+Refund\s+Adjustment\s+After\s+Order\s+"
+    # Shopee's PDF text layer may put the right-column Released Amount before
+    # the wrapped final word of the Adjustment Reason. Support only those two
+    # renderings of this one exact reason.
+    rf"(?:Completed\s+(?P<amount_after>{MONEY_PATTERN})|"
+    rf"(?P<amount_before>{MONEY_PATTERN})\s*(?:\n\s*)?Completed)",
+    flags=re.IGNORECASE,
+)
 
 INCOME_ALIASES: dict[str, tuple[str, ...]] = {
     "merchandise_subtotal": ("Merchandise Subtotal",),
@@ -121,6 +137,30 @@ def extract_refund_amount(text: str) -> Decimal | None:
     return parse_decimal(match.group(1)).quantize(Decimal("0.01")) if match else None
 
 
+def extract_post_order_return_refund_adjustment(
+    text: str,
+) -> tuple[str, str, Decimal] | None:
+    """Extract only the supported completed Order Adjustment source row.
+
+    This is intentionally separate from the original Invoice's Refund Amount.
+    The Order Adjustment header and exact source-visible reason prevent product
+    Return/Refund text, empty sections, and future adjustment types from being
+    treated as completed post-order adjustment evidence.
+    """
+    for header in _ORDER_ADJUSTMENT_HEADER.finditer(text):
+        row = _RETURN_REFUND_AFTER_COMPLETED_ROW.search(text, header.end())
+        if row is None:
+            continue
+        return (
+            RETURN_REFUND_AFTER_ORDER_COMPLETED,
+            normalize_whitespace(row.group("date")),
+            parse_decimal(
+                row.group("amount_after") or row.group("amount_before")
+            ).quantize(Decimal("0.01")),
+        )
+    return None
+
+
 def income_label_presence(text: str) -> frozenset[str]:
     """Return exact supported labels visible inside the seller Income section."""
     section = extract_section(
@@ -165,13 +205,16 @@ def invoice_financial_layout_signals(
 ) -> frozenset[str]:
     labels = label_presence if label_presence is not None else income_label_presence(text)
     refund_amount = extract_refund_amount(text)
+    post_order_adjustment = extract_post_order_return_refund_adjustment(text)
     signals = {
         name
         for name, present in {
             "refund_amount": refund_amount is not None and refund_amount != 0,
-            "return_refund_marker": _has_structured_return_refund_marker(
-                product_items or ()
-            ),
+            # A completed Order Adjustment is later independent evidence. Its
+            # product-level Return/Refund marker must not reclassify the
+            # original, already-completed Invoice as a transaction refund.
+            "return_refund_marker": post_order_adjustment is None
+            and _has_structured_return_refund_marker(product_items or ()),
             "reverse_shipping_fee": "reverse_shipping_fee" in labels,
             "reverse_shipping_fee_sst": "reverse_shipping_fee_sst" in labels,
         }.items()

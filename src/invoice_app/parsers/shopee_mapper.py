@@ -123,6 +123,15 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
         "final_amount": final_amount,
         "refund_amount": _source_money(data.refund_amount),
+        # V1 staged evidence only. These keys are deliberately not part of the
+        # canonical UAT2 invoice schema or source-fingerprint contract.
+        "post_order_adjustment_observed": data.post_order_adjustment_observed,
+        "post_order_adjustment_type": data.post_order_adjustment_type,
+        "post_order_adjustment_date": data.post_order_adjustment_date,
+        "post_order_adjustment_amount": _source_money(data.post_order_adjustment_amount),
+        "_post_order_adjustment_final_amount_consistent": (
+            data.post_order_adjustment_final_amount_consistent
+        ),
         "buyer_merchandise_subtotal": _financial_value(
             buyer_payment, "buyer_merchandise_subtotal"
         ),

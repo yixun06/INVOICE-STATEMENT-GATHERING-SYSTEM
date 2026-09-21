@@ -11,6 +11,7 @@ from ..utils.normalize import normalize_whitespace
 from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
     classify_invoice_financial_layout,
+    extract_post_order_return_refund_adjustment,
     extract_refund_amount,
     income_label_presence,
     final_amount_label_present,
@@ -53,6 +54,11 @@ class ShopeeExtractedData:
     final_amount_source_state: str
     product_items: tuple[dict[str, Any], ...]
     refund_amount: Decimal | None
+    post_order_adjustment_observed: bool
+    post_order_adjustment_type: str | None
+    post_order_adjustment_date: str | None
+    post_order_adjustment_amount: Decimal | None
+    post_order_adjustment_final_amount_consistent: bool | None
     income: dict[str, str]
     buyer_payment: dict[str, str]
     voucher: dict[str, str]
@@ -74,6 +80,14 @@ def extract_shopee_data(
     )
     product_items = resolve_promotion_group_totals(product_items, income.get("product_price"))
     refund_amount = extract_refund_amount(normalized_text)
+    post_order_adjustment = extract_post_order_return_refund_adjustment(normalized_text)
+    post_order_adjustment_type, post_order_adjustment_date, post_order_adjustment_amount = (
+        post_order_adjustment if post_order_adjustment is not None else (None, None, None)
+    )
+    post_order_adjustment_final_amount_consistent = _post_order_adjustment_final_amount_consistent(
+        income,
+        post_order_adjustment_amount,
+    )
     return ShopeeExtractedData(
         source_pdf=source_pdf,
         normalized_text=normalized_text,
@@ -99,10 +113,35 @@ def extract_shopee_data(
         final_amount_source_state=("parsed" if income.get("final_amount") != "N/A" else "unparsed" if final_amount_label_present(normalized_text) else "absent"),
         product_items=tuple(product_items),
         refund_amount=refund_amount,
+        post_order_adjustment_observed=post_order_adjustment is not None,
+        post_order_adjustment_type=post_order_adjustment_type,
+        post_order_adjustment_date=post_order_adjustment_date,
+        post_order_adjustment_amount=post_order_adjustment_amount,
+        post_order_adjustment_final_amount_consistent=post_order_adjustment_final_amount_consistent,
         income=income,
         buyer_payment=parse_buyer_payment(normalized_text),
         voucher=parse_voucher_detail(normalized_text),
     )
+
+
+def _post_order_adjustment_final_amount_consistent(
+    income: dict[str, str],
+    adjustment_amount: Decimal | None,
+) -> bool | None:
+    """Check only source-present values; never reconstruct a missing amount."""
+    if adjustment_amount is None:
+        return None
+    order_income = income.get("order_income")
+    final_amount = income.get("final_amount")
+    if order_income in {None, "", "N/A"} or final_amount in {None, "", "N/A"}:
+        return None
+    try:
+        return (
+            Decimal(str(order_income)) + adjustment_amount
+            == Decimal(str(final_amount))
+        )
+    except Exception:
+        return False
 
 
 def normalize_pdf_text(text: str) -> str:
