@@ -194,6 +194,9 @@ def commit_statement_review(
 ) -> StatementCommitAttempt:
     """Under one lock, rerun V2 and commit only exact reviewed evidence."""
 
+    if review.stage.already_imported:
+        return StatementCommitAttempt(False, ("ALREADY_IMPORTED",))
+
     if not review.commit_ready or review.source_bytes is None:
         return StatementCommitAttempt(
             False,
@@ -344,6 +347,22 @@ def _build_review(
             persistence_blockers=(
                 tuple(stage.rejection_reasons) or ("Statement parsing failed.",)
             ),
+            source_bytes=source_bytes,
+        )
+
+    if stage.already_imported:
+        return StatementImportReview(
+            batch_id=batch_id,
+            uploaded_at=uploaded_at,
+            uploaded_by=uploaded_by,
+            stage=stage,
+            reconciliation_v2=None,
+            evidence_version=None,
+            sku_matches=empty_matches,
+            plan=None,
+            blockers=(),
+            limitations=(),
+            persistence_blockers=(),
             source_bytes=source_bytes,
         )
 

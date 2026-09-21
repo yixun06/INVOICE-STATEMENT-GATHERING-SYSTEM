@@ -483,6 +483,42 @@ def _adapt_v2_statement_review(
             tuple(statement.shipping_fee_discrepancies) if statement else ()
         ),
     }
+    if stage.already_imported and statement is not None:
+        source_items = (
+            SummaryItem(
+                "Statement Period",
+                f"{statement.statement_period_from:%d/%m/%Y} – "
+                f"{statement.statement_period_to:%d/%m/%Y}",
+            ),
+            SummaryItem("Order Rows", len(statement.order_rows)),
+            SummaryItem("SKU Rows", len(statement.sku_rows)),
+        )
+        return ImportResult(
+            source_type=SHOPEE_WEEKLY_STATEMENT,
+            batch_status="ALREADY_IMPORTED",
+            source_summary=SourceSummary(
+                title="Shopee Weekly Statement result",
+                items=source_items,
+            ),
+            validation=ValidationResult(),
+            reconciliation=ReconciliationResult(
+                available=False,
+                status="ALREADY_IMPORTED",
+                source_specific_details=source_details,
+            ),
+            commit_readiness=CommitReadiness(
+                ready=False,
+                status="ALREADY_IMPORTED",
+                reasons=(),
+                database_commit_available=False,
+            ),
+            session_state=SessionState(
+                applied_to_current_session=bool(batch_id),
+                label="Applied to Current Session" if batch_id else "No Active Session Batch",
+                batch_id=batch_id,
+            ),
+            source_specific_details=source_details,
+        )
     if batch is not None:
         identity_members = {
             scope: sum(

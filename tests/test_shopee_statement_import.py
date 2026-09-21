@@ -32,6 +32,7 @@ from src.invoice_app.services.import_result_adapters import (
     adapt_shopee_weekly_statement_import_result,
 )
 from src.invoice_app.services.shopee_statement_persistence import (
+    CommittedStatementReference,
     StatementCommitState,
 )
 from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
@@ -250,16 +251,17 @@ class _Repository(InMemoryHistoricalInvoiceRepository):
 
 
 class _Writer:
-    def __init__(self, order=None, items=(_item(),)):
+    def __init__(self, order=None, items=(_item(),), committed_statements=()):
         self.order = order
         self.items = tuple(items)
+        self.committed_statements = tuple(committed_statements)
         self.writes = 0
 
     def reload_commit_state(self):
         orders = {} if self.order is None else {"ORDER-1": self.order}
         return StatementCommitState(
             orders=orders,
-            committed_statements=(),
+            committed_statements=self.committed_statements,
             items=self.items,
         )
 
@@ -451,6 +453,59 @@ def test_ready_statement_commit_reaches_existing_atomic_writer(monkeypatch):
     assert writer.writes == 1
 
 
+def test_exact_committed_statement_is_terminal_success_without_reconciliation_or_write(
+    monkeypatch,
+):
+    statement = _statement()
+    reference = CommittedStatementReference(
+        file_hash=statement.file_hash,
+        statement_period_from=statement.statement_period_from,
+        statement_period_to=statement.statement_period_to,
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, **kwargs: stage_parsed_shopee_weekly_statement(
+            statement,
+            existing_statements=(reference,),
+        ),
+    )
+    repository = _Repository()
+    writer = _Writer(_order(), committed_statements=(reference,))
+
+    review = review_statement_upload(
+        b"same-statement-bytes",
+        source_filename="statement.xlsx",
+        batch_id="duplicate-batch",
+        uploaded_by="admin",
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+        now=lambda: NOW,
+    )
+    presentation = adapt_shopee_weekly_statement_import_result(
+        review.stage,
+        batch_id=review.batch_id,
+        review=review,
+    )
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert review.stage.already_imported is True
+    assert review.reconciliation_v2 is None
+    assert review.blockers == ()
+    assert review.persistence_blockers == ()
+    assert presentation.batch_status == "ALREADY_IMPORTED"
+    assert presentation.validation.blocking_issues == ()
+    assert presentation.reconciliation.status == "ALREADY_IMPORTED"
+    assert attempt.committed is False
+    assert attempt.reasons == ("ALREADY_IMPORTED",)
+    assert writer.writes == 0
+
+
 def test_data_import_statement_review_is_compact_and_commit_ready(
     tmp_path, monkeypatch
 ):
@@ -496,6 +551,52 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     assert "Reconciliation review complete — V2 found no business blockers." in {
         element.value for element in app.success
     }
+
+
+def test_data_import_exact_statement_reupload_is_success_not_attention(
+    tmp_path, monkeypatch
+):
+    statement = _statement()
+    reference = CommittedStatementReference(
+        file_hash=statement.file_hash,
+        statement_period_from=statement.statement_period_from,
+        statement_period_to=statement.statement_period_to,
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, **kwargs: stage_parsed_shopee_weekly_statement(
+            statement,
+            existing_statements=(reference,),
+        ),
+    )
+    review = review_statement_upload(
+        b"same-statement-bytes",
+        source_filename="statement.xlsx",
+        batch_id="duplicate-batch",
+        uploaded_by="admin",
+        repository=_Repository(),
+        writer=_Writer(_order(), committed_statements=(reference,)),
+        product_master=_master(),
+        now=lambda: NOW,
+    )
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+    app.session_state["batch_id"] = "duplicate-batch"
+    app.session_state["import_source_type"] = "Shopee Weekly Statement"
+    app.session_state["data_import_step"] = 3
+    app.session_state["weekly_statement_stage"] = review.stage
+    app.session_state["weekly_statement_review"] = review
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any("Statement already imported" in element.value for element in app.success)
+    assert "Needs Attention" not in {element.value for element in app.subheader}
+    assert all("unresolved issue" not in element.value for element in app.error)
+    assert not any("This Statement item needs review" in element.value for element in app.error)
+    assert any(button.label == "Upload another Statement" for button in app.button)
 
 
 def test_data_import_ui_has_no_direct_google_write_call():

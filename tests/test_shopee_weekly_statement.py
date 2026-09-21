@@ -21,6 +21,7 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     WeeklyStatementParseError,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
+    ALREADY_IMPORTED,
     NEEDS_REVIEW,
     READY_TO_COMMIT,
     REJECTED,
@@ -463,8 +464,13 @@ def test_duplicate_gates_do_not_create_a_second_import(parsed_sample):
         parsed_sample, existing_statements=[exact]
     )
 
-    assert exact_result.result == NEEDS_REVIEW
+    assert exact_result.result == ALREADY_IMPORTED
     assert exact_result.duplicate_status == "ALREADY_IMPORTED"
+    assert exact_result.already_imported is True
+    assert exact_result.validation_issues == ()
+    assert exact_result.review_reasons == ()
+    assert exact_result.order_reconciliations == ()
+    assert exact_result.adjustment_reconciliations == ()
     assert exact_result.eligible_for_future_atomic_commit is False
 
     revised = replace(exact, file_hash="different-file-hash")
@@ -474,6 +480,7 @@ def test_duplicate_gates_do_not_create_a_second_import(parsed_sample):
 
     assert revised_result.result == NEEDS_REVIEW
     assert revised_result.duplicate_status == "POSSIBLE_REVISION"
+    assert revised_result.already_imported is False
     assert revised_result.eligible_for_future_atomic_commit is False
 
 

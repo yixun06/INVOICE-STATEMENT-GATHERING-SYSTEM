@@ -23,6 +23,7 @@ from .statement_reconciliation import (
 
 READY_TO_COMMIT = "Ready to Commit"
 NEEDS_REVIEW = "Needs Review"
+ALREADY_IMPORTED = "Already Imported"
 REJECTED = "Rejected"
 MONEY_TOLERANCE = Decimal("0.02")
 ORDER_RECONCILIATION_STATUSES = (
@@ -85,6 +86,12 @@ class StagedShopeeWeeklyStatement:
         return self.result == READY_TO_COMMIT and self.duplicate_status is None
 
     @property
+    def already_imported(self) -> bool:
+        """Whether a committed Statement has the exact uploaded file hash."""
+
+        return self.duplicate_status == "ALREADY_IMPORTED"
+
+    @property
     def reconciliation_counts(self) -> Mapping[str, int]:
         counts = Counter(item.status for item in self.order_reconciliations)
         return {status: counts.get(status, 0) for status in ORDER_RECONCILIATION_STATUSES}
@@ -128,20 +135,32 @@ def stage_parsed_shopee_weekly_statement(
     existing_statements: Iterable[StatementReference | Mapping[str, Any]] = (),
 ) -> StagedShopeeWeeklyStatement:
     orders = tuple(existing_orders)
-    validation_issues = validate_shopee_weekly_statement(statement)
-    result = NEEDS_REVIEW if validation_issues else READY_TO_COMMIT
-    duplicate_status = None
-    review_reasons: list[str] = []
     references = tuple(existing_statements)
     committed_references = tuple(
         item for item in references
         if _reference_value(item, "commit_status") in (None, "COMMITTED")
     )
     if any(_reference_value(item, "file_hash") == statement.file_hash for item in committed_references):
-        duplicate_status = "ALREADY_IMPORTED"
-        result = NEEDS_REVIEW
-        review_reasons.append("This Statement file hash is already committed.")
-    elif any(_same_period(statement, item) for item in committed_references):
+        # The committed Statement_Data source hash is authoritative. An exact
+        # re-upload is a terminal idempotent success, not a reviewable source.
+        return StagedShopeeWeeklyStatement(
+            result=ALREADY_IMPORTED,
+            source_filename=statement.source_filename,
+            file_hash=statement.file_hash,
+            statement=statement,
+            validation_issues=(),
+            review_reasons=(),
+            rejection_reasons=(),
+            duplicate_status="ALREADY_IMPORTED",
+            order_reconciliations=(),
+            adjustment_reconciliations=(),
+        )
+
+    validation_issues = validate_shopee_weekly_statement(statement)
+    result = NEEDS_REVIEW if validation_issues else READY_TO_COMMIT
+    duplicate_status = None
+    review_reasons: list[str] = []
+    if any(_same_period(statement, item) for item in committed_references):
         duplicate_status = "POSSIBLE_REVISION"
         result = NEEDS_REVIEW
         review_reasons.append(

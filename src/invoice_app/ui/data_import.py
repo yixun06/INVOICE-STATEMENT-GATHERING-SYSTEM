@@ -464,6 +464,8 @@ def _render_validation_step(
         and _render_stale_statement_refresh("statement_validation_stale_refresh")
     ):
         return
+    if _render_statement_already_imported():
+        return
     result = _current_import_result()
     is_platform_orders = bool(
         result.source_specific_details.get("show_platform_order_outcomes")
@@ -1793,6 +1795,8 @@ def _render_reconciliation_step() -> None:
             key_prefix="reconcile_historical",
         )
         return
+    if _render_statement_already_imported():
+        return
     if _render_stale_statement_refresh("statement_reconciliation_stale_refresh"):
         return
     result = _current_import_result()
@@ -1952,6 +1956,8 @@ def _render_review_and_commit_step() -> None:
         _render_back_button(4, key="invoice_commit_back")
         _render_invoice_exit_button(key="exit_invoice_commit")
         _render_source_summary(result)
+        return
+    if _render_statement_already_imported():
         return
     if st.session_state.get("weekly_statement_commit_completed"):
         st.success("Statement Commit Complete.", icon=":material/check_circle:")
@@ -2243,6 +2249,41 @@ def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
 def _weekly_review() -> StatementImportReview | None:
     review = st.session_state.get("weekly_statement_review")
     return review if isinstance(review, StatementImportReview) else None
+
+
+def _render_statement_already_imported() -> bool:
+    """Present an exact committed Statement re-upload as terminal success."""
+
+    if st.session_state.get("import_source_type") != SHOPEE_WEEKLY_STATEMENT:
+        return False
+    review = _weekly_review()
+    statement = review.stage.statement if review is not None else None
+    if review is None or not review.stage.already_imported or statement is None:
+        return False
+
+    st.success(
+        "Statement already imported\n\n"
+        "This Statement has already been successfully processed. No additional data was written.",
+        icon=":material/check_circle:",
+    )
+    st.caption(
+        f"Statement period: {statement.statement_period_from:%d/%m/%Y} – "
+        f"{statement.statement_period_to:%d/%m/%Y} · "
+        f"Order rows: {len(statement.order_rows)} · SKU rows: {len(statement.sku_rows)}"
+    )
+    with st.expander("Import details"):
+        st.write(f"Source filename: {statement.source_filename}")
+        st.write(f"Source hash: {statement.file_hash}")
+    with st.container(horizontal=True):
+        if st.button(
+            "Upload another Statement",
+            icon=":material/upload_file:",
+            key="already_imported_statement_upload_another",
+        ):
+            clear_statement_upload_attempt(st.session_state)
+            _set_step(2)
+            st.rerun()
+    return True
 
 
 def _render_statement_review_tables(*, collapsed: bool = False) -> None:
