@@ -18,10 +18,77 @@ from src.invoice_app.parsers.shopee_mapper import map_shopee_records
 from src.invoice_app.parsers.shopee_parser import ShopeeParser
 from src.invoice_app.parsers.shopee_product_parser import parse_positioned_products
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
+from src.invoice_app.repositories.historical_invoice_repository import InMemoryHistoricalInvoiceRepository
+from src.invoice_app.services import batch_service
+from src.invoice_app.services.batch_service import (
+    append_batch_results_with_metadata,
+    prepare_uploaded_invoice_files,
+    process_pdf_file_with_outcome,
+)
+from src.invoice_app.services.historical_invoice_intake import (
+    IntakeStatus,
+    build_current_batch_staging,
+    classify_staging,
+)
+from src.invoice_app.services.product_price_master import ProductPriceMaster
+from src.invoice_app.services.shopee_invoice_revalidation import revalidate_shopee_invoice
 from src.invoice_app.services.uat2_persistence_schema import INVOICE_ORDERS_HEADERS
 
 
 ADJUSTMENT_ARCHIVE = Path(r"D:\download material\ADJUSTMENT EXP.zip")
+
+
+class _UploadedFile:
+    def __init__(self, name: str, content: bytes) -> None:
+        self.name = name
+        self._content = content
+
+    def getvalue(self) -> bytes:
+        return self._content
+
+
+def _upload_through_invoice_flow(uploaded_files, batch_id: str):
+    """Run the same archive -> parse -> batch-rules path used by app.process_uploads."""
+    archived, preparation_reviews = prepare_uploaded_invoice_files(uploaded_files, batch_id)
+    orders: list[dict] = []
+    products: list[dict] = []
+    reviews = list(preparation_reviews)
+    for source in archived:
+        result = process_pdf_file_with_outcome(
+            source.source_pdf, source.archive_path, batch_id
+        )
+        appended = append_batch_results_with_metadata(
+            orders,
+            products,
+            reviews,
+            result.orders,
+            result.products,
+            result.reviews,
+        )
+        orders, products, reviews = appended.orders, appended.products, appended.reviews
+    return archived, orders, products, reviews
+
+
+def _real_product_master(products: list[dict]) -> ProductPriceMaster:
+    rows_by_identity: dict[tuple[str, str, str], dict] = {}
+    for product in products:
+        identity = (
+            str(product["seller_sku"]),
+            str(product["product_name"]),
+            str(product.get("variation") or ""),
+        )
+        rows_by_identity.setdefault(
+            identity,
+            {
+                "seller_sku": identity[0],
+                "parent_sku": "",
+                "product_name": identity[1],
+                "variation_name": identity[2],
+                "unit_selling_price": "1.00",
+                "nav_code": f"NAV-{len(rows_by_identity) + 1}",
+            },
+        )
+    return ProductPriceMaster.from_rows(rows_by_identity.values())
 
 
 def _order_text(
@@ -206,3 +273,84 @@ def test_user_supplied_completed_adjustment_pdf_corpus():
             )
 
     assert observed == expected
+
+
+@pytest.mark.skipif(
+    not ADJUSTMENT_ARCHIVE.exists(),
+    reason="The user-supplied post-order adjustment PDF archive is not available.",
+)
+@pytest.mark.parametrize("upload_kind", ("direct", "zip"))
+def test_real_adjustment_upload_preserves_sidecar_through_staging_and_revalidation(
+    tmp_path, monkeypatch, upload_kind: str
+):
+    monkeypatch.setattr(batch_service, "ARCHIVE_DIR", tmp_path / "archive")
+    expected = {
+        "260722BVJQ6RRF": ("01/08/2026", "50.03", "-17.67", "32.36"),
+        "2607302A9FMUBM": ("06/08/2026", "46.58", "-43.61", "2.97"),
+        "260807P7MNPU1X": ("15/08/2026", "65.29", "-6.25", "59.04"),
+        "260808RW7RVBGY": ("16/08/2026", "107.35", "-129.06", "-21.71"),
+        "2608245W7CGC2C": ("26/08/2026", "31.14", "-12.85", "18.29"),
+    }
+    if upload_kind == "direct":
+        with ZipFile(ADJUSTMENT_ARCHIVE) as archive:
+            uploads = [
+                _UploadedFile(Path(member.filename).name, archive.read(member))
+                for member in archive.infolist()
+                if not member.is_dir() and member.filename.lower().endswith(".pdf")
+            ]
+    else:
+        uploads = [_UploadedFile(ADJUSTMENT_ARCHIVE.name, ADJUSTMENT_ARCHIVE.read_bytes())]
+
+    archived, orders, products, reviews = _upload_through_invoice_flow(
+        uploads, f"post-order-upload-{upload_kind}"
+    )
+
+    assert len(archived) == len(expected)
+    assert reviews == []
+    assert {order["order_id"] for order in orders} == set(expected)
+    assert all(order["status"] == "Accepted" for order in orders)
+    assert all(order["invoice_financial_layout"] == NORMAL_ORDER for order in orders)
+    assert all(order["post_order_adjustment_observed"] is True for order in orders)
+    assert all(order["refund_amount"] == "N/A" for order in orders)
+
+    master = _real_product_master(products)
+    entries = classify_staging(
+        build_current_batch_staging(
+            batch_id=f"post-order-upload-{upload_kind}",
+            orders=orders,
+            products=products,
+            reviews=reviews,
+            price_master=master,
+        ),
+        InMemoryHistoricalInvoiceRepository(),
+    )
+    assert all(entry.status is IntakeStatus.NEW for entry in entries)
+
+    for order in orders:
+        order_id = order["order_id"]
+        complete_date, income, adjustment, final_amount = expected[order_id]
+        entry = next(entry for entry in entries if entry.order_id == order_id)
+        assert entry.post_order_adjustment is not None
+        assert entry.source_filename == order["source_pdf"]
+        assert len(entry.source_hash) == 64
+        assert entry.post_order_adjustment.adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
+        assert entry.post_order_adjustment.adjustment_complete_date == complete_date
+        assert entry.post_order_adjustment.released_amount == Decimal(adjustment)
+        assert entry.post_order_adjustment.final_amount_consistent is True
+        assert entry.bundle is not None
+        assert entry.bundle.order.order_income == Decimal(income)
+        assert entry.bundle.order.final_amount == Decimal(final_amount)
+        assert entry.bundle.order.refund_amount is None
+        related_products = [
+            product
+            for product in products
+            if product["order_id"] == order_id
+            and product["source_pdf"] == order["source_pdf"]
+        ]
+        revalidated = revalidate_shopee_invoice(
+            order,
+            related_products,
+            price_master=master,
+        )
+        assert revalidated.error is None
+        assert order["post_order_adjustment_amount"] == adjustment

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 from typing import Iterable
@@ -33,6 +34,22 @@ class IntakeStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class PostOrderAdjustmentEvidence:
+    """Transient completed-adjustment evidence kept beside an Invoice candidate.
+
+    This deliberately stays outside ``InvoiceBundle``: the Invoice source facts
+    are immutable and no adjustment persistence schema has been approved yet.
+    ``InvoiceIntakeEntry`` already carries the source PDF and SHA-256 needed for
+    provenance, so the sidecar does not duplicate them.
+    """
+
+    adjustment_type: str
+    adjustment_complete_date: str
+    released_amount: Decimal
+    final_amount_consistent: bool | None
+
+
+@dataclass(frozen=True)
 class InvoiceIntakeEntry:
     staging_id: str
     source_filename: str
@@ -42,6 +59,7 @@ class InvoiceIntakeEntry:
     message: str | None
     bundle: InvoiceBundle | None = None
     reason_code: str | None = None
+    post_order_adjustment: PostOrderAdjustmentEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -129,7 +147,18 @@ def build_current_batch_staging(
         except (TypeError, ValueError) as error:
             entries.append(_review_entry(staging_id, source_pdf, source_hash, order_id, str(error)))
             continue
-        entries.append(InvoiceIntakeEntry(staging_id, source_pdf, source_hash, bundle.order.order_id, IntakeStatus.NEW, None, bundle))
+        entries.append(
+            InvoiceIntakeEntry(
+                staging_id,
+                source_pdf,
+                source_hash,
+                bundle.order.order_id,
+                IntakeStatus.NEW,
+                None,
+                bundle,
+                post_order_adjustment=_post_order_adjustment_evidence(order),
+            )
+        )
     accepted_sources = {entry.source_filename for entry in entries}
     for review in all_reviews:
         if str(review.get("platform", "")).strip() != "Shopee":
@@ -265,3 +294,33 @@ def _review_entry(
         bundle=None,
         reason_code=reason_code,
     )
+
+
+def _post_order_adjustment_evidence(
+    order: Mapping[str, object],
+) -> PostOrderAdjustmentEvidence | None:
+    """Copy only already-validated V1 adjustment facts into transient staging."""
+    if order.get("post_order_adjustment_observed") is not True:
+        return None
+    adjustment_type = str(order.get("post_order_adjustment_type") or "").strip()
+    complete_date = str(order.get("post_order_adjustment_date") or "").strip()
+    released_amount = _decimal_source_money(order.get("post_order_adjustment_amount"))
+    if not adjustment_type or not complete_date or released_amount is None:
+        return None
+    consistency = order.get("_post_order_adjustment_final_amount_consistent")
+    return PostOrderAdjustmentEvidence(
+        adjustment_type=adjustment_type,
+        adjustment_complete_date=complete_date,
+        released_amount=released_amount,
+        final_amount_consistent=consistency if isinstance(consistency, bool) else None,
+    )
+
+
+def _decimal_source_money(value: object) -> Decimal | None:
+    text = str(value or "").strip()
+    if not text or text.casefold() == "n/a":
+        return None
+    try:
+        return Decimal(text).quantize(Decimal("0.01"))
+    except ArithmeticError:
+        return None
