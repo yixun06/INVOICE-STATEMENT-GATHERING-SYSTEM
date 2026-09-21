@@ -596,7 +596,9 @@ def test_data_import_exact_statement_reupload_is_success_not_attention(
     assert "Needs Attention" not in {element.value for element in app.subheader}
     assert all("unresolved issue" not in element.value for element in app.error)
     assert not any("This Statement item needs review" in element.value for element in app.error)
-    assert any(button.label == "Upload another Statement" for button in app.button)
+    assert {"View Weekly Billing", "Upload another Statement"} <= {
+        button.label for button in app.button
+    }
 
 
 def test_data_import_ui_has_no_direct_google_write_call():

@@ -60,7 +60,11 @@ from ..services.invoice_product_master_revalidation import (
 )
 from ..repositories.google_sheets_historical_invoice_repository import HistoricalInvoiceStorageError
 from ..repositories.historical_invoice_repository import HistoricalInvoiceBulkImportError
-from ..services.workflow_navigation import begin_workflow_activity, end_workflow_activity
+from ..services.workflow_navigation import (
+    begin_workflow_activity,
+    end_workflow_activity,
+    request_navigation,
+)
 from ..services.data_import_state import (
     INVOICE_UPLOAD_ATTEMPT_KEY as _INVOICE_UPLOAD_ATTEMPT_KEY,
     INVOICE_UPLOAD_UNRESOLVED as _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS,
@@ -2275,6 +2279,14 @@ def _render_statement_already_imported() -> bool:
         st.write(f"Source filename: {statement.source_filename}")
         st.write(f"Source hash: {statement.file_hash}")
     with st.container(horizontal=True):
+        if st.button(
+            "View Weekly Billing",
+            icon=":material/calendar_month:",
+            key="already_imported_statement_view_billing",
+        ):
+            clear_statement_upload_attempt(st.session_state)
+            request_navigation(st.session_state, "Weekly Billing")
+            st.rerun()
         if st.button(
             "Upload another Statement",
             icon=":material/upload_file:",
