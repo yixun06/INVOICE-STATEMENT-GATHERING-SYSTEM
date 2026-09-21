@@ -477,11 +477,11 @@ def _render_validation_step(
     _render_validation_status(result)
 
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
-        _render_statement_next_step("Continue to reconcile", 4, back_step=2)
         _render_statement_refresh_action(
             _weekly_review(),
             key="statement_validation_refresh",
         )
+        _render_statement_next_step("Continue to reconcile", 4, back_step=2)
     else:
         _render_next_step(
             "Continue to reconcile",
@@ -500,6 +500,10 @@ def _render_validation_step(
         render_platform_orders_validation_data()
         render_platform_orders_outcomes()
     else:
+        if _statement_invoice_coverage(result) is not None:
+            _render_statement_invoice_coverage_details(result)
+            _render_source_summary(result)
+            return
         _render_contract_validation(result)
         _render_source_summary(result)
         _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
@@ -534,6 +538,8 @@ def _render_validation_status(result: ImportResult) -> None:
         return
 
     if result.source_type == SHOPEE_WEEKLY_STATEMENT:
+        if _render_statement_invoice_coverage_status(result):
+            return
         if _render_missing_invoice_status(result):
             return
         affected_orders, issue_count = _statement_blocker_counts(result)
@@ -555,6 +561,76 @@ def _render_validation_status(result: ImportResult) -> None:
             else _commit_readiness_reason(result)
         )
     render_authoritative_status(title="Needs Attention", message=message, state="blocked")
+
+
+def _statement_invoice_coverage(result: ImportResult) -> Any | None:
+    coverage = result.source_specific_details.get("invoice_coverage")
+    if coverage is None or coverage.complete:
+        return None
+    return coverage
+
+
+def _render_statement_invoice_coverage_status(result: ImportResult) -> bool:
+    coverage = _statement_invoice_coverage(result)
+    if coverage is None:
+        return False
+    render_authoritative_status(
+        title="Invoices still required",
+        message=(
+            "This Statement contains orders that are not yet fully available in "
+            "the Invoice database. Upload or repair the invoices listed below, "
+            "then refresh validation."
+        ),
+        state="blocked",
+    )
+    with st.container(horizontal=True, gap="small"):
+        st.metric("Statement Orders", len(coverage.statement_order_ids), border=True)
+        st.metric("Invoices Found", len(coverage.invoice_order_ids), border=True)
+        st.metric(
+            "Invoices Missing",
+            len(coverage.missing_invoice_order_ids),
+            border=True,
+        )
+        if coverage.missing_invoice_item_order_ids:
+            st.metric(
+                "Invoice Items Missing",
+                len(coverage.missing_invoice_item_order_ids),
+                border=True,
+            )
+    return True
+
+
+def _render_statement_invoice_coverage_details(result: ImportResult) -> None:
+    coverage = _statement_invoice_coverage(result)
+    if coverage is None:
+        return
+    rows = [
+        {
+            "Order ID": order_id,
+            "Statement status": "Found in Statement",
+            "Database status": "Invoice not imported",
+            "Next step": "Upload the Invoice for this Order",
+        }
+        for order_id in coverage.missing_invoice_order_ids
+    ]
+    rows.extend(
+        {
+            "Order ID": order_id,
+            "Statement status": "Found in Statement",
+            "Database status": "Invoice items missing",
+            "Next step": "Re-import or repair the Invoice item data",
+        }
+        for order_id in coverage.missing_invoice_item_order_ids
+    )
+    st.subheader("Invoice coverage required")
+    st.dataframe(
+        rows,
+        hide_index=True,
+        height=min(420, 36 * (len(rows) + 1)),
+        column_config={
+            "Order ID": st.column_config.TextColumn("Order ID", pinned=True),
+        },
+    )
 
 
 def _render_contract_validation(result: ImportResult) -> None:
@@ -1804,6 +1880,20 @@ def _render_reconciliation_step() -> None:
     if _render_stale_statement_refresh("statement_reconciliation_stale_refresh"):
         return
     result = _current_import_result()
+    if _statement_invoice_coverage(result) is not None:
+        _render_statement_invoice_coverage_status(result)
+        _render_statement_refresh_action(
+            _weekly_review(),
+            key="statement_reconciliation_coverage_refresh",
+        )
+        _render_statement_next_step(
+            "Continue to review & commit",
+            5,
+            back_step=3,
+        )
+        _render_statement_invoice_coverage_details(result)
+        _render_source_summary(result)
+        return
     reconciliation = result.reconciliation
     if not reconciliation.available:
         reason = reconciliation.source_specific_details.get("reason")
@@ -1969,6 +2059,16 @@ def _render_review_and_commit_step() -> None:
         _render_source_summary(result)
         return
     review = _weekly_review()
+    if _statement_invoice_coverage(result) is not None:
+        _render_statement_invoice_coverage_status(result)
+        _render_statement_refresh_action(
+            review,
+            key="statement_commit_coverage_refresh",
+        )
+        _render_statement_invoice_coverage_details(result)
+        _render_back_button(4, key="coverage_statement_commit_back")
+        _render_source_summary(result)
+        return
     if (
         review is not None
         and readiness.ready
@@ -2618,6 +2718,22 @@ def _statement_forward_gate() -> tuple[bool, str | None]:
     if _statement_review_stale():
         return False, "Refresh the Statement review before continuing."
     result = _current_import_result()
+    coverage = _statement_invoice_coverage(result)
+    if coverage is not None:
+        missing_invoices = len(coverage.missing_invoice_order_ids)
+        missing_items = len(coverage.missing_invoice_item_order_ids)
+        parts = []
+        if missing_invoices:
+            parts.append(
+                f"{missing_invoices} invoice"
+                f"{'s are' if missing_invoices != 1 else ' is'} still required"
+            )
+        if missing_items:
+            parts.append(
+                f"{missing_items} order"
+                f"{'s are' if missing_items != 1 else ' is'} missing Invoice items"
+            )
+        return False, f"{' and '.join(parts)} before reconciliation can continue."
     if result.commit_readiness.ready and review.commit_ready:
         return True, None
     affected_orders, issue_count = _statement_blocker_counts(result)

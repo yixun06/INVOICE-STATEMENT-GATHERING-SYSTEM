@@ -61,6 +61,26 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 )
 
 
+INVOICE_COVERAGE_INCOMPLETE = "INVOICE_COVERAGE_INCOMPLETE"
+
+
+@dataclass(frozen=True)
+class StatementInvoiceCoverage:
+    """Fresh persisted Invoice coverage for normal Statement orders only."""
+
+    statement_order_ids: tuple[str, ...]
+    invoice_order_ids: tuple[str, ...]
+    missing_invoice_order_ids: tuple[str, ...]
+    missing_invoice_item_order_ids: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not (
+            self.missing_invoice_order_ids
+            or self.missing_invoice_item_order_ids
+        )
+
+
 @dataclass(frozen=True)
 class StatementReviewEvidenceVersion:
     statement_file_hash: str
@@ -94,6 +114,7 @@ class StatementImportReview:
     # Read-only review evidence for the Data Import presentation. This is not
     # persistence input and never authorizes a source correction or match.
     invoice_items: tuple[CanonicalInvoiceItem, ...] = ()
+    invoice_coverage: StatementInvoiceCoverage | None = None
 
     @property
     def ready(self) -> bool:
@@ -197,6 +218,9 @@ def commit_statement_review(
     if review.stage.already_imported:
         return StatementCommitAttempt(False, ("ALREADY_IMPORTED",))
 
+    if review.invoice_coverage is not None and not review.invoice_coverage.complete:
+        return StatementCommitAttempt(False, (INVOICE_COVERAGE_INCOMPLETE,))
+
     if not review.commit_ready or review.source_bytes is None:
         return StatementCommitAttempt(
             False,
@@ -231,6 +255,13 @@ def commit_statement_review(
 
         current_orders = _statement_orders(statement, state.orders.values())
         current_items = _state_statement_items(statement, state.items)
+        current_coverage = classify_statement_invoice_coverage(
+            statement,
+            current_orders,
+            current_items,
+        )
+        if not current_coverage.complete:
+            return StatementCommitAttempt(False, (INVOICE_COVERAGE_INCOMPLETE,))
         current_reconciliation = evaluate_statement_reconciliation(
             statement,
             current_orders,
@@ -368,6 +399,33 @@ def _build_review(
 
     invoice_items = tuple(invoice_items)
     invoice_orders = _statement_orders(statement, invoice_orders)
+    invoice_coverage = classify_statement_invoice_coverage(
+        statement,
+        invoice_orders,
+        invoice_items,
+    )
+    if (
+        not invoice_coverage.complete
+        and not stage.rejection_reasons
+        and not stage.validation_issues
+        and stage.duplicate_status is None
+    ):
+        return StatementImportReview(
+            batch_id=batch_id,
+            uploaded_at=uploaded_at,
+            uploaded_by=uploaded_by,
+            stage=stage,
+            reconciliation_v2=None,
+            evidence_version=None,
+            sku_matches=empty_matches,
+            plan=None,
+            blockers=(),
+            limitations=(),
+            persistence_blockers=(INVOICE_COVERAGE_INCOMPLETE,),
+            source_bytes=source_bytes,
+            invoice_items=invoice_items,
+            invoice_coverage=invoice_coverage,
+        )
     repairs = tuple(verified_artifact_repairs)
     product_families = product_family_resolver_from_price_master(product_master)
     reconciliation_v2 = evaluate_statement_reconciliation(
@@ -442,6 +500,48 @@ def _build_review(
         persistence_blockers=tuple(dict.fromkeys(persistence_blockers)),
         source_bytes=source_bytes,
         invoice_items=invoice_items,
+        invoice_coverage=invoice_coverage,
+    )
+
+
+def classify_statement_invoice_coverage(
+    statement: ParsedShopeeWeeklyStatement,
+    invoice_orders: Iterable[CanonicalInvoiceOrder],
+    invoice_items: Iterable[CanonicalInvoiceItem],
+) -> StatementInvoiceCoverage:
+    """Classify normal-order coverage without using reconciliation outcomes.
+
+    Adjustment linked order IDs are intentionally absent: an adjustment is
+    independent evidence unless its order also appears in ``order_rows``.
+    """
+
+    statement_order_ids = tuple(
+        dict.fromkeys(row.order_id for row in statement.order_rows if row.order_id)
+    )
+    required = set(statement_order_ids)
+    persisted_orders = {
+        order.order_id
+        for order in invoice_orders
+        if order.platform == "Shopee" and order.order_id in required
+    }
+    persisted_items = {
+        item.order_id
+        for item in invoice_items
+        if item.platform == "Shopee" and item.order_id in required
+    }
+    return StatementInvoiceCoverage(
+        statement_order_ids=statement_order_ids,
+        invoice_order_ids=tuple(
+            order_id for order_id in statement_order_ids if order_id in persisted_orders
+        ),
+        missing_invoice_order_ids=tuple(
+            order_id for order_id in statement_order_ids if order_id not in persisted_orders
+        ),
+        missing_invoice_item_order_ids=tuple(
+            order_id
+            for order_id in statement_order_ids
+            if order_id in persisted_orders and order_id not in persisted_items
+        ),
     )
 
 

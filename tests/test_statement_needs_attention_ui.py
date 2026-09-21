@@ -776,3 +776,87 @@ def test_blocker_and_notes_render_in_separate_sections():
     assert next(
         button for button in app.button if button.label == "Continue to reconcile"
     ).disabled
+
+
+def _partial_invoice_coverage_app() -> None:
+    from src.invoice_app.services.import_result_contract import (
+        CommitReadiness,
+        ImportResult,
+        ReconciliationResult,
+        SessionState,
+        SourceSummary,
+        SummaryItem,
+        ValidationResult,
+    )
+    from src.invoice_app.services.shopee_statement_import import (
+        StatementInvoiceCoverage,
+    )
+    from src.invoice_app.ui import data_import
+
+    coverage = StatementInvoiceCoverage(
+        statement_order_ids=("ORDER-1", "ORDER-2", "ORDER-3"),
+        invoice_order_ids=("ORDER-1", "ORDER-2"),
+        missing_invoice_order_ids=("ORDER-3",),
+        missing_invoice_item_order_ids=("ORDER-2",),
+    )
+    result = ImportResult(
+        source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
+        batch_status="INVOICE_COVERAGE_INCOMPLETE",
+        source_summary=SourceSummary(
+            title="Statement",
+            items=(
+                SummaryItem("Statement Period", "17/08/2026 - 23/08/2026"),
+                SummaryItem("Order Rows", 3),
+                SummaryItem("SKU Rows", 5),
+                SummaryItem("Total Released", "RM 123.45"),
+                SummaryItem("Adjustment Total", "RM 2.00"),
+            ),
+        ),
+        validation=ValidationResult(),
+        reconciliation=ReconciliationResult(
+            available=False,
+            status="Invoices still required",
+        ),
+        commit_readiness=CommitReadiness(
+            ready=False,
+            status="Not Ready",
+            reasons=("Invoice coverage is incomplete.",),
+        ),
+        session_state=SessionState(
+            applied_to_current_session=True,
+            label="Applied to Current Session",
+        ),
+        source_specific_details={"invoice_coverage": coverage},
+    )
+    data_import._render_validation_status(result)
+    data_import._render_statement_invoice_coverage_details(result)
+    data_import._render_source_summary(result)
+
+
+def test_partial_invoice_coverage_ui_is_direct_and_preserves_statement_summary():
+    app = AppTest.from_function(_partial_invoice_coverage_app)
+
+    app.run()
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    assert "Invoices still required" in app.error[0].value
+    assert "unresolved issue" not in app.error[0].value
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["Statement Orders"] == "3"
+    assert metrics["Invoices Found"] == "2"
+    assert metrics["Invoices Missing"] == "1"
+    assert metrics["Invoice Items Missing"] == "1"
+    assert metrics["Statement Period"] == "17/08/2026 - 23/08/2026"
+    assert metrics["Order Rows"] == "3"
+    assert metrics["SKU Rows"] == "5"
+    assert metrics["Total Released"] == "RM 123.45"
+    assert metrics["Adjustment Total"] == "RM 2.00"
+    table = next(
+        frame.value for frame in app.dataframe if "Database status" in frame.value.columns
+    )
+    assert tuple(table["Order ID"]) == ("ORDER-3", "ORDER-2")
+    assert tuple(table["Database status"]) == (
+        "Invoice not imported",
+        "Invoice items missing",
+    )

@@ -23,7 +23,9 @@ from src.invoice_app.repositories.historical_invoice_repository import (
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_import import (
+    INVOICE_COVERAGE_INCOMPLETE,
     check_statement_review_currency,
+    classify_statement_invoice_coverage,
     commit_statement_review,
     refresh_statement_review,
     review_statement_upload,
@@ -362,17 +364,31 @@ def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):
 
     assert review.ready is False
     assert review.plan is None
-    assert any("no persisted Invoice order coverage" in reason for reason in review.blockers)
+    assert review.blockers == ()
+    assert review.persistence_blockers == (INVOICE_COVERAGE_INCOMPLETE,)
+    assert review.reconciliation_v2 is None
+    assert review.invoice_coverage.missing_invoice_order_ids == ("ORDER-1",)
+
+
+def test_partial_coverage_does_not_run_downstream_reconciliation(monkeypatch):
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.evaluate_statement_reconciliation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("reconciliation must not run before coverage is complete")
+        ),
+    )
+
+    review, _, _ = _review(monkeypatch, order=None, items=())
+
+    assert review.reconciliation_v2 is None
+    assert review.invoice_coverage.missing_invoice_order_ids == ("ORDER-1",)
 
 
 def test_refresh_replaces_old_missing_invoice_blocker_after_invoice_is_persisted(
     monkeypatch,
 ):
     review, repository, writer = _review(monkeypatch, order=None, items=())
-    assert any(
-        "no persisted Invoice order coverage" in reason
-        for reason in review.blockers
-    )
+    assert review.invoice_coverage.missing_invoice_order_ids == ("ORDER-1",)
 
     writer.order = _order(refund=None)
     writer.items = (_item("Other Product", seller_sku="OTHER-SKU"),)
@@ -385,24 +401,178 @@ def test_refresh_replaces_old_missing_invoice_blocker_after_invoice_is_persisted
         now=lambda: NOW,
     )
 
-    assert not any(
-        "no persisted Invoice order coverage" in reason
-        for reason in refreshed.blockers
-    )
+    assert refreshed.invoice_coverage.complete is True
     assert any("product identity is unresolved" in reason for reason in refreshed.blockers)
+
+
+def test_refresh_replaces_four_missing_orders_with_current_two(monkeypatch):
+    order_rows = tuple(
+        replace(_income("Order", index + 2), order_id=f"ORDER-{index}")
+        for index in range(4)
+    )
+    statement = replace(
+        _statement(),
+        income_rows=order_rows,
+        summary_total_released=Decimal("40.00"),
+        summary_lines=(
+            StatementSummaryLine(
+                "Summary", 40, "3. Total Released Amount", "TOTAL", None,
+                Decimal("40.00"), "RM",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    class CoverageWriter:
+        orders: tuple[CanonicalInvoiceOrder, ...] = ()
+        items: tuple[CanonicalInvoiceItem, ...] = ()
+
+        def reload_commit_state(self):
+            return StatementCommitState(
+                orders={order.order_id: order for order in self.orders},
+                committed_statements=(),
+                items=self.items,
+            )
+
+    writer = CoverageWriter()
+    review = review_statement_upload(
+        b"synthetic",
+        source_filename="statement.xlsx",
+        batch_id="batch-coverage-refresh",
+        uploaded_by="admin",
+        repository=_Repository(()),
+        writer=writer,
+        product_master=_master(),
+        now=lambda: NOW,
+    )
+    assert review.invoice_coverage.missing_invoice_order_ids == (
+        "ORDER-0", "ORDER-1", "ORDER-2", "ORDER-3",
+    )
+
+    writer.orders = tuple(
+        replace(_order(), order_id=f"ORDER-{index}") for index in range(2)
+    )
+    writer.items = tuple(
+        replace(_item(), order_id=f"ORDER-{index}") for index in range(2)
+    )
+    refreshed = refresh_statement_review(
+        review,
+        repository=_Repository(()),
+        writer=writer,
+        product_master=_master(),
+        now=lambda: NOW,
+    )
+
+    assert refreshed.invoice_coverage.missing_invoice_order_ids == (
+        "ORDER-2", "ORDER-3",
+    )
 
 
 def test_existing_invoice_order_without_items_is_not_full_invoice_missing(monkeypatch):
     review, _, _ = _review(monkeypatch, order=_order(refund=None), items=())
 
-    assert not any(
-        "no persisted Invoice order coverage" in reason
-        for reason in review.blockers
+    assert review.reconciliation_v2 is None
+    assert review.invoice_coverage.missing_invoice_order_ids == ()
+    assert review.invoice_coverage.missing_invoice_item_order_ids == ("ORDER-1",)
+
+
+def test_partial_coverage_adapter_keeps_statement_summary_and_hides_reconciliation(
+    monkeypatch,
+):
+    review, _, _ = _review(monkeypatch, order=None, items=())
+
+    result = adapt_shopee_weekly_statement_import_result(
+        review.stage,
+        batch_id=review.batch_id,
+        review=review,
     )
-    assert any(
-        "Invoice order exists but has no Invoice_Items coverage" in reason
-        for reason in review.blockers
+    summary = {item.label: item.value for item in result.source_summary.items}
+
+    assert result.batch_status == INVOICE_COVERAGE_INCOMPLETE
+    assert result.validation.blocking_issues == ()
+    assert result.reconciliation.available is False
+    assert result.reconciliation.status == "Invoices still required"
+    assert summary["Statement Period"].startswith("10/08/2026")
+    assert summary["Statement Period"].endswith("16/08/2026")
+    assert summary["Order Rows"] == 1
+    assert summary["SKU Rows"] == 1
+    assert summary["Total Released"] == Decimal("10.00")
+    assert summary["Adjustment Total"] == Decimal("0.00")
+
+
+def test_partial_coverage_counts_exact_missing_normal_orders():
+    order_rows = tuple(
+        replace(_income("Order", index + 2), order_id=f"ORDER-{index}")
+        for index in range(10)
     )
+    statement = replace(_statement(), income_rows=order_rows)
+    orders = tuple(replace(_order(), order_id=f"ORDER-{index}") for index in range(6))
+    items = tuple(replace(_item(), order_id=f"ORDER-{index}") for index in range(6))
+
+    coverage = classify_statement_invoice_coverage(statement, orders, items)
+
+    assert len(coverage.statement_order_ids) == 10
+    assert len(coverage.invoice_order_ids) == 6
+    assert coverage.missing_invoice_order_ids == (
+        "ORDER-6", "ORDER-7", "ORDER-8", "ORDER-9",
+    )
+    assert coverage.missing_invoice_item_order_ids == ()
+
+
+def test_coverage_separates_missing_order_from_missing_items():
+    statement = _statement()
+
+    coverage = classify_statement_invoice_coverage(statement, (_order(),), ())
+
+    assert coverage.missing_invoice_order_ids == ()
+    assert coverage.missing_invoice_item_order_ids == ("ORDER-1",)
+
+
+def test_adjustment_only_linked_order_does_not_create_coverage_requirement():
+    adjustment = SettlementAdjustment(
+        sequence_no="ADJUSTMENT-1",
+        adjustment_complete_date=date(2026, 8, 18),
+        adjustment_type="Other",
+        adjustment_reason="Post-order correction",
+        adjustment_amount=Decimal("1.00"),
+        linked_order_id="OLD-ORDER-123",
+        payout_completed_date=date(2026, 8, 18),
+        source_row_number=2,
+    )
+    statement = replace(_statement(), income_rows=(), adjustments=(adjustment,))
+
+    coverage = classify_statement_invoice_coverage(statement, (), ())
+
+    assert coverage.statement_order_ids == ()
+    assert coverage.complete is True
+
+
+def test_normal_order_plus_adjustment_counts_order_once():
+    adjustment = SettlementAdjustment(
+        sequence_no="ADJUSTMENT-1",
+        adjustment_complete_date=date(2026, 8, 18),
+        adjustment_type="Other",
+        adjustment_reason="Post-order correction",
+        adjustment_amount=Decimal("1.00"),
+        linked_order_id="ORDER-1",
+        payout_completed_date=date(2026, 8, 18),
+        source_row_number=2,
+    )
+    statement = replace(_statement(), adjustments=(adjustment,))
+
+    coverage = classify_statement_invoice_coverage(statement, (), ())
+
+    assert coverage.statement_order_ids == ("ORDER-1",)
+    assert coverage.missing_invoice_order_ids == ("ORDER-1",)
 
 
 def test_unresolved_sku_needs_review_and_blocks_the_whole_statement(monkeypatch):
