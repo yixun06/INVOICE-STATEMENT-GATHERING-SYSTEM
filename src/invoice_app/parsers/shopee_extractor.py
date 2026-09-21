@@ -56,6 +56,7 @@ class ShopeeExtractedData:
     refund_amount: Decimal | None
     post_order_adjustment_observed: bool
     post_order_adjustment_type: str | None
+    post_order_adjustment_reason: str | None
     post_order_adjustment_date: str | None
     post_order_adjustment_amount: Decimal | None
     post_order_adjustment_final_amount_consistent: bool | None
@@ -81,8 +82,8 @@ def extract_shopee_data(
     product_items = resolve_promotion_group_totals(product_items, income.get("product_price"))
     refund_amount = extract_refund_amount(normalized_text)
     post_order_adjustment = extract_post_order_return_refund_adjustment(normalized_text)
-    post_order_adjustment_type, post_order_adjustment_date, post_order_adjustment_amount = (
-        post_order_adjustment if post_order_adjustment is not None else (None, None, None)
+    post_order_adjustment_type, post_order_adjustment_reason, post_order_adjustment_date, post_order_adjustment_amount = (
+        post_order_adjustment if post_order_adjustment is not None else (None, None, None, None)
     )
     post_order_adjustment_final_amount_consistent = _post_order_adjustment_final_amount_consistent(
         income,
@@ -115,6 +116,7 @@ def extract_shopee_data(
         refund_amount=refund_amount,
         post_order_adjustment_observed=post_order_adjustment is not None,
         post_order_adjustment_type=post_order_adjustment_type,
+        post_order_adjustment_reason=post_order_adjustment_reason,
         post_order_adjustment_date=post_order_adjustment_date,
         post_order_adjustment_amount=post_order_adjustment_amount,
         post_order_adjustment_final_amount_consistent=post_order_adjustment_final_amount_consistent,

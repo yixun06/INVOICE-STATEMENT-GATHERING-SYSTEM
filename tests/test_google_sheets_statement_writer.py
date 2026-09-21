@@ -11,6 +11,7 @@ from openpyxl.utils.cell import range_boundaries
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
+    SettlementAdjustment,
     SettlementIncomeRow,
     StatementSummaryLine,
 )
@@ -46,6 +47,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
+    ORDER_ADJUSTMENTS_HEADERS,
+    ORDER_ADJUSTMENTS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
@@ -61,6 +64,7 @@ SHEET_IDS = {
     STATEMENT_DATA_TAB: 13,
     STATEMENT_FINANCIAL_COMPONENTS_TAB: 14,
     STATEMENT_SUMMARY_TAB: 15,
+    ORDER_ADJUSTMENTS_TAB: 16,
 }
 
 
@@ -75,6 +79,7 @@ class InMemoryStatementGateway:
                 list(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
             ],
             STATEMENT_SUMMARY_TAB: [list(STATEMENT_SUMMARY_HEADERS)],
+            ORDER_ADJUSTMENTS_TAB: [list(ORDER_ADJUSTMENTS_HEADERS)],
         }
         self.read_calls = 0
         self.sheet_id_calls = 0
@@ -328,6 +333,75 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 2
 
 
+def test_statement_commit_appends_supported_adjustment_in_the_same_values_batch():
+    adjustment = SettlementAdjustment(
+        sequence_no="9",
+        adjustment_complete_date=date(2026, 8, 6),
+        adjustment_type="Return Refund Adjustment After Order Completed",
+        adjustment_reason="",
+        adjustment_amount=Decimal("-43.61"),
+        linked_order_id="2607302A9FMUBM",
+        payout_completed_date=date(2026, 8, 3),
+        source_row_number=90,
+    )
+    statement = replace(
+        _statement(),
+        adjustments=(adjustment,),
+        adjustment_control_total=Decimal("-43.61"),
+    )
+    gateway = InMemoryStatementGateway()
+
+    result = _commit(gateway, _plan(statement=statement))
+
+    assert result.committed is True
+    data = gateway.batch_calls[0]
+    assert ORDER_ADJUSTMENTS_TAB in {
+        value_range["range"].split("!", 1)[0].strip("'")
+        for value_range in data
+    }
+    row = gateway.tabs[ORDER_ADJUSTMENTS_TAB][1]
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+    assert row[positions["linked_order_id"]] == "2607302A9FMUBM"
+    assert row[positions["adjustment_type"]] == "RETURN_REFUND_AFTER_ORDER_COMPLETED"
+    assert row[positions["adjustment_amount"]] == "-43.61"
+    assert row[positions["evidence_status"]] == "STATEMENT_ONLY"
+    assert row[positions["invoice_evidence_amount"]] == ""
+
+
+def test_pdf_evidence_writer_updates_only_existing_adjustment_evidence_fields():
+    adjustment = SettlementAdjustment(
+        sequence_no="9", adjustment_complete_date=date(2026, 8, 6),
+        adjustment_type="Return Refund Adjustment After Order Completed",
+        adjustment_reason="", adjustment_amount=Decimal("-43.61"),
+        linked_order_id="2607302A9FMUBM", payout_completed_date=date(2026, 8, 3),
+        source_row_number=90,
+    )
+    statement = replace(_statement(), adjustments=(adjustment,), adjustment_control_total=Decimal("-43.61"))
+    plan = _plan(statement=statement)
+    gateway = InMemoryStatementGateway()
+    _commit(gateway, plan)
+    before = list(gateway.tabs[ORDER_ADJUSTMENTS_TAB][1])
+    confirmed = plan.order_adjustments[0].with_pdf_evidence(
+        evidence_date=date(2026, 8, 6), evidence_amount=Decimal("-43.61"),
+        evidence_final_amount=Decimal("2.97"),
+        evidence_reason="Return Refund Adjustment After Order Completed",
+        source_pdf="2607302A9FMUBM.pdf", source_hash="p" * 64,
+    )
+
+    GoogleSheetsStatementWriter(
+        spreadsheet_id="synthetic-sheet", gateway=gateway
+    ).enrich_order_adjustment_pdf_evidence(confirmed)
+
+    row = gateway.tabs[ORDER_ADJUSTMENTS_TAB][1]
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+    assert row[positions["evidence_status"]] == "PDF_CONFIRMED"
+    assert row[positions["invoice_evidence_amount"]] == "-43.61"
+    assert row[positions["invoice_evidence_final_amount"]] == "2.97"
+    assert row[positions["invoice_source_pdf"]] == "2607302A9FMUBM.pdf"
+    assert row[:positions["evidence_status"]] == before[:positions["evidence_status"]]
+    assert row[positions["first_observed_at"]] == before[positions["first_observed_at"]]
+
+
 def test_missing_or_duplicate_order_target_produces_zero_write():
     missing = InMemoryStatementGateway()
     missing.tabs[INVOICE_ORDERS_TAB] = [list(INVOICE_ORDERS_HEADERS)]
@@ -386,6 +460,16 @@ def test_statement_summary_header_mismatch_or_identity_collision_blocks_zero_wri
     with pytest.raises(StatementCommitBlocked, match="already contains planned stable identity"):
         _commit(collision, _plan())
     assert collision.batch_calls == []
+
+
+def test_order_adjustments_header_mismatch_blocks_the_entire_statement_write():
+    gateway = InMemoryStatementGateway()
+    gateway.tabs[ORDER_ADJUSTMENTS_TAB][0][-1] = "wrong"
+
+    with pytest.raises(StatementCommitBlocked, match="does not exactly match"):
+        _commit(gateway, _plan())
+
+    assert gateway.batch_calls == []
 
 
 def test_group_protected_item_remains_unchanged_after_positive_readback():

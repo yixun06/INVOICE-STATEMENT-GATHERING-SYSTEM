@@ -127,6 +127,7 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         # canonical UAT2 invoice schema or source-fingerprint contract.
         "post_order_adjustment_observed": data.post_order_adjustment_observed,
         "post_order_adjustment_type": data.post_order_adjustment_type,
+        "post_order_adjustment_reason": data.post_order_adjustment_reason,
         "post_order_adjustment_date": data.post_order_adjustment_date,
         "post_order_adjustment_amount": _source_money(data.post_order_adjustment_amount),
         "_post_order_adjustment_final_amount_consistent": (

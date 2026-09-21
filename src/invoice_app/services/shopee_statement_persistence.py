@@ -19,6 +19,11 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
+from src.invoice_app.domain.order_adjustment import (
+    CanonicalOrderAdjustment,
+    make_statement_adjustment,
+    supported_adjustment_type,
+)
 from src.invoice_app.domain.statement_reconciliation_v2 import (
     IdentityScope,
     SettlementBasis,
@@ -45,6 +50,7 @@ from src.invoice_app.services.application_commit_lock import (
     ApplicationCommitLock,
 )
 from src.invoice_app.services.uat2_persistence_schema import (
+    ORDER_ADJUSTMENTS_HEADERS,
     STATEMENT_DATA_HEADERS,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
     STATEMENT_SUMMARY_HEADERS,
@@ -132,6 +138,7 @@ class StatementCommitPlan:
     invoice_order_updates: tuple[InvoiceOrderStatementUpdate, ...]
     invoice_item_updates: tuple[InvoiceItemStatementUpdate, ...]
     summary_rows: tuple[tuple[str, ...], ...] = ()
+    order_adjustments: tuple[CanonicalOrderAdjustment, ...] = ()
     protected_invoice_items: tuple[ProtectedInvoiceItemStatementFields, ...] = ()
     invoice_snapshot_sha256: str | None = None
 
@@ -262,6 +269,7 @@ def prepare_statement_commit_plan(
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
         summary_rows=summary_rows,
+        order_adjustments=_order_adjustment_events(statement, audit),
     )
 
 
@@ -548,6 +556,7 @@ def prepare_v2_statement_commit_plan(
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
         summary_rows=_summary_rows(statement, audit),
+        order_adjustments=_order_adjustment_events(statement, audit),
         protected_invoice_items=tuple(
             group_targets[key] for key in sorted(group_targets)
         ),
@@ -835,6 +844,68 @@ def _adjustment_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatc
         "adjustment_amount": adjustment.adjustment_amount,
     })
     return _serialize_statement_row(values)
+
+
+def _order_adjustment_events(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+) -> tuple[CanonicalOrderAdjustment, ...]:
+    """Create only the exact V1 Statement adjustment event; retain other rows in Statement_Data."""
+    events: list[CanonicalOrderAdjustment] = []
+    for adjustment in statement.adjustments:
+        if supported_adjustment_type(adjustment.adjustment_type) is None:
+            continue
+        if adjustment.adjustment_complete_date is None or adjustment.adjustment_amount is None:
+            raise StatementCommitBlocked(
+                "Supported Statement Adjustment lacks required date or amount."
+            )
+        try:
+            event = make_statement_adjustment(
+                linked_order_id=adjustment.linked_order_id,
+                adjustment_description=adjustment.adjustment_type,
+                adjustment_reason=adjustment.adjustment_reason,
+                adjustment_complete_date=adjustment.adjustment_complete_date,
+                adjustment_amount=adjustment.adjustment_amount,
+                payout_completed_date=adjustment.payout_completed_date,
+                statement_batch_id=audit.statement_batch_id,
+                statement_sequence_no=adjustment.sequence_no,
+                statement_source_filename=statement.source_filename,
+                statement_file_hash=statement.file_hash,
+                first_observed_at=audit.committed_at,
+            )
+        except ValueError as error:
+            raise StatementCommitBlocked(str(error)) from error
+        if event is not None:
+            events.append(event)
+    return tuple(events)
+
+
+def serialize_order_adjustment(event: CanonicalOrderAdjustment) -> tuple[str, ...]:
+    """Serialize the approved 21-column event schema without Invoice fields."""
+    values = {
+        "platform": event.platform,
+        "linked_order_id": event.linked_order_id,
+        "adjustment_type": event.adjustment_type,
+        "adjustment_description": event.adjustment_description,
+        "adjustment_reason": event.adjustment_reason,
+        "adjustment_complete_date": event.adjustment_complete_date,
+        "adjustment_amount": event.adjustment_amount,
+        "payout_completed_date": event.payout_completed_date,
+        "statement_batch_id": event.statement_batch_id,
+        "statement_sequence_no": event.statement_sequence_no,
+        "statement_source_filename": event.statement_source_filename,
+        "statement_file_hash": event.statement_file_hash,
+        "adjustment_event_fingerprint": event.adjustment_event_fingerprint,
+        "evidence_status": event.evidence_status.value,
+        "invoice_evidence_date": event.invoice_evidence_date,
+        "invoice_evidence_amount": event.invoice_evidence_amount,
+        "invoice_evidence_final_amount": event.invoice_evidence_final_amount,
+        "invoice_evidence_reason": event.invoice_evidence_reason,
+        "invoice_source_pdf": event.invoice_source_pdf,
+        "invoice_source_hash": event.invoice_source_hash,
+        "first_observed_at": event.first_observed_at,
+    }
+    return tuple(_serialize(values.get(header)) for header in ORDER_ADJUSTMENTS_HEADERS)
 
 
 def _required_business_match_method(method: str | None) -> str:

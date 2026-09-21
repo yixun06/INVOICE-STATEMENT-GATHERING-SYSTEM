@@ -139,7 +139,7 @@ def extract_refund_amount(text: str) -> Decimal | None:
 
 def extract_post_order_return_refund_adjustment(
     text: str,
-) -> tuple[str, str, Decimal] | None:
+) -> tuple[str, str, str, Decimal] | None:
     """Extract only the supported completed Order Adjustment source row.
 
     This is intentionally separate from the original Invoice's Refund Amount.
@@ -153,6 +153,10 @@ def extract_post_order_return_refund_adjustment(
             continue
         return (
             RETURN_REFUND_AFTER_ORDER_COMPLETED,
+            # This literal is returned only after the exact source-visible
+            # reason was matched above; it is not reconstructed from the
+            # normalized event type downstream.
+            "Return Refund Adjustment After Order Completed",
             normalize_whitespace(row.group("date")),
             parse_decimal(
                 row.group("amount_after") or row.group("amount_before")

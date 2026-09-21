@@ -136,6 +136,7 @@ def test_completed_return_refund_adjustment_is_transient_evidence_not_original_r
     assert extracted.refund_amount is None
     assert extracted.post_order_adjustment_observed is True
     assert extracted.post_order_adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
+    assert extracted.post_order_adjustment_reason == "Return Refund Adjustment After Order Completed"
     assert extracted.post_order_adjustment_date == "01/08/2026"
     assert extracted.post_order_adjustment_amount == Decimal("-17.67")
     assert extracted.post_order_adjustment_final_amount_consistent is True
@@ -144,6 +145,7 @@ def test_completed_return_refund_adjustment_is_transient_evidence_not_original_r
     assert order["final_amount"] == "32.36"
     assert order["refund_amount"] == "N/A"
     assert order["post_order_adjustment_observed"] is True
+    assert order["post_order_adjustment_reason"] == "Return Refund Adjustment After Order Completed"
     assert order["post_order_adjustment_amount"] == "-17.67"
 
 
@@ -334,6 +336,7 @@ def test_real_adjustment_upload_preserves_sidecar_through_staging_and_revalidati
         assert entry.source_filename == order["source_pdf"]
         assert len(entry.source_hash) == 64
         assert entry.post_order_adjustment.adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
+        assert entry.post_order_adjustment.adjustment_reason == "Return Refund Adjustment After Order Completed"
         assert entry.post_order_adjustment.adjustment_complete_date == complete_date
         assert entry.post_order_adjustment.released_amount == Decimal(adjustment)
         assert entry.post_order_adjustment.final_amount_consistent is True

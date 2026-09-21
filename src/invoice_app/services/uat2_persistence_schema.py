@@ -8,6 +8,7 @@ INVOICE_ITEMS_TAB = "Invoice_Items"
 STATEMENT_DATA_TAB = "Statement_Data"
 STATEMENT_FINANCIAL_COMPONENTS_TAB = "Statement_Financial_Components"
 STATEMENT_SUMMARY_TAB = "Statement_Summary"
+ORDER_ADJUSTMENTS_TAB = "Order_Adjustments"
 
 # This is retained only for the one-time, explicitly approved schema migration.
 LEGACY_INVOICE_ORDERS_HEADERS = (
@@ -69,6 +70,19 @@ STATEMENT_SUMMARY_HEADERS = (
     "commit_status",
 )
 
+# Statement-driven, post-payment adjustment events.  These columns are a
+# separate immutable source ledger: they are deliberately not Invoice fields.
+ORDER_ADJUSTMENTS_HEADERS = (
+    "platform", "linked_order_id", "adjustment_type", "adjustment_description",
+    "adjustment_reason", "adjustment_complete_date", "adjustment_amount",
+    "payout_completed_date", "statement_batch_id", "statement_sequence_no",
+    "statement_source_filename", "statement_file_hash",
+    "adjustment_event_fingerprint", "evidence_status",
+    "invoice_evidence_date", "invoice_evidence_amount",
+    "invoice_evidence_final_amount", "invoice_evidence_reason",
+    "invoice_source_pdf", "invoice_source_hash", "first_observed_at",
+)
+
 
 assert len(LEGACY_INVOICE_ORDERS_HEADERS) == 39
 assert len(PRE_FINANCIAL_INVOICE_ORDERS_HEADERS) == 40
@@ -80,3 +94,4 @@ assert len(INVOICE_ITEMS_HEADERS) == 23
 assert len(STATEMENT_DATA_HEADERS) == 40
 assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
 assert len(STATEMENT_SUMMARY_HEADERS) == 14
+assert len(ORDER_ADJUSTMENTS_HEADERS) == 21

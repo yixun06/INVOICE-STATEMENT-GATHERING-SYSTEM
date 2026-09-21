@@ -14,6 +14,7 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
+from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     HistoricalInvoiceStorageError,
     _deserialize_item,
@@ -34,6 +35,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitState,
     StatementWriteIntegrityError,
     StatementWriteNotApplied,
+    serialize_order_adjustment,
     validate_current_statement_state,
     write_statement_plan_if_current,
 )
@@ -42,6 +44,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
+    ORDER_ADJUSTMENTS_HEADERS,
+    ORDER_ADJUSTMENTS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
     STATEMENT_FINANCIAL_COMPONENT_HEADERS,
@@ -108,6 +112,12 @@ class _StatementSummaryTarget:
 
 
 @dataclass(frozen=True)
+class _OrderAdjustmentTarget:
+    row_index: int
+    values: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class _WriterSnapshot:
     sheet_ids: Mapping[str, int]
     orders: Mapping[tuple[str, str], _OrderTarget]
@@ -118,6 +128,8 @@ class _WriterSnapshot:
     financial_component_append_row_index: int
     summary_rows: tuple[_StatementSummaryTarget, ...]
     summary_append_row_index: int
+    order_adjustment_rows: tuple[_OrderAdjustmentTarget, ...]
+    order_adjustment_append_row_index: int
     commit_state: StatementCommitState
 
 
@@ -131,7 +143,7 @@ class GoogleSheetsStatementWriter:
         self._gateway = gateway
 
     def reload_commit_state(self) -> StatementCommitState:
-        """Freshly read all four authoritative tabs for guarded preflight."""
+        """Freshly read all authoritative tabs for guarded preflight."""
         return self._read_snapshot().commit_state
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
@@ -164,6 +176,38 @@ class GoogleSheetsStatementWriter:
                 "Google Sheets acknowledged the write but exact Statement and Invoice enrichment readback did not verify; manual recovery is required."
             )
 
+    def enrich_order_adjustment_pdf_evidence(
+        self, event: CanonicalOrderAdjustment
+    ) -> None:
+        """Write only the approved optional PDF evidence fields on one event."""
+        before = self._read_snapshot()
+        target = _order_adjustment_target(before, event)
+        start = ORDER_ADJUSTMENTS_HEADERS.index("evidence_status")
+        fields = (
+            "evidence_status", "invoice_evidence_date", "invoice_evidence_amount",
+            "invoice_evidence_final_amount", "invoice_evidence_reason",
+            "invoice_source_pdf", "invoice_source_hash",
+        )
+        expected = serialize_order_adjustment(event)
+        data = (_value_range(
+            ORDER_ADJUSTMENTS_TAB,
+            target.row_index,
+            start,
+            (tuple(expected[ORDER_ADJUSTMENTS_HEADERS.index(field)] for field in fields),),
+        ),)
+        try:
+            self._gateway.batch_update_values(self._spreadsheet_id, data)
+        except Exception as write_error:
+            if _adjustment_evidence_matches(self._read_snapshot(), event):
+                return
+            raise StatementWriteIntegrityError(
+                "Order Adjustment PDF evidence write was not verified; manual recovery is required."
+            ) from write_error
+        if not _adjustment_evidence_matches(self._read_snapshot(), event):
+            raise StatementWriteIntegrityError(
+                "Order Adjustment PDF evidence readback did not verify."
+            )
+
     def _read_snapshot(self) -> _WriterSnapshot:
         try:
             required_tabs = (
@@ -172,6 +216,7 @@ class GoogleSheetsStatementWriter:
                 STATEMENT_DATA_TAB,
                 STATEMENT_FINANCIAL_COMPONENTS_TAB,
                 STATEMENT_SUMMARY_TAB,
+                ORDER_ADJUSTMENTS_TAB,
             )
             sheet_ids = self._gateway.read_sheet_ids(
                 self._spreadsheet_id, required_tabs
@@ -196,6 +241,9 @@ class GoogleSheetsStatementWriter:
         )
         summary_rows = _rows_with_positions(
             tabs, STATEMENT_SUMMARY_TAB, STATEMENT_SUMMARY_HEADERS
+        )
+        order_adjustment_rows = _rows_with_positions(
+            tabs, ORDER_ADJUSTMENTS_TAB, ORDER_ADJUSTMENTS_HEADERS
         )
 
         orders: dict[tuple[str, str], _OrderTarget] = {}
@@ -252,6 +300,13 @@ class GoogleSheetsStatementWriter:
                 for row_index, values in summary_rows
             ),
             summary_append_row_index=_append_row_index(tabs[STATEMENT_SUMMARY_TAB]),
+            order_adjustment_rows=tuple(
+                _OrderAdjustmentTarget(row_index, values)
+                for row_index, values in order_adjustment_rows
+            ),
+            order_adjustment_append_row_index=_append_row_index(
+                tabs[ORDER_ADJUSTMENTS_TAB]
+            ),
             commit_state=commit_state,
         )
 
@@ -261,6 +316,7 @@ class GoogleSheetsStatementWriter:
         _validate_incoming_statement_identities(plan, snapshot)
         _validate_incoming_financial_component_identities(plan, snapshot)
         _validate_incoming_summary_identities(plan, snapshot)
+        new_adjustment_rows = _new_order_adjustment_rows(plan, snapshot)
         data: list[Mapping[str, Any]] = [
             _value_range(
                 STATEMENT_DATA_TAB,
@@ -281,6 +337,15 @@ class GoogleSheetsStatementWriter:
                 plan.summary_rows,
             ),
         ]
+        if new_adjustment_rows:
+            data.append(
+                _value_range(
+                    ORDER_ADJUSTMENTS_TAB,
+                    snapshot.order_adjustment_append_row_index,
+                    0,
+                    new_adjustment_rows,
+                )
+            )
         seen_orders: set[tuple[str, str]] = set()
         for update in plan.invoice_order_updates:
             key = ("Shopee", _text(update.order_id))
@@ -499,6 +564,82 @@ def _validate_incoming_summary_identities(
             "Statement_Summary already contains planned stable identity: "
             + ", ".join("/".join(identity) for identity in collisions[:5])
         )
+
+
+def _new_order_adjustment_rows(
+    plan: StatementCommitPlan,
+    snapshot: _WriterSnapshot,
+) -> tuple[tuple[str, ...], ...]:
+    """Classify by event fingerprint and retain Statement-owned facts verbatim."""
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+    existing = {
+        _required_text(
+            target.values[positions["adjustment_event_fingerprint"]],
+            "Order_Adjustments.adjustment_event_fingerprint",
+        ): target
+        for target in snapshot.order_adjustment_rows
+    }
+    if len(existing) != len(snapshot.order_adjustment_rows):
+        raise StatementCommitBlocked("Order_Adjustments contains duplicate event fingerprints.")
+    new_rows: list[tuple[str, ...]] = []
+    seen: set[str] = set()
+    for event in plan.order_adjustments:
+        row = serialize_order_adjustment(event)
+        fingerprint = row[positions["adjustment_event_fingerprint"]]
+        prior = existing.get(fingerprint)
+        if prior is not None:
+            # A repeated event may be carried by another Statement export with
+            # different source provenance.  Fingerprint identity deliberately
+            # excludes that provenance and the earlier Statement facts remain.
+            continue
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        new_rows.append(row)
+    return tuple(new_rows)
+
+
+def _order_adjustment_target(
+    snapshot: _WriterSnapshot,
+    event: CanonicalOrderAdjustment,
+) -> _OrderAdjustmentTarget:
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+    matches = tuple(
+        target for target in snapshot.order_adjustment_rows
+        if _text(target.values[positions["adjustment_event_fingerprint"]])
+        == event.adjustment_event_fingerprint
+    )
+    if len(matches) != 1:
+        raise StatementCommitBlocked(
+            "Order_Adjustments PDF evidence target is missing or ambiguous."
+        )
+    target = matches[0]
+    expected = serialize_order_adjustment(event)
+    immutable_headers = ORDER_ADJUSTMENTS_HEADERS[:13] + ("first_observed_at",)
+    if any(
+        _text(target.values[positions[header]]) != expected[positions[header]]
+        for header in immutable_headers
+    ):
+        raise StatementCommitBlocked(
+            "Order_Adjustments PDF evidence attempted to change immutable Statement facts."
+        )
+    return target
+
+
+def _adjustment_evidence_matches(
+    snapshot: _WriterSnapshot,
+    event: CanonicalOrderAdjustment,
+) -> bool:
+    try:
+        target = _order_adjustment_target(snapshot, event)
+    except StatementCommitBlocked:
+        return False
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+    expected = serialize_order_adjustment(event)
+    return all(
+        _text(target.values[positions[header]]) == expected[positions[header]]
+        for header in ORDER_ADJUSTMENTS_HEADERS[13:20]
+    )
 
 
 def _order_update_value_range(
@@ -786,6 +927,19 @@ def _classify_write_result(
     )
     no_summary = all(after_summary[row] == 0 for row in expected_summary)
 
+    expected_adjustments = Counter(_new_order_adjustment_rows(plan, before))
+    after_adjustments = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.order_adjustment_rows
+    )
+    all_adjustments = all(
+        after_adjustments[row] == count
+        for row, count in expected_adjustments.items()
+    )
+    no_adjustments = all(
+        after_adjustments[row] == 0 for row in expected_adjustments
+    )
+
     expected_targets = _expected_target_values(plan)
     all_enrichments = True
     no_enrichments = True
@@ -800,6 +954,7 @@ def _classify_write_result(
         all_statements
         and all_components
         and all_summary
+        and all_adjustments
         and all_enrichments
         and protected_unchanged
     ):
@@ -808,6 +963,7 @@ def _classify_write_result(
         no_statements
         and no_components
         and no_summary
+        and no_adjustments
         and no_enrichments
         and protected_unchanged
     ):

@@ -44,6 +44,7 @@ class PostOrderAdjustmentEvidence:
     """
 
     adjustment_type: str
+    adjustment_reason: str
     adjustment_complete_date: str
     released_amount: Decimal
     final_amount_consistent: bool | None
@@ -303,13 +304,15 @@ def _post_order_adjustment_evidence(
     if order.get("post_order_adjustment_observed") is not True:
         return None
     adjustment_type = str(order.get("post_order_adjustment_type") or "").strip()
+    adjustment_reason = str(order.get("post_order_adjustment_reason") or "").strip()
     complete_date = str(order.get("post_order_adjustment_date") or "").strip()
     released_amount = _decimal_source_money(order.get("post_order_adjustment_amount"))
-    if not adjustment_type or not complete_date or released_amount is None:
+    if not adjustment_type or not adjustment_reason or not complete_date or released_amount is None:
         return None
     consistency = order.get("_post_order_adjustment_final_amount_consistent")
     return PostOrderAdjustmentEvidence(
         adjustment_type=adjustment_type,
+        adjustment_reason=adjustment_reason,
         adjustment_complete_date=complete_date,
         released_amount=released_amount,
         final_amount_consistent=consistency if isinstance(consistency, bool) else None,
