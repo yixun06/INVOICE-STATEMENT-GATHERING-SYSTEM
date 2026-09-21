@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
+from src.invoice_app.domain.historical_invoice import map_accepted_shopee_invoice
 from src.invoice_app.services import batch_service
 from src.invoice_app.parsers.lazada_parser import LazadaParser
 from src.invoice_app.services.all_products import build_all_product_rows
@@ -804,6 +805,75 @@ def test_zenxin_missing_fields_use_na_without_inventing_invoice_amount():
     assert accepted_products[0]["unit_price"] == "N/A"
     assert accepted_products[0]["invoice_date"] == "N/A"
     assert "remarks" not in accepted_products[0]
+
+
+def test_shopee_source_item_order_survives_batch_rules_and_persistence_mapping():
+    order = {
+        "batch_id": "batch-1",
+        "platform": "Shopee",
+        "order_id": "260729W0DGSWHK",
+        "source_pdf": "260729W0DGSWHK.pdf",
+        "status": "Accepted",
+    }
+    products = [
+        {
+            "batch_id": "batch-1", "platform": "Shopee", "order_id": order["order_id"],
+            "source_pdf": order["source_pdf"], "status": "Accepted", "seller_sku": sku,
+            "product_name": name, "variation_name": variation, "quantity": 1,
+            "unit_price": price, "line_total": price,
+        }
+        for sku, name, variation, price in [
+            ("9555208010517", "Happy Energy", "H.E Muesli 500g", "17.55"),
+            ("9555208013938", "Sea Buckthorn", "500ml", "47.62"),
+            ("", "Sunshine Detox", "", "17.55"),
+            ("9555208108641", "Biscuits", "1 box", "17.77"),
+            ("8809143642021", "Perilla Oil", "180ml", "148.00"),
+        ]
+    ]
+    products[2]["sku_missing_in_source"] = True
+    products[2]["resolved_seller_sku"] = "9555208010500"
+
+    accepted_orders, accepted_products, reviews = apply_batch_rules([order], products, [])
+    bundle = map_accepted_shopee_invoice(
+        accepted_orders[0],
+        accepted_products,
+        source_hash="source-hash",
+        enriched_items=[{"unit_price": "19.50", "nav": f"NAV-{index}"} for index in range(5)],
+    )
+
+    assert reviews == []
+    assert [product["product_name"] for product in accepted_products] == [
+        "Happy Energy", "Sea Buckthorn", "Sunshine Detox", "Biscuits", "Perilla Oil"
+    ]
+    assert [(item.item_index, item.product_name, item.variation) for item in bundle.items] == [
+        (0, "Happy Energy", "H.E Muesli 500g"),
+        (1, "Sea Buckthorn", "500ml"),
+        (2, "Sunshine Detox", None),
+        (3, "Biscuits", "1 box"),
+        (4, "Perilla Oil", "180ml"),
+    ]
+    assert bundle.items[2].seller_sku is None
+    assert bundle.items[2].resolved_seller_sku == "9555208010500"
+
+
+def test_shopee_all_sku_multi_product_source_order_is_preserved():
+    order = {
+        "batch_id": "batch-1", "platform": "Shopee", "order_id": "SHP-ORDER",
+        "source_pdf": "source.pdf", "status": "Accepted",
+    }
+    products = [
+        {
+            "batch_id": "batch-1", "platform": "Shopee", "order_id": "SHP-ORDER",
+            "source_pdf": "source.pdf", "status": "Accepted", "seller_sku": sku,
+            "product_name": name, "quantity": 1, "unit_price": "10.00", "line_total": "10.00",
+        }
+        for sku, name in [("SKU-SEA", "Sea Buckthorn"), ("SKU-HAPPY", "Happy Energy")]
+    ]
+
+    _, accepted_products, reviews = apply_batch_rules([order], products, [])
+
+    assert reviews == []
+    assert [product["seller_sku"] for product in accepted_products] == ["SKU-SEA", "SKU-HAPPY"]
 
 
 def test_apply_batch_rules_handles_duplicate_order_ids_and_sku_grouping():

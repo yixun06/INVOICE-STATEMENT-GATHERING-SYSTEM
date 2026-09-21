@@ -138,11 +138,13 @@ def test_mixed_sku_rows_preserve_a_deterministic_source_missing_sku_item():
             _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
             _word("Anchored One", 140, 250, 70), _word("10.00", 340, 370, 70),
             _word("1", 405, 410, 70), _word("10.00", 455, 485, 70),
+            _word("Variation:", 140, 195, 75), _word("Original", 198, 245, 75),
             _word("SKU:", 140, 162, 80), _word("SKU-ONE", 165, 215, 80),
             _word("Source Missing SKU", 140, 265, 95), _word("17.55", 340, 370, 95),
             _word("1", 405, 410, 95), _word("17.55", 455, 485, 95),
             _word("Anchored Two", 140, 250, 110), _word("20.00", 340, 370, 110),
             _word("1", 405, 410, 110), _word("20.00", 455, 485, 110),
+            _word("Variation:", 140, 195, 115), _word("1 box", 198, 245, 115),
             _word("SKU:", 140, 162, 120), _word("SKU-TWO", 165, 215, 120),
             _word("Merchandise", 110, 190, 145), _word("Subtotal", 195, 245, 145),
         ),
@@ -156,3 +158,4 @@ def test_mixed_sku_rows_preserve_a_deterministic_source_missing_sku_item():
         ("SKU-TWO", "Anchored Two", 1, Decimal("20.00")),
     ]
     assert items[1]["sku_missing_in_source"] is True
+    assert [item["variation"] for item in items] == ["Original", "", "1 box"]

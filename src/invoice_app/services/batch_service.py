@@ -743,7 +743,11 @@ def apply_batch_rules(
 
     accepted_products = sorted(
         [*merged_products.values(), *accepted_shopee_products],
-        key=lambda row: (str(row.get("platform", "")), str(row.get("order_id", "")), str(row.get("product_name", ""))),
+        key=lambda row: (
+            str(row.get("platform", "")),
+            str(row.get("order_id", "")),
+            "" if str(row.get("platform", "")) == "Shopee" else str(row.get("product_name", "")),
+        ),
     )
     accepted_orders = sorted(
         accepted_orders,

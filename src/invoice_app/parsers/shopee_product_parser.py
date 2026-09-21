@@ -204,7 +204,6 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
                 candidate = by_metric_top.get(item.get("metric_top"))
                 if candidate is not None and candidate.get("product_name"):
                     item["product_name"] = candidate["product_name"]
-                    item["variation"] = candidate.get("variation", "")
             section_items.extend(
                 item
                 for item in metric_items
@@ -542,7 +541,11 @@ def _parse_positioned_items_without_sku(
             if not candidate or _is_product_noise(candidate):
                 continue
             if candidate.lower().startswith("variation:"):
-                variation = candidate
+                # A metric segment starts immediately after the prior metric.
+                # Therefore a Variation before this segment's first product-name
+                # text belongs to the preceding row, not the current candidate.
+                if name_parts:
+                    variation = candidate
             elif not re.search(r"(?:Any\s+)?\d+\s+at\s+RM", candidate, flags=re.IGNORECASE):
                 candidate = _consume_source_return_refund_marker(
                     candidate,
