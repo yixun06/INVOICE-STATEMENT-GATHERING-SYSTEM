@@ -25,6 +25,7 @@ from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_import import (
     check_statement_review_currency,
     commit_statement_review,
+    refresh_statement_review,
     review_statement_upload,
 )
 from src.invoice_app.services.import_result_adapters import (
@@ -37,6 +38,7 @@ from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEAD
 from src.invoice_app.services.shopee_weekly_statement_service import (
     stage_parsed_shopee_weekly_statement,
 )
+from src.invoice_app.ui import data_import
 
 
 NOW = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
@@ -361,6 +363,46 @@ def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):
     assert any("no persisted Invoice order coverage" in reason for reason in review.blockers)
 
 
+def test_refresh_replaces_old_missing_invoice_blocker_after_invoice_is_persisted(
+    monkeypatch,
+):
+    review, repository, writer = _review(monkeypatch, order=None, items=())
+    assert any(
+        "no persisted Invoice order coverage" in reason
+        for reason in review.blockers
+    )
+
+    writer.order = _order(refund=None)
+    writer.items = (_item("Other Product", seller_sku="OTHER-SKU"),)
+
+    refreshed = refresh_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+        now=lambda: NOW,
+    )
+
+    assert not any(
+        "no persisted Invoice order coverage" in reason
+        for reason in refreshed.blockers
+    )
+    assert any("product identity is unresolved" in reason for reason in refreshed.blockers)
+
+
+def test_existing_invoice_order_without_items_is_not_full_invoice_missing(monkeypatch):
+    review, _, _ = _review(monkeypatch, order=_order(refund=None), items=())
+
+    assert not any(
+        "no persisted Invoice order coverage" in reason
+        for reason in review.blockers
+    )
+    assert any(
+        "Invoice order exists but has no Invoice_Items coverage" in reason
+        for reason in review.blockers
+    )
+
+
 def test_unresolved_sku_needs_review_and_blocks_the_whole_statement(monkeypatch):
     review, _, _ = _review(
         monkeypatch,
@@ -370,6 +412,10 @@ def test_unresolved_sku_needs_review_and_blocks_the_whole_statement(monkeypatch)
     assert review.ready is False
     assert review.plan is None
     assert review.sku_matches.matches[0].status.value == "NEEDS_REVIEW"
+    assert not any(
+        "no persisted Invoice order coverage" in reason
+        for reason in review.blockers
+    )
 
 
 def test_commit_uses_guarded_boundary_and_stale_order_state_produces_zero_write(monkeypatch):
@@ -1011,6 +1057,7 @@ def test_statement_back_is_navigation_only_and_forward_restores_staging(
         monkeypatch,
         items=(_item("Other Product", seller_sku="OTHER-SKU"),),
     )
+    monkeypatch.setattr(data_import, "_refresh_statement_review", lambda _review: True)
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     invoice_orders = [{"order_id": "COMMITTED-INVOICE", "status": "Accepted"}]

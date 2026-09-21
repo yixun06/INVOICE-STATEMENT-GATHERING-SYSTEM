@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.exception_presentation import (
@@ -56,6 +58,7 @@ def _result(
     issues: tuple[ValidationIssue, ...],
     *,
     known_orders: tuple[str, ...] = (),
+    source_specific_details: dict | None = None,
 ) -> ImportResult:
     return ImportResult(
         source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
@@ -81,6 +84,7 @@ def _result(
             applied_to_current_session=True,
             label="Applied to Current Session",
         ),
+        source_specific_details=source_specific_details or {},
     )
 
 
@@ -189,6 +193,7 @@ class _FakeStreamlit:
         self.errors: list[str] = []
         self.successes: list[str] = []
         self.frames: list[list[dict[str, object]]] = []
+        self.expanders: list[str] = []
 
     def error(self, message, **_kwargs):
         self.errors.append(message)
@@ -213,7 +218,8 @@ class _FakeStreamlit:
         self.frames.append(rows)
         return None
 
-    def expander(self, *_args, **_kwargs):
+    def expander(self, label, **_kwargs):
+        self.expanders.append(label)
         return _Context()
 
     def container(self, **_kwargs):
@@ -246,13 +252,110 @@ def test_needs_attention_renderer_is_one_compact_queue(monkeypatch):
     data_import._render_needs_attention_queue(
         queue,
         key_prefix="statement_exception_queue",
+        humanize_statement=True,
     )
 
     assert fake.errors == []
     assert fake.buttons == ["Remove staged source"]
     affected_rows = next(frame for frame in fake.frames if "Order ID" in frame[0])
     assert len(affected_rows) == 1
-    assert affected_rows[0]["Issues"] == 2
+    assert "Issues" not in affected_rows[0]
+    assert "Available action" not in affected_rows[0]
+    assert affected_rows[0]["Problem"] == (
+        "This Statement item needs review before the batch can continue."
+    )
+    assert affected_rows[0]["What differs"] == (
+        "The current result does not provide a structured source comparison for "
+        "this item. Open the technical details to inspect the original evidence."
+    )
+    assert affected_rows[0]["Next step"] == (
+        "Inspect the original evidence and use only the safe recovery action shown there."
+    )
+    assert affected_rows[0]["Resolve in"] == "Statement review"
+    assert affected_rows[0]["Action"] == "View evidence"
+    assert "Batch option — does not fix this order" in fake.expanders
+
+
+def test_statement_queue_uses_structured_v2_evidence_for_product_identity():
+    unresolved = SimpleNamespace(
+        identity_scope=SimpleNamespace(value="UNRESOLVED"),
+        product_id="PRODUCT-1",
+        statement_members=(
+            SimpleNamespace(source_row_number=42, sequence_no="SKU-1"),
+        ),
+        diagnostic="Strong family identity conflicts with Product Name evidence.",
+    )
+    order_result = SimpleNamespace(
+        summary=SimpleNamespace(
+            identity_scope=SimpleNamespace(value="UNRESOLVED"),
+            merchandise_reconciled=True,
+            settlement_basis=SimpleNamespace(value="EXACT"),
+            reasons=(),
+        ),
+        evidence=SimpleNamespace(
+            order_id="ORDER-1",
+            # Missing refund evidence must not be treated as missing Invoice
+            # coverage when the actual blocker is product identity.
+            refund=SimpleNamespace(invoice_source_exists=False),
+            identities=(unresolved,),
+        ),
+    )
+    result = _result(
+        (_issue("ORDER-1: product identity is unresolved."),),
+        known_orders=("ORDER-1",),
+        source_specific_details={
+            "reconciliation_v2": SimpleNamespace(
+                orders=(order_result,),
+                product_family_snapshot=SimpleNamespace(
+                    candidates=(
+                        SimpleNamespace(
+                            product_id="PRODUCT-1",
+                            product_name="Cranberry 100g",
+                            seller_sku="CRAN-100",
+                            parent_sku="CRANBERRY",
+                        ),
+                    )
+                ),
+            ),
+            "statement": SimpleNamespace(
+                sku_rows=(
+                    SimpleNamespace(
+                        source_row_number=42,
+                        sequence_no="SKU-1",
+                        product_id="PRODUCT-1",
+                        product_name="Cranberry 100 g",
+                    ),
+                )
+            ),
+            "invoice_items": (
+                SimpleNamespace(
+                    order_id="ORDER-1",
+                    item_index=0,
+                    product_name="Cranberry 100g",
+                    seller_sku="CRAN-100",
+                    resolved_seller_sku=None,
+                ),
+            ),
+        },
+    )
+
+    queue = build_exception_work_queue(result)
+
+    guidance = queue.items[0].statement_guidance
+    assert guidance is not None
+    assert guidance.category == "Product identity cannot be proven"
+    assert guidance.fact_summary == (
+        "Statement product name: Cranberry 100 g; Invoice product name: "
+        "Cranberry 100g. Strong family identity conflicts with Product Name evidence."
+    )
+    assert guidance.resolution_area == "Statement review"
+    assert guidance.evidence_rows[0] == {
+        "Source": "Statement",
+        "Field": "Product name",
+        "Value": "Cranberry 100 g",
+        "Reference": "SKU row 42",
+    }
+    assert any(row["Source"] == "Product Master" for row in guidance.evidence_rows)
 
 
 def test_view_details_action_selects_the_clicked_order(monkeypatch):
@@ -279,6 +382,63 @@ def test_ready_statement_keeps_existing_success_path(monkeypatch):
     assert fake.errors == []
     assert fake.buttons == []
     assert fake.successes == []
+
+
+def test_statement_refresh_loads_fresh_product_master_and_replaces_session_review(
+    monkeypatch,
+):
+    fake = _FakeStreamlit()
+    old_review = SimpleNamespace(stage="old stage")
+    refreshed = SimpleNamespace(stage="fresh stage")
+    fake.session_state.update(
+        {
+            "weekly_statement_review": old_review,
+            "weekly_statement_stage": old_review.stage,
+            "weekly_statement_review_stale_reason": "Refresh required.",
+            "statement_exception_queue_selected": "order:OLD",
+        }
+    )
+    events: list[str] = []
+    settings = SimpleNamespace(
+        create_repository=lambda: "fresh repository",
+        create_statement_writer=lambda: "fresh writer",
+    )
+
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(
+        data_import,
+        "configured_uat2_data_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        data_import,
+        "clear_product_master_source_cache",
+        lambda: events.append("cache cleared"),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda: ("fresh master", "Google Sheets"),
+    )
+
+    def refresh(review, **kwargs):
+        assert review is old_review
+        assert kwargs == {
+            "repository": "fresh repository",
+            "writer": "fresh writer",
+            "product_master": "fresh master",
+        }
+        events.append("review rebuilt")
+        return refreshed
+
+    monkeypatch.setattr(data_import, "refresh_statement_review", refresh)
+
+    assert data_import._refresh_statement_review(old_review) is True
+    assert events == ["cache cleared", "review rebuilt"]
+    assert fake.session_state["weekly_statement_review"] is refreshed
+    assert fake.session_state["weekly_statement_stage"] == "fresh stage"
+    assert "weekly_statement_review_stale_reason" not in fake.session_state
+    assert "statement_exception_queue_selected" not in fake.session_state
 
 
 def _many_mismatch_statement_app() -> None:
@@ -403,11 +563,13 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
     affected = next(
         frame.value
         for frame in app.dataframe
-        if "Issues" in frame.value.columns
+        if "Problem" in frame.value.columns
     )
     assert len(affected) == 1
-    assert affected.iloc[0]["Scope"] == "Statement"
-    assert affected.iloc[0]["Issues"] == 1
+    assert affected.iloc[0]["Order ID"] == "—"
+    assert affected.iloc[0]["Problem"] == (
+        "This Statement item needs review before the batch can continue."
+    )
     assert sum(
         item.value.startswith("- ORDER-") for item in app.markdown
     ) == 748
@@ -600,10 +762,12 @@ def test_blocker_and_notes_render_in_separate_sections():
     assert app.exception == []
     assert any("Needs Attention" in item.value for item in app.error)
     assert "Needs Attention" in {item.value for item in app.subheader}
-    actionable = next(frame.value for frame in app.dataframe if "Issues" in frame.value.columns)
+    actionable = next(frame.value for frame in app.dataframe if "Problem" in frame.value.columns)
     assert len(actionable) == 1
     assert actionable.iloc[0]["Order ID"] == "ORDER-BLOCKED"
-    assert actionable.iloc[0]["Issues"] == 1
+    assert actionable.iloc[0]["Problem"] == (
+        "This Statement item needs review before the batch can continue."
+    )
     assert "Reconciliation notes" in {item.label for item in app.expander}
     assert any(
         "Statement quantity is not provided by the source" in item.value

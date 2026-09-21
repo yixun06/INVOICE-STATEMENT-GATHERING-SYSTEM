@@ -91,6 +91,9 @@ class StatementImportReview:
     limitations: tuple[str, ...]
     persistence_blockers: tuple[str, ...]
     source_bytes: bytes | None = None
+    # Read-only review evidence for the Data Import presentation. This is not
+    # persistence input and never authorizes a source correction or match.
+    invoice_items: tuple[CanonicalInvoiceItem, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -249,6 +252,7 @@ def commit_statement_review(
         blockers = _v2_blockers(
             current_reconciliation,
             {order.order_id for order in current_orders},
+            {item.order_id for item in current_items},
         )
         if blockers:
             return StatementCommitAttempt(False, blockers)
@@ -374,6 +378,7 @@ def _build_review(
         _v2_blockers(
             reconciliation_v2,
             {order.order_id for order in invoice_orders},
+            {item.order_id for item in invoice_items},
         )
     )
     limitations = _v2_limitations(reconciliation_v2)
@@ -417,6 +422,7 @@ def _build_review(
         limitations=limitations,
         persistence_blockers=tuple(dict.fromkeys(persistence_blockers)),
         source_bytes=source_bytes,
+        invoice_items=invoice_items,
     )
 
 
@@ -458,6 +464,7 @@ def _statement_orders(
 def _v2_blockers(
     batch: StatementReconciliationBatch,
     covered_order_ids: set[str],
+    item_covered_order_ids: set[str],
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     if not batch.coverage.valid:
@@ -470,6 +477,11 @@ def _v2_blockers(
         if order_id not in covered_order_ids:
             blockers.append(
                 f"{order_id}: no persisted Invoice order coverage is available."
+            )
+        elif order_id not in item_covered_order_ids:
+            blockers.append(
+                f"{order_id}: persisted Invoice order exists but has no "
+                "Invoice_Items coverage."
             )
         if summary.identity_scope is IdentityScope.UNRESOLVED:
             blockers.append(

@@ -67,6 +67,7 @@ from ..services.data_import_state import (
     clear_statement_upload_attempt,
     invoice_upload_downstream_eligibility,
     mark_statement_review_stale_after_invoice_commit,
+    replace_statement_review_after_refresh,
     reset_invoice_upload_attempt,
     statement_stage_review_consistency,
 )
@@ -154,6 +155,7 @@ _WORKFLOW_KEYS = (
     "invoice_exception_queue_selected",
     "statement_exception_queue_click",
     "statement_exception_queue_selected",
+    "statement_exception_queue_filter",
     "historical_exception_queue_click",
     "historical_exception_queue_selected",
     "historical_commit_exception_queue_click",
@@ -455,16 +457,25 @@ def _render_validation_step(
             else:
                 _render_invoice_upload_back_actions(back_step=2)
             return
+    if _has_pending_recovery():
+        _render_recovery_confirmation()
+    if (
+        st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT
+        and _render_stale_statement_refresh("statement_validation_stale_refresh")
+    ):
+        return
     result = _current_import_result()
     is_platform_orders = bool(
         result.source_specific_details.get("show_platform_order_outcomes")
     )
     _render_validation_status(result)
-    if _has_pending_recovery():
-        _render_recovery_confirmation()
 
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
         _render_statement_next_step("Continue to reconcile", 4, back_step=2)
+        _render_statement_refresh_action(
+            _weekly_review(),
+            key="statement_validation_refresh",
+        )
     else:
         _render_next_step(
             "Continue to reconcile",
@@ -562,6 +573,7 @@ def _render_contract_validation(result: ImportResult) -> None:
             if result.source_type == SHOPEE_WEEKLY_STATEMENT
             else "invoice_exception_queue"
         ),
+        humanize_statement=result.source_type == SHOPEE_WEEKLY_STATEMENT,
     )
 
 
@@ -571,11 +583,13 @@ def _render_actionable_blockers_and_notes(
     *,
     key_prefix: str,
     allow_recovery: bool = True,
+    humanize_statement: bool = False,
 ) -> None:
     _render_needs_attention_queue(
         blockers,
         key_prefix=key_prefix,
         allow_recovery=allow_recovery,
+        humanize_statement=humanize_statement,
     )
     _render_exception_reconciliation_notes(notes)
 
@@ -630,38 +644,61 @@ def _render_needs_attention_queue(
     heading: str = "Needs Attention",
     show_count: bool = True,
     auto_select_single: bool = True,
+    humanize_statement: bool = False,
 ) -> None:
     """Render one compact entry point while retaining every original issue."""
 
     if not queue.items:
         return
+    displayed_items = (
+        _filter_statement_review_items(queue.items, key_prefix=key_prefix)
+        if humanize_statement
+        else queue.items
+    )
+    if not displayed_items:
+        st.info(
+            "No items match the selected problem type.",
+            icon=":material/filter_alt_off:",
+        )
+        return
     st.subheader(heading)
     if show_count:
-        st.caption(
-            f"{queue.source_issue_count} issue"
-            f"{'s' if queue.source_issue_count != 1 else ''} across "
-            f"{len(queue.items)} work item{'s' if len(queue.items) != 1 else ''}. "
-            "Select an item to inspect its original evidence and available action."
-        )
-    item_keys = tuple(item.key for item in queue.items)
+        if humanize_statement:
+            st.caption(
+                f"{len(displayed_items)} order"
+                f"{'s' if len(displayed_items) != 1 else ''} shown. Each row states "
+                "the source facts, the safe next step, and where to resolve it."
+            )
+        else:
+            st.caption(
+                f"{queue.source_issue_count} issue"
+                f"{'s' if queue.source_issue_count != 1 else ''} across "
+                f"{len(queue.items)} work item{'s' if len(queue.items) != 1 else ''}. "
+                "Select an item to inspect its original evidence and available action."
+            )
+    item_keys = tuple(item.key for item in displayed_items)
     click_key = f"{key_prefix}_click"
     st.dataframe(
         [
-            {
-                "Status": "Blocking" if item.blocking else "Review",
-                "Scope": item.scope,
-                "Order ID": item.order_id or "—",
-                "Source": item.source or "—",
-                "Platform": item.platform or "—",
-                "Issues": item.issue_count,
-                "Summary": item.summary,
-                "Available action": item.action_hint,
-                "Action": "View details",
-            }
-            for item in queue.items
+            (
+                _statement_review_queue_row(item)
+                if humanize_statement
+                else {
+                    "Status": "Blocking" if item.blocking else "Review",
+                    "Scope": item.scope,
+                    "Order ID": item.order_id or "—",
+                    "Source": item.source or "—",
+                    "Platform": item.platform or "—",
+                    "Issues": item.issue_count,
+                    "Summary": item.summary,
+                    "Available action": item.action_hint,
+                    "Action": "View details",
+                }
+            )
+            for item in displayed_items
         ],
         hide_index=True,
-        height=min(420, 36 * (len(queue.items) + 1)),
+        height=min(420, 36 * (len(displayed_items) + 1)),
         column_config={
             "Order ID": st.column_config.TextColumn("Order ID", pinned=True),
             "Issues": st.column_config.NumberColumn("Issues", format="%d"),
@@ -675,15 +712,95 @@ def _render_needs_attention_queue(
         },
     )
     selected_key = st.session_state.get(f"{key_prefix}_selected")
-    selected = next((item for item in queue.items if item.key == selected_key), None)
-    if selected is None and auto_select_single and len(queue.items) == 1:
-        selected = queue.items[0]
+    selected = next(
+        (item for item in displayed_items if item.key == selected_key),
+        None,
+    )
+    if selected is None and auto_select_single and len(displayed_items) == 1:
+        selected = displayed_items[0]
     if selected is not None:
         _render_exception_queue_detail(
             selected,
             key_prefix=key_prefix,
             allow_recovery=allow_recovery,
+            statement_context=humanize_statement,
         )
+
+
+def _filter_statement_review_items(
+    items: tuple[ExceptionPresentationItem, ...],
+    *,
+    key_prefix: str,
+) -> tuple[ExceptionPresentationItem, ...]:
+    """Keep the Statement queue focused without hiding any underlying issue."""
+
+    categories = tuple(
+        dict.fromkeys(
+            item.statement_guidance.category
+            if item.statement_guidance is not None
+            else "Statement needs review"
+            for item in items
+        )
+    )
+    counts = {
+        category: sum(
+            (
+                item.statement_guidance.category
+                if item.statement_guidance is not None
+                else "Statement needs review"
+            )
+            == category
+            for item in items
+        )
+        for category in categories
+    }
+    options = ("All problems", *categories)
+    filter_key = f"{key_prefix}_filter"
+    if st.session_state.get(filter_key) not in options:
+        st.session_state.pop(filter_key, None)
+    pills = getattr(st, "pills", None)
+    selected = (
+        pills(
+            "Filter by problem",
+            options,
+            default="All problems",
+            key=filter_key,
+            format_func=lambda option: (
+                option
+                if option == "All problems"
+                else f"{option} ({counts[option]})"
+            ),
+            width="stretch",
+        )
+        if pills is not None
+        else "All problems"
+    )
+    if not selected or selected == "All problems":
+        return items
+    return tuple(
+        item
+        for item in items
+        if (
+            item.statement_guidance.category
+            if item.statement_guidance is not None
+            else "Statement needs review"
+        )
+        == selected
+    )
+
+
+def _statement_review_queue_row(item: ExceptionPresentationItem) -> dict[str, Any]:
+    guidance = item.statement_guidance
+    if guidance is None:
+        raise ValueError("Statement review item is missing presentation guidance.")
+    return {
+        "Order ID": item.order_id or "—",
+        "Problem": guidance.problem,
+        "What differs": guidance.fact_summary,
+        "Next step": guidance.next_step,
+        "Resolve in": guidance.resolution_area,
+        "Action": "View evidence",
+    }
 
 
 def _render_missing_invoice_status(result: ImportResult) -> bool:
@@ -737,6 +854,7 @@ def _render_missing_invoice_exception_details(
             ),
             key_prefix=f"{key_prefix}_other",
             auto_select_single=False,
+            humanize_statement=True,
         )
 
     with st.expander("Missing Invoice details", expanded=False):
@@ -783,22 +901,44 @@ def _render_exception_queue_detail(
     *,
     key_prefix: str,
     allow_recovery: bool,
+    statement_context: bool = False,
 ) -> None:
     with st.container(border=True):
-        st.write(f"**{item.title}**")
-        context = [item.scope]
-        if item.source:
-            context.append(f"Source: {item.source}")
-        if item.platform:
-            context.append(f"Platform: {item.platform}")
-        st.caption(" · ".join(context))
-        for issue in item.issues:
-            st.markdown(f"- {issue.reason}")
-        with st.expander("Original issue evidence", expanded=False):
-            for index, issue in enumerate(item.issues, start=1):
-                st.caption(f"Issue {index}: {issue.reason}")
-                if issue.evidence:
-                    st.write(dict(issue.evidence))
+        if statement_context and item.statement_guidance is not None:
+            guidance = item.statement_guidance
+            st.write(f"**Order {item.order_id or item.title}**")
+            st.write(f"**{guidance.problem}**")
+            st.caption(f"Resolve in: {guidance.resolution_area}")
+            st.write(guidance.fact_summary)
+            st.write("**Next step**")
+            st.write(guidance.next_step)
+            if guidance.evidence_rows:
+                st.write("**What the system compared**")
+                st.dataframe(guidance.evidence_rows, hide_index=True)
+            if guidance.additional_problems:
+                st.caption(
+                    "Also needs review: " + "; ".join(guidance.additional_problems)
+                )
+            with st.expander("Technical details (for audit)", expanded=False):
+                for issue in item.issues:
+                    st.markdown(f"- {issue.reason}")
+                    if issue.evidence:
+                        st.write(dict(issue.evidence))
+        else:
+            st.write(f"**{item.title}**")
+            context = [item.scope]
+            if item.source:
+                context.append(f"Source: {item.source}")
+            if item.platform:
+                context.append(f"Platform: {item.platform}")
+            st.caption(" · ".join(context))
+            for issue in item.issues:
+                st.markdown(f"- {issue.reason}")
+            with st.expander("Original issue evidence", expanded=False):
+                for index, issue in enumerate(item.issues, start=1):
+                    st.caption(f"Issue {index}: {issue.reason}")
+                    if issue.evidence:
+                        st.write(dict(issue.evidence))
         categories = {issue.category for issue in item.issues}
         if "manual_review" in categories:
             st.caption("Use the existing Manual Review form below to resolve this item.")
@@ -807,18 +947,41 @@ def _render_exception_queue_detail(
         if categories == {"duplicate"}:
             _render_duplicate_queue_actions(item, key_prefix=key_prefix)
         else:
-            _render_queue_recovery_actions(item, key_prefix=key_prefix)
+            _render_queue_recovery_actions(
+                item,
+                key_prefix=key_prefix,
+                statement_context=statement_context,
+            )
 
 
 def _render_queue_recovery_actions(
     item: ExceptionPresentationItem,
     *,
     key_prefix: str,
+    statement_context: bool = False,
 ) -> None:
     actions = tuple(action for action in item.recovery_actions if action.destructive)
     if not actions:
         return
+    if statement_context:
+        with st.expander("Batch option — does not fix this order", expanded=False):
+            st.caption(
+                "Removing the staged source only discards this current Statement "
+                "batch. It does not repair the Invoice, product identity, Product "
+                "Master, or settlement evidence."
+            )
+            _render_destructive_recovery_buttons(actions, key_prefix=key_prefix, item=item)
+        return
     st.caption("Source recovery")
+    _render_destructive_recovery_buttons(actions, key_prefix=key_prefix, item=item)
+
+
+def _render_destructive_recovery_buttons(
+    actions: tuple[RecoveryAction, ...],
+    *,
+    key_prefix: str,
+    item: ExceptionPresentationItem,
+) -> None:
     with st.container(horizontal=True):
         for action in actions:
             if st.button(
@@ -1630,6 +1793,8 @@ def _render_reconciliation_step() -> None:
             key_prefix="reconcile_historical",
         )
         return
+    if _render_stale_statement_refresh("statement_reconciliation_stale_refresh"):
+        return
     result = _current_import_result()
     reconciliation = result.reconciliation
     if not reconciliation.available:
@@ -1662,6 +1827,10 @@ def _render_reconciliation_step() -> None:
         "Continue to review & commit",
         5,
         back_step=3,
+    )
+    _render_statement_refresh_action(
+        _weekly_review(),
+        key="statement_reconciliation_refresh",
     )
     if not allowed:
         _render_contract_validation(result)
@@ -2266,6 +2435,7 @@ def _render_statement_commit(ready: bool) -> None:
 def _refresh_statement_review(review: StatementImportReview) -> bool:
     try:
         settings = configured_uat2_data_settings()
+        clear_product_master_source_cache()
         master, _label = load_configured_product_price_master()
         refreshed = refresh_statement_review(
             review,
@@ -2276,9 +2446,44 @@ def _refresh_statement_review(review: StatementImportReview) -> bool:
     except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
         st.error(f"Statement validation refresh failed: {error}")
         return False
-    st.session_state.weekly_statement_review = refreshed
-    st.session_state.weekly_statement_stage = refreshed.stage
-    st.session_state.pop("weekly_statement_review_stale_reason", None)
+    replace_statement_review_after_refresh(st.session_state, refreshed)
+    return True
+
+
+def _render_statement_refresh_action(
+    review: StatementImportReview | None,
+    *,
+    key: str,
+) -> None:
+    """Expose the authoritative refresh even while blockers prevent navigation."""
+
+    if review is None:
+        return
+    if st.button(
+        "Refresh validation",
+        icon=":material/refresh:",
+        key=key,
+    ) and _refresh_statement_review(review):
+        st.rerun()
+
+
+def _render_stale_statement_refresh(key: str) -> bool:
+    """Hide stale blocker facts until the user rebuilds the live review."""
+
+    if not _statement_review_stale():
+        return False
+    reason = str(st.session_state.get("weekly_statement_review_stale_reason"))
+    render_authoritative_status(
+        title="Refresh required",
+        message=reason,
+        state="blocked",
+    )
+    st.caption(
+        "The previous blocker list is hidden because it no longer represents "
+        "the current Invoice and Product Master evidence."
+    )
+    _render_statement_refresh_action(_weekly_review(), key=key)
+    _render_statement_exit_button(key=f"{key}_exit")
     return True
 
 
@@ -2343,6 +2548,9 @@ def _render_statement_resume_actions(*, back_step: int) -> None:
         _set_step(back_step)
         st.rerun()
     if continue_clicked:
+        review = _weekly_review()
+        if review is None or not _refresh_statement_review(review):
+            return
         _set_step(3)
         st.rerun()
 

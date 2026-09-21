@@ -149,6 +149,25 @@ def mark_statement_review_stale_after_invoice_commit(
     return True
 
 
+def replace_statement_review_after_refresh(
+    state: MutableMapping[str, Any],
+    refreshed_review: Any,
+) -> None:
+    """Atomically replace stale Statement review and presentation-only state."""
+
+    state["weekly_statement_review"] = refreshed_review
+    state["weekly_statement_stage"] = refreshed_review.stage
+    state.pop("weekly_statement_review_stale_reason", None)
+    for key in (
+        "statement_exception_queue_click",
+        "statement_exception_queue_selected",
+        "statement_exception_queue_filter",
+        "statement_commit_exception_queue_click",
+        "statement_commit_exception_queue_selected",
+    ):
+        state.pop(key, None)
+
+
 def has_unfinished_session_work(state: MutableMapping[str, Any]) -> bool:
     """Derive whether Logout would discard meaningful session-only work."""
 

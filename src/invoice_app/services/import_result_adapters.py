@@ -476,6 +476,7 @@ def _adapt_v2_statement_review(
         "statement": statement,
         "review": review,
         "reconciliation_v2": batch,
+        "invoice_items": review.invoice_items,
         "legacy_sku_matches": review.sku_matches,
         "adjustment_reconciliations": tuple(stage.adjustment_reconciliations),
         "shipping_fee_discrepancies": (

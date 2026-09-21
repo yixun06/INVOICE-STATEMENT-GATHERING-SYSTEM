@@ -19,6 +19,7 @@ from src.invoice_app.services.data_import_state import (
     has_unfinished_session_work,
     invoice_upload_downstream_eligibility,
     mark_statement_review_stale_after_invoice_commit,
+    replace_statement_review_after_refresh,
     reset_invoice_upload_attempt,
     statement_stage_review_consistency,
 )
@@ -475,6 +476,34 @@ def test_invoice_commit_does_not_create_a_statement_review_stale_marker_without_
 
     assert changed is False
     assert "weekly_statement_review_stale_reason" not in state
+
+
+def test_statement_refresh_replaces_review_and_drops_stale_queue_state():
+    refreshed = SimpleNamespace(stage=object())
+    state = {
+        "weekly_statement_review": "old review",
+        "weekly_statement_stage": "old stage",
+        "weekly_statement_review_stale_reason": "Refresh required.",
+        "statement_exception_queue_click": {"row": 2},
+        "statement_exception_queue_selected": "order:OLD",
+        "statement_exception_queue_filter": "Missing Invoice",
+        "statement_commit_exception_queue_click": {"row": 1},
+        "statement_commit_exception_queue_selected": "order:OLD",
+    }
+
+    replace_statement_review_after_refresh(state, refreshed)
+
+    assert state["weekly_statement_review"] is refreshed
+    assert state["weekly_statement_stage"] is refreshed.stage
+    for key in (
+        "weekly_statement_review_stale_reason",
+        "statement_exception_queue_click",
+        "statement_exception_queue_selected",
+        "statement_exception_queue_filter",
+        "statement_commit_exception_queue_click",
+        "statement_commit_exception_queue_selected",
+    ):
+        assert key not in state
 
 
 def test_invoice_exit_clears_stale_activity_with_uncommitted_staging():
