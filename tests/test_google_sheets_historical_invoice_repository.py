@@ -357,10 +357,65 @@ def test_bulk_chunk_failure_stops_later_chunks_and_invalidates_cached_snapshot()
 
     assert len(caught.value.confirmed_results) == 50
     assert len(caught.value.pending_identities) == 70
+    assert caught.value.chunk_size == 50
+    assert caught.value.completed_chunk_count == 1
+    assert caught.value.failed_chunk_index == 2
+    assert caught.value.failed_chunk_size == 50
+    assert caught.value.total_chunks == 3
+    assert caught.value.underlying_error_type == "HistoricalInvoiceStorageError"
+    assert caught.value.underlying_error_message == "synthetic chunk failure"
     assert gateway.append_calls == 2
     reads_before = gateway.read_calls
     repository.list_orders()
     assert gateway.read_calls == reads_before + 1
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "successful_chunks", "confirmed", "pending", "failed_size"),
+    (
+        (532, 5, 250, 282, 50),
+        (532, 0, 0, 532, 50),
+        (120, 2, 100, 20, 20),
+    ),
+)
+def test_bulk_failure_metadata_covers_middle_first_and_final_partial_chunks(
+    candidate_count, successful_chunks, confirmed, pending, failed_size
+):
+    class FailingGateway(FakeGateway):
+        def append_bundles(self, *args):
+            if self.append_calls == successful_chunks:
+                self.append_calls += 1
+                raise RuntimeError(
+                    'synthetic failure access_token=do-not-expose '
+                    'Authorization: Bearer bearer-secret '
+                    '"client_secret": "json-secret" ?api_key=query-secret'
+                )
+            return super().append_bundles(*args)
+
+    gateway = FailingGateway()
+    repository = _repository(gateway)
+    bundles = tuple(
+        _bundle(order_id=f"PARTIAL-{index:04}")
+        for index in range(candidate_count)
+    )
+
+    with pytest.raises(HistoricalInvoiceBulkImportError) as caught:
+        repository.import_invoices(bundles)
+
+    error = caught.value
+    assert error.confirmed_count == confirmed
+    assert error.pending_count == pending
+    assert error.chunk_size == 50
+    assert error.completed_chunk_count == successful_chunks
+    assert error.failed_chunk_index == successful_chunks + 1
+    assert error.failed_chunk_size == failed_size
+    assert error.total_chunks == (candidate_count + 49) // 50
+    assert error.underlying_error_type == "RuntimeError"
+    assert "do-not-expose" not in error.underlying_error_message
+    assert "bearer-secret" not in error.underlying_error_message
+    assert "json-secret" not in error.underlying_error_message
+    assert "query-secret" not in error.underlying_error_message
+    assert "[REDACTED]" in error.underlying_error_message
 
 
 def test_successful_write_invalidates_cache_and_refresh_observes_external_rows():

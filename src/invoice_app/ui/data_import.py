@@ -40,6 +40,7 @@ from ..services.validation_recovery import (
     REMOVE_STAGED_SOURCE,
     execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
+    plan_already_imported_source_removal,
     plan_current_invoice_staging_exit,
     plan_duplicate_source_removal,
     recovery_actions_for_source,
@@ -145,6 +146,7 @@ _WORKFLOW_KEYS = (
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
     "historical_validation_blocker",
+    "historical_partial_import_failure",
     "product_master_revalidation_notice",
     "product_master_revalidation_error",
     "manual_review_correction_drafts",
@@ -1193,6 +1195,8 @@ def _render_recovery_confirmation() -> None:
         _render_staged_statement_removal_confirmation()
     elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "duplicate_sources":
         _render_duplicate_removal_confirmation()
+    elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "already_imported_sources":
+        _render_already_imported_removal_confirmation()
     else:
         _render_source_removal_confirmation()
 
@@ -1938,6 +1942,30 @@ def _render_reconciliation_step() -> None:
     _render_statement_review_tables(collapsed=not allowed)
 
 
+@st.dialog("Continue Remaining Invoices?", icon=":material/check_circle:")
+def _render_already_imported_removal_confirmation() -> None:
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    sources = tuple(bulk.get("sources", ())) if isinstance(bulk, dict) else ()
+    if not sources:
+        _clear_pending_recovery()
+        st.rerun()
+    count = len(sources)
+    _render_pending_recovery_dialog(
+        body=(
+            f"{count} already-imported source file{'s' if count != 1 else ''} "
+            "will be removed only from this current staging batch. Existing "
+            "Invoice_Orders and Invoice_Items in UAT2 will not be deleted or changed."
+        ),
+        confirm_label="Continue with remaining invoices",
+        confirm_key="confirm_remove_already_imported_sources",
+        cancel_label="Cancel",
+        cancel_key="cancel_remove_already_imported_sources",
+        failure_message=(
+            "Unable to update current staging. Existing UAT2 data was not changed."
+        ),
+    )
+
+
 def _render_product_master_revalidation(entries: tuple[Any, ...]) -> None:
     notice = st.session_state.pop("product_master_revalidation_notice", None)
     if notice:
@@ -2170,6 +2198,7 @@ def _render_historical_invoice_commit() -> None:
         "Only Accepted Shopee invoices are eligible. Lazada and ZENXIN remain outside UAT2 Phase 3 persistence. "
         "Historical status is calculated during Reconcile."
     )
+    _render_historical_partial_import_failure()
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
     if not entries:
         st.button("Commit Accepted Shopee Invoices", icon=":material/upload:", disabled=True, key="uat2_historical_commit")
@@ -2207,14 +2236,68 @@ def _render_historical_invoice_commit() -> None:
                 st.rerun()
         except HistoricalInvoiceBulkImportError as error:
             st.session_state.uat2_historical_commit_refresh_required = True
-            st.error(
-                f"Historical write stopped after {len(error.confirmed_results)} confirmed bundle(s). "
-                "Return to Validate and revalidate historical status before retrying."
-            )
+            st.session_state.historical_partial_import_failure = {
+                "confirmed_count": error.confirmed_count,
+                "pending_count": error.pending_count,
+                "chunk_size": error.chunk_size,
+                "completed_chunks": error.completed_chunk_count,
+                "failed_chunk_index": error.failed_chunk_index,
+                "failed_chunk_size": error.failed_chunk_size,
+                "total_chunks": error.total_chunks,
+                "underlying_error_type": error.underlying_error_type,
+                "underlying_error_message": error.underlying_error_message,
+            }
+            st.rerun()
         except ApplicationCommitInProgress as error:
             st.warning(str(error))
         except HistoricalInvoiceStorageError as error:
             st.error(f"Historical Invoice storage write failed: {error}")
+
+
+def _render_historical_partial_import_failure() -> None:
+    details = st.session_state.get("historical_partial_import_failure")
+    if not isinstance(details, dict):
+        return
+    confirmed = int(details.get("confirmed_count") or 0)
+    pending = int(details.get("pending_count") or 0)
+    st.warning(
+        "**Partial import completed**\n\n"
+        f"{confirmed} invoice{'s were' if confirmed != 1 else ' was'} successfully "
+        f"imported. {pending} invoice{'s were' if pending != 1 else ' was'} not "
+        "written. The already imported invoices are safe in UAT2. Revalidate "
+        "the batch before continuing.",
+        icon=":material/warning:",
+    )
+    if st.button(
+        "Revalidate remaining invoices",
+        icon=":material/refresh:",
+        type="primary",
+        key="revalidate_partial_historical_import",
+    ):
+        _set_step(4)
+        st.rerun()
+    with st.expander("Technical details", expanded=False):
+        rows = (
+            ("Chunk size", details.get("chunk_size")),
+            ("Completed chunks", details.get("completed_chunks")),
+            ("Failed chunk", details.get("failed_chunk_index")),
+            ("Failed chunk invoices", details.get("failed_chunk_size")),
+            ("Total chunks", details.get("total_chunks")),
+            ("Confirmed invoices", confirmed),
+            ("Pending invoices", pending),
+            ("Underlying error type", details.get("underlying_error_type")),
+            ("Underlying error", details.get("underlying_error_message")),
+        )
+        st.dataframe(
+            [
+                {
+                    "Diagnostic": label,
+                    "Value": str(value) if value is not None else "Unavailable",
+                }
+                for label, value in rows
+            ],
+            hide_index=True,
+        )
 
 
 def _reconcile_historical_invoice_staging() -> tuple[Any, ...]:
@@ -2286,6 +2369,40 @@ def _render_historical_status_details(
     if not entries:
         st.caption("No target Shopee Invoice source is ready for historical classification.")
         return
+    if allow_removal:
+        already_count = sum(
+            entry.status is IntakeStatus.ALREADY_IMPORTED for entry in entries
+        )
+        new_count = sum(entry.status is IntakeStatus.NEW for entry in entries)
+        if already_count:
+            st.success(
+                f"Already imported: {already_count} · Remaining new: {new_count}",
+                icon=":material/check_circle:",
+            )
+            plan = plan_already_imported_source_removal(st.session_state, entries)
+            if plan.safe_sources:
+                st.caption(
+                    f"{already_count} invoice{'s are' if already_count != 1 else ' is'} "
+                    "already stored in UAT2. This action removes only eligible "
+                    "already-imported sources from the current staging batch."
+                )
+                if st.button(
+                    f"Continue with {new_count} remaining invoices",
+                    icon=":material/forward:",
+                    type="primary",
+                    key=f"{key_prefix}_continue_remaining_invoices",
+                ):
+                    _queue_bulk_recovery(
+                        list(plan.safe_sources),
+                        label="Continue with remaining invoices",
+                        confirmation_kind="already_imported_sources",
+                    )
+            if plan.retained_sources:
+                retained_count = len(plan.retained_sources)
+                st.warning(
+                    "Mixed source — manual review / safe recovery required for "
+                    f"{retained_count} source{'s' if retained_count != 1 else ''}."
+                )
     with st.expander("Historical classification details", expanded=False):
         st.dataframe(
             [

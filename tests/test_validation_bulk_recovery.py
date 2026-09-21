@@ -1,6 +1,7 @@
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
@@ -11,6 +12,7 @@ from src.invoice_app.services.validation_recovery import (
     REMOVE_STAGED_SOURCE,
     execute_current_batch_bulk_recovery,
     execute_current_batch_recovery,
+    plan_already_imported_source_removal,
     plan_duplicate_source_removal,
     recovery_actions_for_source,
 )
@@ -76,6 +78,107 @@ def test_bulk_recovery_removes_only_selected_current_batch_sources_and_revalidat
     assert "uat2_historical_commit_entries" not in state
     assert "uat2_historical_commit_refresh_required" not in state
     assert "uat2_historical_commit_signature" not in state
+
+
+def _historical_entry(source, order_id, status):
+    return InvoiceIntakeEntry(
+        staging_id=f"{source}:{order_id}",
+        source_filename=source,
+        source_hash="a" * 64,
+        order_id=order_id,
+        status=status,
+        message=None,
+        bundle=None,
+    )
+
+
+def test_already_imported_bulk_recovery_removes_only_safe_sources_from_session():
+    state = {
+        "orders": [
+            {"platform": "Shopee", "status": "Accepted", "source_pdf": "stored-1.pdf", "order_id": "STORED-1"},
+            {"platform": "Shopee", "status": "Accepted", "source_pdf": "stored-2.pdf", "order_id": "STORED-2"},
+            {"platform": "Shopee", "status": "Accepted", "source_pdf": "new-1.pdf", "order_id": "NEW-1"},
+        ],
+        "products": [
+            {"source_pdf": "stored-1.pdf", "order_id": "STORED-1"},
+            {"source_pdf": "stored-2.pdf", "order_id": "STORED-2"},
+            {"source_pdf": "new-1.pdf", "order_id": "NEW-1"},
+        ],
+        "reviews": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "processing_errors": [],
+        "uat2_historical_commit_entries": ("stale",),
+        "uat2_historical_commit_refresh_required": False,
+        "uat2_historical_commit_signature": "stale",
+        "historical_partial_import_failure": {"confirmed_count": 2},
+    }
+    entries = (
+        _historical_entry("stored-1.pdf", "STORED-1", IntakeStatus.ALREADY_IMPORTED),
+        _historical_entry("stored-2.pdf", "STORED-2", IntakeStatus.ALREADY_IMPORTED),
+        _historical_entry("new-1.pdf", "NEW-1", IntakeStatus.NEW),
+    )
+
+    plan = plan_already_imported_source_removal(state, entries)
+    execution = execute_current_batch_bulk_recovery(state, plan.safe_sources)
+
+    assert plan.safe_sources == ("stored-1.pdf", "stored-2.pdf")
+    assert plan.retained_sources == ()
+    assert execution.changed is True
+    assert [row["order_id"] for row in state["orders"]] == ["NEW-1"]
+    assert "historical_partial_import_failure" not in state
+    assert "uat2_historical_commit_entries" not in state
+
+    repeated = execute_current_batch_bulk_recovery(state, plan.safe_sources)
+    assert repeated.changed is False
+    assert [row["order_id"] for row in state["orders"]] == ["NEW-1"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_status",
+    (IntakeStatus.NEW, IntakeStatus.NEEDS_REVIEW, IntakeStatus.SOURCE_CONFLICT),
+)
+def test_already_imported_planner_retains_mixed_status_source(unsafe_status):
+    state = {
+        "orders": [
+            {"source_pdf": "mixed.pdf", "order_id": "STORED"},
+            {"source_pdf": "mixed.pdf", "order_id": "UNSAFE"},
+        ],
+        "products": [],
+        "reviews": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+    entries = (
+        _historical_entry("mixed.pdf", "STORED", IntakeStatus.ALREADY_IMPORTED),
+        _historical_entry("mixed.pdf", "UNSAFE", unsafe_status),
+    )
+
+    plan = plan_already_imported_source_removal(state, entries)
+
+    assert plan.safe_sources == ()
+    assert plan.retained_sources == ("mixed.pdf",)
+    assert len(state["orders"]) == 2
+
+
+def test_already_imported_planner_retains_source_with_review_sibling():
+    state = {
+        "orders": [{"source_pdf": "mixed.pdf", "order_id": "STORED"}],
+        "products": [],
+        "reviews": [{"source_pdf": "mixed.pdf", "order_id": "REVIEW"}],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "processing_errors": [],
+    }
+    entries = (
+        _historical_entry("mixed.pdf", "STORED", IntakeStatus.ALREADY_IMPORTED),
+    )
+
+    plan = plan_already_imported_source_removal(state, entries)
+
+    assert plan.safe_sources == ()
+    assert plan.retained_sources == ("mixed.pdf",)
 
 
 def test_duplicate_only_source_is_safe_for_whole_source_removal():
@@ -393,3 +496,111 @@ def test_reconcile_bulk_needs_review_removal_requires_confirmation(tmp_path, mon
     next(button for button in app.button if button.label == "Remove 1 Source").click().run(timeout=20)
     assert app.exception == []
     assert [row["source_pdf"] for row in app.session_state.filtered_state["orders"]] == ["new.pdf"]
+
+
+def _partial_import_failure_app():
+    import streamlit as st
+    from src.invoice_app.ui import data_import
+
+    st.session_state.setdefault("data_import_step", 5)
+    st.session_state.setdefault(
+        "historical_partial_import_failure",
+        {
+            "confirmed_count": 250,
+            "pending_count": 282,
+            "chunk_size": 50,
+            "completed_chunks": 5,
+            "failed_chunk_index": 6,
+            "failed_chunk_size": 50,
+            "total_chunks": 11,
+            "underlying_error_type": "HttpError",
+            "underlying_error_message": "Service unavailable; token=[REDACTED]",
+        },
+    )
+    data_import._render_historical_partial_import_failure()
+
+
+def test_partial_import_ui_shows_counts_revalidate_action_and_sanitized_details():
+    app = AppTest.from_function(_partial_import_failure_app)
+
+    app.run()
+
+    assert app.exception == []
+    warning = next(item.value for item in app.warning if "Partial import" in item.value)
+    assert "250 invoices were successfully imported" in warning
+    assert "282 invoices were not written" in warning
+    assert "Technical details" in {item.label for item in app.expander}
+    diagnostics = next(
+        frame.value for frame in app.dataframe if "Diagnostic" in frame.value.columns
+    )
+    values = dict(zip(diagnostics["Diagnostic"], diagnostics["Value"]))
+    assert values["Failed chunk"] == "6"
+    assert values["Underlying error type"] == "HttpError"
+    assert "[REDACTED]" in values["Underlying error"]
+    next(
+        button for button in app.button
+        if button.label == "Revalidate remaining invoices"
+    ).click().run()
+    assert app.session_state.filtered_state["data_import_step"] == 4
+
+
+def _already_imported_bulk_recovery_app():
+    import streamlit as st
+    from src.invoice_app.services.historical_invoice_intake import (
+        IntakeStatus,
+        InvoiceIntakeEntry,
+    )
+    from src.invoice_app.ui import data_import
+
+    st.session_state.setdefault(
+        "orders",
+        [
+            {"platform": "Shopee", "status": "Accepted", "source_pdf": "stored.pdf", "order_id": "STORED"},
+            {"platform": "Shopee", "status": "Accepted", "source_pdf": "new.pdf", "order_id": "NEW"},
+        ],
+    )
+    st.session_state.setdefault("products", [])
+    st.session_state.setdefault("reviews", [])
+    st.session_state.setdefault("duplicate_skipped", [])
+    st.session_state.setdefault("unsupported_files", [])
+    st.session_state.setdefault("processing_errors", [])
+    entries = (
+        InvoiceIntakeEntry(
+            "stored", "stored.pdf", "a" * 64, "STORED",
+            IntakeStatus.ALREADY_IMPORTED, None, None,
+        ),
+        InvoiceIntakeEntry(
+            "new", "new.pdf", "b" * 64, "NEW", IntakeStatus.NEW, None, None,
+        ),
+    )
+    if data_import._has_pending_recovery():
+        data_import._render_recovery_confirmation()
+    else:
+        data_import._render_historical_status_details(
+            entries,
+            allow_removal=True,
+            key_prefix="test_historical",
+        )
+
+
+def test_already_imported_bulk_recovery_ui_requires_confirmation_and_is_staging_only():
+    app = AppTest.from_function(_already_imported_bulk_recovery_app)
+
+    app.run()
+    assert any("Already imported: 1" in item.value for item in app.success)
+    next(
+        button for button in app.button
+        if button.label == "Continue with 1 remaining invoices"
+    ).click().run()
+    assert [row["order_id"] for row in app.session_state.filtered_state["orders"]] == [
+        "STORED", "NEW",
+    ]
+    next(
+        button for button in app.button
+        if button.label == "Continue with remaining invoices"
+    ).click().run()
+
+    assert app.exception == []
+    assert [row["order_id"] for row in app.session_state.filtered_state["orders"]] == [
+        "NEW",
+    ]

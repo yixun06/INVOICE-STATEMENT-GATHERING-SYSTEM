@@ -51,6 +51,7 @@ _INVOICE_STAGING_KEYS = (
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
     "historical_validation_blocker",
+    "historical_partial_import_failure",
     "product_master_revalidation_notice",
     "product_master_revalidation_error",
     "validation_recovery_detail",
@@ -77,6 +78,14 @@ class RecoveryExecution:
 @dataclass(frozen=True)
 class DuplicateSourceRemovalPlan:
     """Authoritative current-staging decision for duplicate source cleanup."""
+
+    safe_sources: tuple[str, ...]
+    retained_sources: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AlreadyImportedSourceRemovalPlan:
+    """Safe current-staging removal plan for fully imported source owners."""
 
     safe_sources: tuple[str, ...]
     retained_sources: tuple[str, ...]
@@ -131,6 +140,68 @@ def plan_duplicate_source_removal(
             source for source in candidate_sources if source not in safe_set
         ),
     )
+
+
+def plan_already_imported_source_removal(
+    state: MutableMapping[str, Any],
+    entries: Iterable[Any],
+) -> AlreadyImportedSourceRemovalPlan:
+    """Select only sources whose complete staged ownership is already imported."""
+
+    staged_entries = tuple(entries)
+    sources = tuple(
+        dict.fromkeys(
+            str(getattr(entry, "source_filename", "")).strip()
+            for entry in staged_entries
+            if _status_value(getattr(entry, "status", None)) == "ALREADY_IMPORTED"
+            and str(getattr(entry, "source_filename", "")).strip()
+        )
+    )
+    safe: list[str] = []
+    retained: list[str] = []
+    for source in sources:
+        owned_entries = tuple(
+            entry
+            for entry in staged_entries
+            if str(getattr(entry, "source_filename", "")).strip() == source
+        )
+        already_order_ids = {
+            str(getattr(entry, "order_id", "") or "").strip()
+            for entry in owned_entries
+            if _status_value(getattr(entry, "status", None)) == "ALREADY_IMPORTED"
+        }
+        records = tuple(
+            record
+            for bucket in _SOURCE_BUCKETS
+            for record in state.get(bucket, ())
+            if isinstance(record, dict) and source_name(record) == source
+        )
+        has_unsafe_entry = any(
+            _status_value(getattr(entry, "status", None)) != "ALREADY_IMPORTED"
+            for entry in owned_entries
+        )
+        has_unsafe_record = any(
+            bucket in {"reviews", "processing_errors", "unsupported_files"}
+            or (
+                bucket in {"orders", "products", "duplicate_skipped"}
+                and str(record.get("order_id") or "").strip()
+                not in already_order_ids
+            )
+            for bucket in _SOURCE_BUCKETS
+            for record in state.get(bucket, ())
+            if isinstance(record, dict) and source_name(record) == source
+        )
+        if (
+            owned_entries
+            and records
+            and already_order_ids
+            and not has_unsafe_entry
+            and not has_unsafe_record
+        ):
+            safe.append(source)
+        else:
+            retained.append(source)
+    return AlreadyImportedSourceRemovalPlan(tuple(safe), tuple(retained))
 
 
 def recovery_actions_for_source(
@@ -320,8 +391,14 @@ def execute_current_batch_bulk_recovery(
         "uat2_historical_commit_entries",
         "uat2_historical_commit_refresh_required",
         "uat2_historical_commit_signature",
+        "historical_partial_import_failure",
     ):
         state.pop(key, None)
+    for key in tuple(state):
+        if isinstance(key, str) and key.startswith(
+            ("historical_exception_queue_", "historical_commit_exception_queue_")
+        ):
+            state.pop(key, None)
     changed = any(removed_counts.values())
     digest = sha256("\n".join(sorted(source_names)).encode("utf-8")).hexdigest()[:12]
     return RecoveryExecution(
@@ -335,6 +412,10 @@ def execute_current_batch_bulk_recovery(
             else "No current staging records matched the selected sources; the batch was revalidated."
         ),
     )
+
+
+def _status_value(status: Any) -> str:
+    return str(getattr(status, "value", status) or "").strip()
 
 
 def _revalidate_platform_batch_state(state: MutableMapping[str, Any]) -> None:

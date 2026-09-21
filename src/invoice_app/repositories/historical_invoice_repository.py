@@ -56,10 +56,34 @@ class HistoricalInvoiceBulkImportError(RuntimeError):
         *,
         confirmed_results: Sequence[ImportResult] = (),
         pending_identities: Sequence[tuple[str, str]] = (),
+        chunk_size: int | None = None,
+        failed_chunk_index: int | None = None,
+        failed_chunk_size: int | None = None,
+        total_chunks: int | None = None,
+        underlying_error_type: str | None = None,
+        underlying_error_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.confirmed_results = tuple(confirmed_results)
         self.pending_identities = tuple(pending_identities)
+        self.chunk_size = chunk_size
+        self.failed_chunk_index = failed_chunk_index
+        self.failed_chunk_size = failed_chunk_size
+        self.total_chunks = total_chunks
+        self.underlying_error_type = underlying_error_type
+        self.underlying_error_message = underlying_error_message
+
+    @property
+    def confirmed_count(self) -> int:
+        return len(self.confirmed_results)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self.pending_identities)
+
+    @property
+    def completed_chunk_count(self) -> int:
+        return max(0, (self.failed_chunk_index or 1) - 1)
 
 
 class HistoricalInvoiceRepository(Protocol):

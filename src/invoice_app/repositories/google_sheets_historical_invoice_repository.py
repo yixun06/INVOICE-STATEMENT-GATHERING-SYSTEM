@@ -447,6 +447,7 @@ class GoogleSheetsHistoricalInvoiceRepository:
                 self._gateway.append_bundles(self._spreadsheet_id, order_rows, item_rows)
             except Exception as error:
                 self.refresh()
+                underlying = _root_exception(error)
                 pending = tuple(
                     _identity(values[0].order.platform, values[0].order.order_id)
                     for remaining in chunks[chunk_index - 1 :]
@@ -456,6 +457,12 @@ class GoogleSheetsHistoricalInvoiceRepository:
                     "UAT2 historical invoice bulk write stopped; refresh and reclassify before retrying.",
                     confirmed_results=confirmed,
                     pending_identities=pending,
+                    chunk_size=chunk_size,
+                    failed_chunk_index=chunk_index,
+                    failed_chunk_size=len(chunk),
+                    total_chunks=len(chunks),
+                    underlying_error_type=type(underlying).__name__,
+                    underlying_error_message=_sanitized_exception_message(underlying),
                 ) from error
             confirmed.extend(values[1] for values in chunk)
         self.refresh()
@@ -638,6 +645,39 @@ def _optional(value: Any) -> str | None:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _root_exception(error: BaseException) -> BaseException:
+    current = error
+    seen: set[int] = set()
+    while current.__cause__ is not None and id(current) not in seen:
+        seen.add(id(current))
+        current = current.__cause__
+    return current
+
+
+def _sanitized_exception_message(error: BaseException) -> str:
+    message = " ".join(str(error).split()) or "No error message was provided."
+    message = re.sub(
+        r"(?i)\bauthorization\b[\"']?\s*[:=]\s*"
+        r"(?:Bearer\s+)?(?:[\"'][^\"']*[\"']|[^\s,;}\]]+)",
+        "authorization=[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(access[_-]?token|api[_-]?key|client[_-]?secret|"
+        r"private[_-]?key|password)\b[\"']?\s*[:=]\s*"
+        r"(?:[\"'][^\"']*[\"']|[^\s,;}\]]+)",
+        r"\1=[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", message)
+    message = re.sub(
+        r"(?i)([?&](?:key|token|access_token|api_key)=)[^&\s]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    return message[:500]
 
 
 def _identity(platform: str, order_id: str) -> tuple[str, str]:
