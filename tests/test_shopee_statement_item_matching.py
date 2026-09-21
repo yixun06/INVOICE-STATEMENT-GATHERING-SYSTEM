@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem
@@ -92,9 +93,77 @@ def _family(
     )
 
 
-def test_name_normalization_is_nfkc_trim_collapse_and_case_insensitive_only():
+def test_name_normalization_is_nfkc_trim_collapse_and_keeps_inner_spaces():
     assert normalize_statement_product_name("  ＧＲＥＥＮ\t Tea  ") == "green tea"
     assert normalize_statement_product_name("F ree") != normalize_statement_product_name("Free")
+
+
+def test_name_normalization_treats_standalone_ampersand_as_and():
+    candidate = "Organic Vitex Honey | fatigue & menst rual stress"
+    source = "Organic Vitex Honey | fatigue and menst rual stress"
+
+    assert normalize_statement_product_name(candidate) == (
+        normalize_statement_product_name(source)
+    )
+
+
+def test_name_normalization_ampersand_equivalence_is_symmetric():
+    candidate = "Organic Vitex Honey | fatigue and menst rual stress"
+    source = "Organic Vitex Honey | fatigue & menst rual stress"
+
+    assert normalize_statement_product_name(candidate) == (
+        normalize_statement_product_name(source)
+    )
+
+
+def test_name_normalization_collapses_repeated_and_line_wrap_whitespace():
+    candidate = "Organic Vitex Honey | fatigue and menst rual stress"
+    source = "  Organic  Vitex Honey |\n fatigue   and  menst rual stress  "
+
+    assert normalize_statement_product_name(candidate) == (
+        normalize_statement_product_name(source)
+    )
+
+
+def test_name_normalization_preserves_materially_different_words():
+    fatigue = "Organic Vitex Honey | fatigue and menstrual stress"
+    digestive = "Organic Vitex Honey | fatigue and digestive stress"
+
+    assert normalize_statement_product_name(fatigue) != (
+        normalize_statement_product_name(digestive)
+    )
+
+
+def test_name_normalization_does_not_rewrite_embedded_ampersands():
+    assert normalize_statement_product_name("R&D Formula") != (
+        normalize_statement_product_name("R and D Formula")
+    )
+
+
+def test_ampersand_candidate_matches_and_source_within_selected_sku():
+    result = match_statement_sku_rows(
+        [_row(product_name="Organic Vitex Honey | fatigue and menst rual stress")],
+        [_item(1, name="Organic Vitex Honey | fatigue & menst rual stress")],
+        product_families=_resolver(
+            _family(product_name="Organic Vitex Honey | fatigue & menst rual stress")
+        ),
+    )
+
+    assert result.eligible_for_commit is True
+    assert result.matches[0].invoice_item_index == 1
+
+
+def test_and_candidate_matches_ampersand_source_within_selected_sku():
+    result = match_statement_sku_rows(
+        [_row(product_name="Organic Vitex Honey | fatigue & menst rual stress")],
+        [_item(1, name="Organic Vitex Honey | fatigue and menst rual stress")],
+        product_families=_resolver(
+            _family(product_name="Organic Vitex Honey | fatigue and menst rual stress")
+        ),
+    )
+
+    assert result.eligible_for_commit is True
+    assert result.matches[0].invoice_item_index == 1
 
 
 def test_unique_identity_matches_even_when_item_has_promotion():
@@ -177,6 +246,51 @@ def test_exact_seller_sku_does_not_merge_parent_fallback_candidates():
                 parent_sku="PARENT-SKU",
                 product_name="Parent Product",
             ),
+        ),
+    )
+
+    assert result.eligible_for_commit is False
+    assert result.matches[0].status is StatementItemMatchStatus.NEEDS_REVIEW
+
+
+def test_ampersand_normalization_does_not_merge_parent_candidate_with_exact_sku():
+    result = match_statement_sku_rows(
+        [_row(product_name="Exact Product and Honey")],
+        [
+            _item(1, sku="EXACT-SKU", name="Exact Product & Honey"),
+            _item(2, sku="PARENT-SKU", name="Exact Product and Honey"),
+        ],
+        product_families=_resolver(
+            _family(seller_sku="EXACT-SKU", product_name="Exact Product & Honey"),
+            _family(
+                seller_sku="OTHER-SKU",
+                parent_sku="PARENT-SKU",
+                product_name="Exact Product and Honey",
+            ),
+        ),
+    )
+
+    assert result.eligible_for_commit is True
+    assert result.matches[0].invoice_item_index == 1
+
+
+def test_ambiguous_normalized_candidates_remain_blocked():
+    first = replace(
+        _item(1, sku="SKU-1", name="Vitex fatigue & stress", variation="Original"),
+        nav="NAV-1",
+        unit_price=Decimal("49.90"),
+    )
+    second = replace(
+        _item(2, sku="SKU-1", name="Vitex fatigue and stress", variation="Large"),
+        nav="NAV-2",
+        unit_price=Decimal("59.90"),
+    )
+
+    result = match_statement_sku_rows(
+        [_row(product_name="Vitex fatigue and stress")],
+        [first, second],
+        product_families=_resolver(
+            _family(seller_sku="SKU-1", product_name="Vitex fatigue & stress"),
         ),
     )
 

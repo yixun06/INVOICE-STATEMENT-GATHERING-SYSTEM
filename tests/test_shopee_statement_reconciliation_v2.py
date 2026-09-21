@@ -574,6 +574,69 @@ def test_strong_identity_accepts_pm_confirmed_source_name_difference():
     assert edge.match_method.endswith("PRODUCT_MASTER_NAME_CONFIRMATION")
 
 
+def test_future_order_uses_general_ampersand_name_normalization():
+    order_id = "FUTURE-VITEX-ORDER"
+    statement_name = (
+        "Simply Natural Organic Vitex Honey 1kg | Remedy for fatigue and "
+        "menstrual stress"
+    )
+    invoice_name = (
+        "Simply Natural Organic Vitex Honey 1kg | Remedy for fatigue and "
+        "menst rual stress"
+    )
+    result = _evaluate(
+        (
+            _sku_row(
+                order_id=order_id,
+                product_id="VITEX-PRODUCT",
+                name=statement_name,
+                components=_components(product="49.90"),
+            ),
+        ),
+        (
+            _item(
+                0,
+                order_id=order_id,
+                sku="9555208105411",
+                name=invoice_name,
+                subtotal="49.90",
+            ),
+        ),
+        order=_order(
+            order_id=order_id,
+            product="49.90",
+            income="49.90",
+            final_amount="49.90",
+        ),
+        resolver=_resolver(
+            _family(
+                product_id="VITEX-PRODUCT",
+                sku="",
+                parent="9555208105411",
+                name=(
+                    "Simply Natural Organic Vitex Honey 1kg | Remedy for fatigue "
+                    "& menstrual stress"
+                ),
+            ),
+            _family(
+                product_id="VITEX-PRODUCT",
+                sku="",
+                parent="9555208105411",
+                name=(
+                    "Simply Natural Organic Vitex Honey 1kg | Remedy for fatigue "
+                    "& menst rual stress"
+                ),
+            ),
+        ),
+    ).orders[0]
+
+    assert result.summary.identity_scope is IdentityScope.ITEM
+    edge = result.evidence.identities[0].compatible_edges[0]
+    assert edge.match_method == (
+        "PRODUCT_MASTER_PARENT_SKU|PRODUCT_MASTER_NAME_CONFIRMATION"
+    )
+
+
 def test_final_amount_conflict_with_final_order_income_fails_closed():
     result = _evaluate(
         (_sku_row(),),

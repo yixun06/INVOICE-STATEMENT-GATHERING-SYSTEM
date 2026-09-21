@@ -17,6 +17,7 @@ from src.invoice_app.services.product_price_master import ProductPriceMaster
 
 
 MONEY_TOLERANCE = Decimal("0.02")
+_STANDALONE_AMPERSAND = re.compile(r"(?<!\w)&(?!\w)")
 
 
 class StatementItemMatchStatus(str, Enum):
@@ -115,10 +116,16 @@ class StatementItemMatchBatch:
 
 
 def normalize_statement_product_name(value: str | None) -> str:
-    """Locked matching normalization without deleting meaningful inner spaces."""
+    """Normalize comparison-only source formatting without fuzzy matching.
 
-    compatible = unicodedata.normalize("NFKC", value or "")
-    return re.sub(r"\s+", " ", compatible).strip().casefold()
+    A standalone ampersand is the source-formatting equivalent of the word
+    ``and``. Embedded forms such as ``R&D`` remain distinct, and meaningful
+    inner spaces such as ``menst rual`` are preserved.
+    """
+
+    compatible = unicodedata.normalize("NFKC", value or "").casefold()
+    compatible = _STANDALONE_AMPERSAND.sub(" and ", compatible)
+    return re.sub(r"\s+", " ", compatible).strip()
 
 
 def match_statement_sku_rows(

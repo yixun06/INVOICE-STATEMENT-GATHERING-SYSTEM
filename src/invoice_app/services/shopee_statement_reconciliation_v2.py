@@ -59,7 +59,7 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 from src.invoice_app.utils.normalize import normalize_sku_text
 
 
-RULE_VERSION = "SHOPEE_RECONCILIATION_V2_1"
+RULE_VERSION = "SHOPEE_RECONCILIATION_V2_2"
 
 _SHIPPING_COMPONENTS = (
     "Shipping Fee Paid by Buyer (excl. SST)",
