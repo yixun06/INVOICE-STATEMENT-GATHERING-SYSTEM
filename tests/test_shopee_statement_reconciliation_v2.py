@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
@@ -244,6 +246,25 @@ def _evaluate(
         items,
         product_families=resolver or _resolver(_family()),
         verified_artifact_repairs=repairs,
+    )
+
+
+def _completed_adjustment(
+    *,
+    order_id: str,
+    amount: str,
+    sequence: str = "A1",
+    complete_date: date = date(2026, 8, 15),
+) -> SettlementAdjustment:
+    return SettlementAdjustment(
+        sequence_no=sequence,
+        adjustment_complete_date=complete_date,
+        adjustment_type="Return Refund Adjustment After Order Completed",
+        adjustment_reason="",
+        adjustment_amount=Decimal(amount),
+        linked_order_id=order_id,
+        payout_completed_date=date(2026, 8, 11),
+        source_row_number=20,
     )
 
 
@@ -691,6 +712,137 @@ def test_adjustment_is_excluded_from_original_settlement_formula():
     ).orders[0]
 
     assert without.evidence.settlement == with_adjustment.evidence.settlement
+
+
+@pytest.mark.parametrize(
+    ("order_id", "original", "adjustment", "final"),
+    (
+        ("260807P7MNPU1X", "65.29", "-6.25", "59.04"),
+        ("260808RW7RVBGY", "107.35", "-129.06", "-21.71"),
+        ("FUTURE-COMPLETED-ORDER-ADJUSTMENT", "100.00", "-15.00", "85.00"),
+    ),
+)
+def test_original_settlement_stays_exact_with_source_proven_completed_adjustment(
+    order_id: str,
+    original: str,
+    adjustment: str,
+    final: str,
+):
+    order = _order(
+        order_id=order_id,
+        product=original,
+        income=original,
+        final_amount=final,
+    )
+    result = _evaluate(
+        (
+            _sku_row(
+                order_id=order_id,
+                components=_components(product=original),
+            ),
+        ),
+        (_item(0, order_id=order_id, subtotal=original),),
+        order=order,
+        adjustments=(
+            _completed_adjustment(order_id=order_id, amount=adjustment),
+        ),
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.EXACT
+    assert result.evidence.settlement.invoice_basis == Decimal(original)
+    assert result.evidence.settlement.statement_total == Decimal(original)
+    assert result.evidence.settlement.raw_difference == ZERO
+    assert result.evidence.settlement.internal_effects == (
+        "POST_ORDER_ADJUSTMENT_STATEMENT_ONLY",
+        "POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT",
+    )
+    assert order.order_income == Decimal(original)
+    assert order.final_amount == Decimal(final)
+
+
+def test_adjustment_does_not_hide_unrelated_original_payout_mismatch():
+    order_id = "ORIGINAL-PAYOUT-MISMATCH"
+    result = _evaluate(
+        (
+            _sku_row(
+                order_id=order_id,
+                components=_components(product="64.00"),
+            ),
+        ),
+        (_item(0, order_id=order_id, subtotal="64.00"),),
+        order=_order(
+            order_id=order_id,
+            product="64.00",
+            income="65.29",
+            final_amount="59.04",
+        ),
+        adjustments=(
+            _completed_adjustment(order_id=order_id, amount="-6.25"),
+        ),
+    ).orders[0]
+
+    assert result.evidence.settlement.raw_difference == Decimal("-1.29")
+    assert result.evidence.settlement.explained_delta == ZERO
+    assert result.evidence.settlement.unexplained_residual == Decimal("-1.29")
+    assert result.summary.settlement_basis is SettlementBasis.NONE
+
+
+def test_final_difference_without_statement_adjustment_remains_blocked():
+    order_id = "NO-ADJUSTMENT-EVIDENCE"
+    result = _evaluate(
+        (
+            _sku_row(
+                order_id=order_id,
+                components=_components(product="65.29"),
+            ),
+        ),
+        (_item(0, order_id=order_id, subtotal="65.29"),),
+        order=_order(
+            order_id=order_id,
+            product="65.29",
+            income="65.29",
+            final_amount="59.04",
+        ),
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.NONE
+    assert result.evidence.settlement.raw_difference is None
+
+
+def test_multiple_adjustment_events_remain_distinct_during_consistency_check():
+    order_id = "MULTIPLE-COMPLETED-ORDER-ADJUSTMENTS"
+    adjustments = (
+        _completed_adjustment(order_id=order_id, amount="-15.00", sequence="A1"),
+        _completed_adjustment(
+            order_id=order_id,
+            amount="-3.00",
+            sequence="A2",
+            complete_date=date(2026, 8, 16),
+        ),
+    )
+    result = _evaluate(
+        (
+            _sku_row(
+                order_id=order_id,
+                components=_components(product="100.00"),
+            ),
+        ),
+        (_item(0, order_id=order_id, subtotal="100.00"),),
+        order=_order(
+            order_id=order_id,
+            product="100.00",
+            income="100.00",
+            final_amount="82.00",
+        ),
+        adjustments=adjustments,
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.EXACT
+    assert len(adjustments) == 2
+    assert tuple(event.adjustment_amount for event in adjustments) == (
+        Decimal("-15.00"),
+        Decimal("-3.00"),
+    )
 
 
 def test_statement_quantity_absence_does_not_fail_reconciliation_or_claim_match():

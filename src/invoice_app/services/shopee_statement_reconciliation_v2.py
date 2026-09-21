@@ -18,6 +18,7 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
+from src.invoice_app.domain.order_adjustment import supported_adjustment_type
 from src.invoice_app.domain.statement_reconciliation_v2 import (
     CompatibleEdgeEvidence,
     CoverageEvidence,
@@ -59,7 +60,7 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 from src.invoice_app.utils.normalize import normalize_sku_text
 
 
-RULE_VERSION = "SHOPEE_RECONCILIATION_V2_3"
+RULE_VERSION = "SHOPEE_RECONCILIATION_V2_4"
 
 _SHIPPING_COMPONENTS = (
     "Shipping Fee Paid by Buyer (excl. SST)",
@@ -176,6 +177,7 @@ def evaluate_statement_reconciliation(
         settlement = _evaluate_settlement(
             order,
             order_rows.get(order_id),
+            statement.adjustments,
             tolerance=tolerance,
         )
         refund = _refund_evidence(order, order_rows.get(order_id), contexts, identities)
@@ -1129,6 +1131,7 @@ def _money_comparison(
 def _evaluate_settlement(
     order: CanonicalInvoiceOrder | None,
     order_row: SettlementIncomeRow | None,
+    adjustments: Sequence[SettlementAdjustment],
     *,
     tolerance: Decimal,
 ) -> SettlementEvidence:
@@ -1140,12 +1143,17 @@ def _evaluate_settlement(
     values = tuple(order_row.financial_components.get(name) for name in INCOME_COMPONENT_COLUMNS)
     if order.order_income is None or any(value is None for value in values):
         return _empty_settlement(order, order_row, tolerance, source_state)
-    if (
-        source_state.casefold() == "final"
-        and order.final_amount is not None
-        and abs(order.final_amount - order.order_income) > tolerance
-    ):
-        return _empty_settlement(order, order_row, tolerance, source_state)
+    adjustment_effects = _post_order_adjustment_effects(
+        order,
+        adjustments,
+        tolerance,
+    )
+    if source_state.casefold() == "final" and order.final_amount is not None:
+        if (
+            abs(order.final_amount - order.order_income) > tolerance
+            and adjustment_effects is None
+        ):
+            return _empty_settlement(order, order_row, tolerance, source_state)
 
     statement_values = {
         "merchandise": _component_sum(order_row, ("Product Price",)),
@@ -1166,7 +1174,7 @@ def _evaluate_settlement(
     components: list[SettlementComponentEvidence] = []
     explained_parts: list[Decimal] = []
     invalid_missing = False
-    effects: list[str] = []
+    effects: list[str] = list(adjustment_effects or ())
     for component in ("merchandise", "refund", "shipping", "voucher_rebate", "fees"):
         statement_value = statement_values[component]
         invoice_value = invoice_values[component]
@@ -1215,6 +1223,45 @@ def _evaluate_settlement(
         source_state=source_state,
         internal_effects=tuple(effects),
     )
+
+
+def _post_order_adjustment_effects(
+    order: CanonicalInvoiceOrder,
+    adjustments: Sequence[SettlementAdjustment],
+    tolerance: Decimal,
+) -> tuple[str, ...] | None:
+    """Validate linked Statement adjustments without folding them into settlement."""
+
+    linked = tuple(
+        adjustment
+        for adjustment in adjustments
+        if adjustment.linked_order_id.strip() == order.order_id
+        and supported_adjustment_type(adjustment.adjustment_type) is not None
+    )
+    if not linked:
+        return None
+    if any(
+        adjustment.adjustment_complete_date is None
+        or adjustment.adjustment_amount is None
+        for adjustment in linked
+    ):
+        return None
+
+    effects = ["POST_ORDER_ADJUSTMENT_STATEMENT_ONLY"]
+    if order.final_amount is None or order.order_income is None:
+        return tuple(effects)
+    adjustment_total = sum(
+        (
+            adjustment.adjustment_amount
+            for adjustment in linked
+            if adjustment.adjustment_amount is not None
+        ),
+        Decimal("0"),
+    )
+    if abs(order.order_income + adjustment_total - order.final_amount) > tolerance:
+        return None
+    effects.append("POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT")
+    return tuple(effects)
 
 
 def _empty_settlement(
