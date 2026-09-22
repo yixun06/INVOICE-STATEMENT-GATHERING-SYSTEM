@@ -104,7 +104,36 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         eligibility = promotion_subtotal_resolution_eligibility(review)
         if eligibility.eligible:
             return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
+    if _has_source_missing_sku(review):
+        return ResolutionPlan(review_key(review), SKU_RESOLUTION)
+    if promotion_subtotal_resolution_eligibility(review).eligible:
+        return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
     return None
+
+
+def resolution_capabilities(review: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return every independently safe correction supported by structured evidence."""
+    capabilities: list[str] = []
+    plan = resolution_plan(review)
+    if plan is not None:
+        capabilities.append(plan.issue_type)
+    if _has_source_missing_sku(review) and SKU_RESOLUTION not in capabilities:
+        capabilities.append(SKU_RESOLUTION)
+    if (
+        promotion_subtotal_resolution_eligibility(review).eligible
+        and PROMOTION_SUBTOTAL not in capabilities
+    ):
+        capabilities.append(PROMOTION_SUBTOTAL)
+    return tuple(capabilities)
+
+
+def _has_source_missing_sku(review: Mapping[str, Any]) -> bool:
+    return any(
+        bool(product.get("sku_missing_in_source"))
+        and not str(product.get("seller_sku") or "").strip()
+        for product in review.get("product_payloads") or []
+        if isinstance(product, Mapping)
+    )
 
 def synchronize_correction_drafts(state: MutableMapping[str, Any]) -> None:
     """Discard drafts that no longer belong to a current source/order/review."""
@@ -329,13 +358,9 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
     products = [dict(item) for item in review.get("product_payloads") or []]
     if not order:
         return ResolutionOutcome(False, "This review has no staged order data to correct.")
-    if plan.issue_type == PRODUCT_COUNT_MISMATCH:
-        added, error = _missing_product(order, values, review)
-        if error:
-            return ResolutionOutcome(False, error)
-        products.append(added)
-    elif plan.issue_type == SKU_RESOLUTION:
-        if values.get("source_confirmed") is not True:
+    capabilities = set(resolution_capabilities(review))
+    if SKU_RESOLUTION in capabilities:
+        if values.get("sku_source_confirmed", values.get("source_confirmed")) is not True:
             return ResolutionOutcome(False, "Confirm that every resolved Seller SKU was verified from an authoritative source outside the Invoice PDF.")
         candidates = values.get("resolved_seller_skus")
         if not isinstance(candidates, Mapping):
@@ -347,33 +372,35 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
             if not candidate:
                 return ResolutionOutcome(False, "Provide a resolved Seller SKU for every source-missing SKU product.")
             product["resolved_seller_sku"] = candidate
-    elif plan.issue_type == PROMOTION_SUBTOTAL:
-        if values.get("source_confirmed") is not True:
+    if PROMOTION_SUBTOTAL in capabilities:
+        if values.get("promotion_source_confirmed", values.get("source_confirmed")) is not True:
             return ResolutionOutcome(False, "Confirm that the subtotal is visible in the original Invoice source.")
         options = {option.group_id: option for option in promotion_subtotal_groups(review)}
         submitted = values.get("promotion_subtotals")
         if submitted is None:
             submitted = {
-                str(values.get("promotion_group_id") or "").strip(): values.get(
-                    "source_group_total"
-                )
+                str(values.get("promotion_group_id") or "").strip(): values.get("source_group_total")
             }
         if not isinstance(submitted, Mapping):
             return ResolutionOutcome(False, "Provide one source-visible subtotal for each eligible promotion group.")
         normalized: dict[str, str] = {}
         for group_id in options:
-            subtotal, error = _validated_promotion_subtotal(
-                review, group_id, submitted.get(group_id)
-            )
+            subtotal, error = _validated_promotion_subtotal(review, group_id, submitted.get(group_id))
             if error:
                 return ResolutionOutcome(False, error)
             normalized[group_id] = subtotal
         if set(submitted) - set(options):
             return ResolutionOutcome(False, "A submitted promotion group is no longer eligible for safe subtotal correction.")
-        draft = _ensure_draft(state, review)
-        draft["promotion_subtotals"].update(normalized)
+        _ensure_draft(state, review)["promotion_subtotals"].update(normalized)
         for group_id, subtotal in normalized.items():
             _apply_confirmed_promotion_subtotal(products, group_id, subtotal)
+    if plan.issue_type == PRODUCT_COUNT_MISMATCH:
+        added, error = _missing_product(order, values, review)
+        if error:
+            return ResolutionOutcome(False, error)
+        products.append(added)
+    elif plan.issue_type in {SKU_RESOLUTION, PROMOTION_SUBTOTAL}:
+        pass
     elif plan.issue_type == FINAL_AMOUNT:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(False, "Confirm that this Final Amount is visible in the original Invoice source.")

@@ -111,6 +111,7 @@ from ..services.manual_review_resolution import (
     promotion_subtotal_groups,
     remove_draft_product,
     review_presentation_key,
+    resolution_capabilities,
     resolution_plan,
     set_financial_enrichment,
     set_draft_promotion_subtotal,
@@ -1605,10 +1606,8 @@ def _render_manual_review_resolution() -> None:
                         if review.get("product_payloads"):
                             st.dataframe([{"Seller SKU": item.get("seller_sku"), "Product Name": item.get("product_name"), "Quantity": item.get("quantity")} for item in review["product_payloads"]], hide_index=True)
                         _render_missing_product_draft(plan.key, review)
-                    elif plan.issue_type == SKU_RESOLUTION:
-                        _render_sku_resolution_form(plan.key, review)
-                    elif plan.issue_type == PROMOTION_SUBTOTAL:
-                        _render_promotion_subtotal_form(plan.key, review)
+                    elif plan.issue_type in {SKU_RESOLUTION, PROMOTION_SUBTOTAL}:
+                        _render_combined_resolution_form(plan.key, review)
                     elif plan.issue_type == FINAL_AMOUNT:
                         _render_final_amount_form(plan.key, review)
                     else:
@@ -1691,34 +1690,66 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
     st.rerun()
 
 
-def _render_sku_resolution_form(key: str, review: Mapping[str, Any]) -> None:
-    products = [
+def _render_combined_resolution_form(key: str, review: dict[str, Any]) -> None:
+    """Render all structured SKU/promotion corrections for one atomic revalidation."""
+    capabilities = set(resolution_capabilities(review))
+    sku_products = [
         (index, item)
         for index, item in enumerate(review.get("product_payloads") or [])
         if bool(item.get("sku_missing_in_source"))
         and not str(item.get("seller_sku") or "").strip()
     ]
-    if not products:
-        st.warning("This review no longer contains a source-missing Seller SKU product.")
-        return
-    with st.form(f"mr_sku_resolution_{key}"):
-        st.caption("Seller SKU from source: Not provided. Enter only a SKU verified from an authoritative source outside this PDF.")
+    groups = promotion_subtotal_groups(review) if PROMOTION_SUBTOTAL in capabilities else ()
+    saved = draft_promotion_subtotals(st.session_state, review)
+    with st.form(f"mr_combined_resolution_{key}"):
         candidates: dict[str, str] = {}
-        for index, item in products:
-            st.write(str(item.get("product_name") or "Product"))
-            candidates[str(index)] = st.text_input(
-                "Resolved Seller SKU",
-                value="",
-                key=f"mr_resolved_sku_{key}_{index}",
+        sku_confirmed = SKU_RESOLUTION not in capabilities
+        promotion_confirmed = PROMOTION_SUBTOTAL not in capabilities
+        if SKU_RESOLUTION in capabilities:
+            st.write("**Product / SKU correction**")
+            st.caption("Source Seller SKU: Not provided. Enter only a SKU verified from an authoritative source outside this PDF.")
+            for index, item in sku_products:
+                st.write(str(item.get("product_name") or "Product"))
+                candidates[str(index)] = st.text_input(
+                    "Resolved Seller SKU",
+                    key=f"mr_combined_sku_{key}_{index}",
+                )
+            sku_confirmed = st.checkbox(
+                "I confirm these SKUs were verified from an authoritative source and are not shown in this PDF.",
+                key=f"mr_combined_sku_confirm_{key}",
             )
-        confirmed = st.checkbox(
-            "I confirm these candidate SKUs were verified from an authoritative source and are not shown in this PDF.",
-            key=f"mr_resolved_sku_confirm_{key}",
-        )
+        submitted: dict[str, str] = {}
+        if PROMOTION_SUBTOTAL in capabilities:
+            st.write("**Promotion subtotal**")
+            for group in groups:
+                st.caption(f"Promotion: {group.label}")
+                st.caption(
+                    "Products: "
+                    + ", ".join(
+                        f"{name} (Qty {quantity})"
+                        for name, quantity in zip(group.member_names, group.member_quantities)
+                    )
+                )
+                st.caption(f"Source subtotal: {f'RM{group.source_group_total}' if group.source_group_total else 'Not extracted'}")
+                st.caption(f"Source-visible promotion amount: {f'RM{group.advertised_amount}' if group.advertised_amount else 'Visible in the original Invoice'}")
+                submitted[group.group_id] = st.text_input(
+                    "Promotion Subtotal",
+                    value=saved.get(group.group_id, ""),
+                    key=f"mr_combined_promo_{key}_{group.group_id}",
+                )
+            promotion_confirmed = st.checkbox(
+                "I confirmed this subtotal from the original Invoice.",
+                key=f"mr_combined_promo_confirm_{key}",
+            )
         if st.form_submit_button("Apply & Revalidate", type="primary"):
             _apply_manual_resolution(
                 key,
-                {"source_confirmed": confirmed, "resolved_seller_skus": candidates},
+                {
+                    "sku_source_confirmed": sku_confirmed,
+                    "resolved_seller_skus": candidates,
+                    "promotion_source_confirmed": promotion_confirmed,
+                    "promotion_subtotals": submitted,
+                },
             )
 
 

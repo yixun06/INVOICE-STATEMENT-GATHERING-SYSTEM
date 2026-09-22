@@ -16,6 +16,7 @@ from src.invoice_app.services.manual_review_resolution import (
     promotion_subtotal_resolution_eligibility,
     promotion_subtotal_groups,
     remove_draft_product,
+    resolution_capabilities,
     resolution_plan,
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
@@ -613,6 +614,64 @@ def test_label_visible_missing_subtotal_reruns_full_revalidation():
     )
 
 
+def test_missing_sku_and_promotion_subtotal_are_applied_in_one_full_revalidation():
+    review = _promotion_review(source_status="absent")
+    review["reason_code"] = SKU_RESOLUTION_REQUIRED
+    review["reason"] = "Seller SKU Resolution Required."
+    review["product_payloads"][0].update({"seller_sku": "", "sku_missing_in_source": True})
+    assert set(resolution_capabilities(review)) == {"SKU_RESOLUTION", "PROMOTION_SUBTOTAL"}
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=resolution_plan(review).key,
+        values={
+            "sku_source_confirmed": True,
+            "resolved_seller_skus": {"0": "SKU-1"},
+            "promotion_source_confirmed": True,
+            "promotion_subtotals": {"source-group-1": "20.00"},
+        },
+        price_master=_promotion_master(),
+    )
+
+    assert outcome.resolved is True
+    assert state["products"][0]["seller_sku"] == ""
+    assert state["products"][0]["resolved_seller_sku"] == "SKU-1"
+    assert str(state["products"][0]["source_group_total"]) == "20.00"
+
+
+def test_combined_resolution_rejects_invalid_sku_or_wrong_source_subtotal():
+    review = _promotion_review(source_status="absent")
+    review["reason_code"] = SKU_RESOLUTION_REQUIRED
+    review["reason"] = "Seller SKU Resolution Required."
+    review["product_payloads"][0].update({"seller_sku": "", "sku_missing_in_source": True})
+    key = resolution_plan(review).key
+    base = {
+        "sku_source_confirmed": True,
+        "promotion_source_confirmed": True,
+    }
+
+    wrong_subtotal_state = {"orders": [], "products": [], "reviews": [review]}
+    wrong_subtotal = apply_resolution(
+        wrong_subtotal_state,
+        key=key,
+        values={**base, "resolved_seller_skus": {"0": "SKU-1"}, "promotion_subtotals": {"source-group-1": "16.00"}},
+        price_master=_promotion_master(),
+    )
+    assert wrong_subtotal.resolved is False
+    assert wrong_subtotal_state["reviews"] == [review]
+
+    invalid_sku_state = {"orders": [], "products": [], "reviews": [review]}
+    invalid_sku = apply_resolution(
+        invalid_sku_state,
+        key=key,
+        values={**base, "resolved_seller_skus": {"0": "UNKNOWN"}, "promotion_subtotals": {"source-group-1": "20.00"}},
+        price_master=_promotion_master(),
+    )
+    assert invalid_sku.resolved is False
+    assert invalid_sku_state["reviews"] == [review]
+
+
 def test_other_ambiguous_promotion_group_keeps_review_after_valid_subtotal_entry():
     review = _promotion_review(source_status="absent")
     ambiguous = dict(review["product_payloads"][0])
@@ -747,6 +806,42 @@ def test_fixable_promotion_routes_to_online_resolution_tab_with_source_evidence(
         checkbox.label == "I confirmed this subtotal from the original Invoice."
         for checkbox in app.checkbox
     )
+
+
+def _combined_manual_review_routing_app():
+    import streamlit as st
+
+    from src.invoice_app.ui import data_import
+
+    review = {
+        "batch_id": "batch", "source_pdf": "combined.pdf", "platform": "Shopee",
+        "order_id": "COMBINED", "status": "Manual Review",
+        "reason_code": "SKU_RESOLUTION_REQUIRED", "reason": "Seller SKU Resolution Required.",
+        "order_payload": {"order_id": "COMBINED"},
+        "product_payloads": [{
+            "product_name": "First", "seller_sku": "", "sku_missing_in_source": True,
+            "quantity": 1, "promotion_group_id": "group-1",
+            "promotion_label": "Any 1 at RM20.00", "promotion_advertised_amount": "20.00",
+            "promotion_target_qty": 1, "_promotion_boundary_status": "reliable",
+            "_promotion_member_ownership_status": "reliable",
+            "_promotion_subtotal_source_status": "absent",
+        }],
+    }
+    st.session_state.setdefault("batch_id", "batch")
+    st.session_state.setdefault("orders", [])
+    st.session_state.setdefault("products", [])
+    st.session_state.setdefault("reviews", [review])
+    data_import._render_manual_review_resolution()
+
+
+def test_combined_missing_sku_and_promotion_controls_share_one_apply_action():
+    app = AppTest.from_function(_combined_manual_review_routing_app)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert {field.label for field in app.text_input} >= {"Resolved Seller SKU", "Promotion Subtotal"}
+    assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 1
 
 
 def test_case_one_source_visible_subtotal_reruns_full_revalidation():

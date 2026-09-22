@@ -51,8 +51,35 @@ _ITEM_RETURN_REFUND_PREFIX = re.compile(
 
 def parse_positioned_products(document: PdfDocument) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    continuation_columns: _Columns | None = None
     for page in document.pages:
-        items.extend(_parse_positioned_page(page))
+        rows = _group_words_into_rows(page.words)
+        header_indexes = [index for index, row in enumerate(rows) if _is_product_header(row.text)]
+        if header_indexes:
+            items.extend(_parse_positioned_page(page))
+            last_header = header_indexes[-1]
+            continuation_columns = _columns_from_header(rows[last_header])
+            if any(_is_stop_line(row.text) for row in rows[last_header + 1 :]):
+                continuation_columns = None
+            continue
+        if continuation_columns is None:
+            continue
+
+        section_end = next(
+            (index for index, row in enumerate(rows) if _is_stop_line(row.text)),
+            len(rows),
+        )
+        items.extend(
+            _parse_positioned_section(
+                rows[:section_end],
+                continuation_columns,
+                page_number=page.number,
+                horizontal_rules=page.horizontal_rules,
+                promotion_group_id=_promotion_group_id(page.number, 1),
+            )
+        )
+        if section_end < len(rows):
+            continuation_columns = None
     return _join_page_continuation_items(items)
 
 
@@ -157,18 +184,22 @@ def reconcile_product_candidates(
     if not text_items:
         return positioned
 
-    text_by_sku = {
-        str(item.get("seller_sku", "")).strip(): item
-        for item in text_items
-        if str(item.get("seller_sku", "")).strip()
-    }
     result: list[dict[str, Any]] = []
     seen_skus: set[str] = set()
 
     for item in positioned:
         merged = dict(item)
         sku = str(merged.get("seller_sku", "")).strip()
-        fallback = text_by_sku.get(sku)
+        fallback = next(
+            (
+                candidate
+                for candidate in text_items
+                if _text_sku_belongs_to_positioned_sku(
+                    str(candidate.get("seller_sku", "")).strip(), sku
+                )
+            ),
+            None,
+        )
         if fallback:
             # Text flow has no column ownership, so it may interleave page chrome
             # or adjacent numeric columns with an otherwise valid SKU block.
@@ -197,10 +228,26 @@ def reconcile_product_candidates(
 
     for item in text_items:
         sku = str(item.get("seller_sku", "")).strip()
-        if sku and sku not in seen_skus and _has_product_anchor(item):
+        already_positioned = any(
+            _text_sku_belongs_to_positioned_sku(sku, positioned_sku)
+            for positioned_sku in seen_skus
+        )
+        if sku and not already_positioned and _has_product_anchor(item):
             result.append(item)
 
     return result
+
+
+def _text_sku_belongs_to_positioned_sku(text_sku: str, positioned_sku: str) -> bool:
+    """Match text-flow SKU tails only when coordinates already own the exact SKU."""
+    if not text_sku or not positioned_sku:
+        return False
+    if text_sku == positioned_sku:
+        return True
+    if not text_sku.startswith(f"{positioned_sku} "):
+        return False
+    trailing = text_sku[len(positioned_sku) :].strip().split()
+    return bool(trailing) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", token) for token in trailing)
 
 
 def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
@@ -220,60 +267,15 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
                 section_end = index
                 break
 
-        sku_indexes = [
-            index
-            for index in range(header_index + 1, section_end)
-            if re.search(r"\bSKU\s*:", rows[index].text, flags=re.IGNORECASE)
-        ]
-        section_items: list[dict[str, Any]] = []
-        previous_sku = header_index
-        for sku_index in sku_indexes:
-            block = rows[previous_sku + 1 : sku_index + 1]
-            item = _parse_positioned_item_block(block, columns, page.horizontal_rules)
-            if item:
-                item["source_page"] = page.number
-                section_items.append(item)
-            previous_sku = sku_index
-
-        if not sku_indexes:
-            section_items = _parse_positioned_items_without_sku(
+        items.extend(
+            _parse_positioned_section(
                 rows[header_index + 1 : section_end],
                 columns,
-                page.number,
+                page_number=page.number,
+                horizontal_rules=page.horizontal_rules,
+                promotion_group_id=_promotion_group_id(page.number, header_position + 1),
             )
-        else:
-            metric_items = _parse_positioned_items_without_sku(
-                rows[header_index + 1 : section_end],
-                columns,
-                page.number,
-            )
-            by_metric_top = {
-                item["metric_top"]: item
-                for item in metric_items
-                if item.get("metric_top") is not None
-            }
-            anchored_metric_tops = {
-                item["metric_top"]
-                for item in section_items
-                if item.get("metric_top") is not None
-            }
-            for item in section_items:
-                candidate = by_metric_top.get(item.get("metric_top"))
-                if candidate is not None and candidate.get("product_name"):
-                    item["product_name"] = candidate["product_name"]
-            section_items.extend(
-                item
-                for item in metric_items
-                if item.get("metric_top") not in anchored_metric_tops
-                and _is_reliable_source_missing_sku_item(item)
-            )
-            section_items.sort(key=lambda item: float(item.get("metric_top") or 0))
-
-        _apply_group_promotion(
-            section_items,
-            promotion_group_id=_promotion_group_id(page.number, header_position + 1),
         )
-        items.extend(section_items)
 
     return items
 
@@ -352,11 +354,7 @@ def _parse_positioned_item_block(
         if _promotion_details(row.text) is not None:
             promotion = row.text
             continue
-        product_words = [
-            word
-            for word in row.words
-            if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
-        ]
+        product_words = _positioned_product_words(row, columns)
         candidate = normalize_whitespace(" ".join(word.text for word in product_words))
         if not candidate or _is_product_noise(candidate):
             continue
@@ -589,11 +587,7 @@ def _parse_positioned_items_without_sku(
         source_return_refund_errors: list[str] = []
         variation = ""
         for candidate_row in rows[previous_metric + 1 : metric_index + 1]:
-            product_words = [
-                word
-                for word in candidate_row.words
-                if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
-            ]
+            product_words = _positioned_product_words(candidate_row, columns)
             candidate = normalize_whitespace(" ".join(word.text for word in product_words))
             if not candidate or _is_product_noise(candidate):
                 continue
@@ -643,6 +637,59 @@ def _parse_positioned_items_without_sku(
     return items
 
 
+def _parse_positioned_section(
+    rows: list[_Row],
+    columns: _Columns,
+    *,
+    page_number: int,
+    horizontal_rules: tuple[PdfHorizontalRule, ...],
+    promotion_group_id: str,
+) -> list[dict[str, Any]]:
+    """Parse one coordinate-owned product section, including a continued page."""
+    sku_indexes = [
+        index for index, row in enumerate(rows)
+        if re.search(r"\bSKU\s*:", row.text, flags=re.IGNORECASE)
+    ]
+    section_items: list[dict[str, Any]] = []
+    previous_sku = -1
+    for sku_index in sku_indexes:
+        block = rows[previous_sku + 1 : sku_index + 1]
+        item = _parse_positioned_item_block(block, columns, horizontal_rules)
+        if item:
+            item["source_page"] = page_number
+            section_items.append(item)
+        previous_sku = sku_index
+
+    metric_items = _parse_positioned_items_without_sku(rows, columns, page_number)
+    if not sku_indexes:
+        section_items = metric_items
+    else:
+        by_metric_top = {
+            item["metric_top"]: item
+            for item in metric_items
+            if item.get("metric_top") is not None
+        }
+        anchored_metric_tops = {
+            item["metric_top"]
+            for item in section_items
+            if item.get("metric_top") is not None
+        }
+        for item in section_items:
+            candidate = by_metric_top.get(item.get("metric_top"))
+            if candidate is not None and candidate.get("product_name"):
+                item["product_name"] = candidate["product_name"]
+        section_items.extend(
+            item
+            for item in metric_items
+            if item.get("metric_top") not in anchored_metric_tops
+            and _is_reliable_source_missing_sku_item(item)
+        )
+        section_items.sort(key=lambda item: float(item.get("metric_top") or 0))
+
+    _apply_group_promotion(section_items, promotion_group_id=promotion_group_id)
+    return section_items
+
+
 def _variation_after_metric_row(
     rows: list[_Row],
     metric_index: int,
@@ -652,11 +699,7 @@ def _variation_after_metric_row(
     for row in rows[metric_index + 1 :]:
         if _metrics_from_positioned_row(row, columns) is not None:
             break
-        product_words = [
-            word
-            for word in row.words
-            if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
-        ]
+        product_words = _positioned_product_words(row, columns)
         candidate = normalize_whitespace(" ".join(word.text for word in product_words))
         if not candidate or _is_product_noise(candidate):
             continue
@@ -1189,6 +1232,26 @@ def _extract_positioned_sku_value(row: _Row, columns: _Columns) -> str:
         if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
     ))
     return _extract_sku_value(product_column_text)
+
+
+def _positioned_product_words(row: _Row, columns: _Columns) -> list[PdfWord]:
+    """Exclude repeated full-width page chrome from the product column."""
+    has_left_outside_table = any(word.x1 < columns.product_left - 2 for word in row.words)
+    has_far_right_outside_table = any(
+        word.x0 > columns.quantity_subtotal_boundary + 35 for word in row.words
+    )
+    if (
+        has_left_outside_table
+        and has_far_right_outside_table
+        and _metrics_from_positioned_row(row, columns) is None
+        and _promotion_details(row.text) is None
+    ):
+        return []
+    return [
+        word
+        for word in row.words
+        if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
+    ]
 
 
 def _extract_sku_value(value: str, *, trim_trailing_money: bool = False) -> str:
