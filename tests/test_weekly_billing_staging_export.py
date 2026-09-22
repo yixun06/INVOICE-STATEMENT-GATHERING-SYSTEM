@@ -23,6 +23,7 @@ from src.invoice_app.services.weekly_billing_export import (
 from src.invoice_app.services.weekly_billing_staging import (
     STAGING_DATA_HEADERS,
     StagingDataError,
+    _aggregate_staging_rows,
     build_staging_data_rows,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMasterRecord
@@ -212,6 +213,103 @@ def test_staging_mapper_is_one_to_one_and_conserves_golden_quantity():
     assert rows[1].usoft_product_description == "N/A"
     assert rows[2].usoft_product_description == "USOFT Identity Product"
     assert rows[3].usoft_product_description == "USOFT Product 4"
+
+
+def test_staging_aggregates_same_nav_and_exact_decimal_price_in_first_occurrence_order():
+    source = _summary().product_rows[2]
+    product_rows = (
+        replace(source, number=1, nav="NAV-A", unit_price=Decimal("12.90"), quantity=9),
+        replace(source, number=2, nav="NAV-B", unit_price=Decimal("5.00"), quantity=3),
+        replace(source, number=3, nav="NAV-A", unit_price=Decimal("12.90"), quantity=2),
+        replace(source, number=4, nav="NAV-A", unit_price=Decimal("12.900"), quantity=4),
+    )
+    summary = replace(_summary(), product_rows=product_rows, total_quantity=18)
+
+    rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
+
+    assert [(row.nav, row.unit_price_rsp_excl_gst, row.quantity) for row in rows] == [
+        ("NAV-A", Decimal("12.90"), 15),
+        ("NAV-B", Decimal("5.00"), 3),
+    ]
+
+
+def test_staging_keeps_same_nav_in_distinct_exact_price_buckets():
+    source = _summary().product_rows[2]
+    product_rows = tuple(
+        replace(source, number=index, nav="3000573", unit_price=price, quantity=quantity)
+        for index, price, quantity in (
+            (1, Decimal("39.90"), 1),
+            (2, Decimal("36.00"), 11),
+            (3, Decimal("7.20"), 7),
+        )
+    )
+    summary = replace(_summary(), product_rows=product_rows, total_quantity=19)
+
+    rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
+
+    assert [(row.unit_price_rsp_excl_gst, row.quantity) for row in rows] == [
+        (Decimal("39.90"), 1),
+        (Decimal("36.00"), 11),
+        (Decimal("7.20"), 7),
+    ]
+
+
+def test_staging_does_not_merge_different_nav_or_unproven_placeholder_rows():
+    source = _summary().product_rows[2]
+    product_rows = (
+        replace(source, number=1, nav="NAV-A", unit_price=Decimal("12.90"), quantity=2),
+        replace(source, number=2, nav="NAV-B", unit_price=Decimal("12.90"), quantity=3),
+        replace(source, number=3, nav="5000000", unit_price=Decimal("12.90"), quantity=4),
+        replace(source, number=4, nav="5000000", unit_price=Decimal("12.90"), quantity=5),
+    )
+    summary = replace(_summary(), product_rows=product_rows, total_quantity=14)
+
+    rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
+
+    assert [(row.nav, row.quantity) for row in rows] == [
+        ("NAV-A", 2), ("NAV-B", 3), ("5000000", 4), ("5000000", 5)
+    ]
+
+
+def test_staging_aggregation_rejects_conflicting_generated_metadata():
+    source = _summary().product_rows[2]
+    rows = build_staging_data_rows(
+        replace(_summary(), product_rows=(source,), total_quantity=source.quantity),
+        generation_date=GENERATION_DATE,
+    )
+
+    with pytest.raises(StagingDataError, match="NAV 000123.*customer"):
+        _aggregate_staging_rows((rows[0], replace(rows[0], customer="CONFLICT")))
+
+
+def test_export_aggregates_only_staging_and_preserves_product_and_financial_sheets():
+    source = _summary().product_rows[2]
+    product_rows = (
+        replace(source, number=1, nav="4007457", unit_price=Decimal("12.90"), quantity=9),
+        replace(source, number=2, nav="4007457", unit_price=Decimal("12.90"), quantity=2),
+    )
+    summary = replace(_summary(), product_rows=product_rows, total_quantity=11)
+    report = WeeklyBillingReport(summary, _report().financial_summary)
+
+    workbook = openpyxl.load_workbook(
+        BytesIO(export_weekly_billing_report(
+            report,
+            generation_date=GENERATION_DATE,
+            product_master_records=(),
+        )),
+        data_only=True,
+    )
+
+    assert [tuple(cell.value for cell in row) for row in workbook["Product Summary"].iter_rows(min_row=2)] == [
+        (1, "4007457", "Identity fallback row | Original", 9, None, 12.9, None, 0, 10),
+        (2, "4007457", "Identity fallback row | Original", 2, None, 12.9, None, 0, 10),
+    ]
+    assert workbook["Staging Data"].max_row == 2
+    assert workbook["Staging Data"].cell(2, 6).value == "4007457"
+    assert workbook["Staging Data"].cell(2, 8).value == 11
+    assert [tuple(cell.value for cell in row) for row in workbook["Financial Summary"].iter_rows(min_row=2)] == [
+        ("1. Total Revenue", 14767.32),
+    ]
 
 
 def test_staging_mapper_applies_exact_erp_constants_and_blank_outlet():

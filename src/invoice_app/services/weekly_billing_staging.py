@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import fields, replace
 from datetime import date
+from decimal import Decimal
 from typing import Sequence
 
 from src.invoice_app.domain.weekly_billing import (
@@ -67,18 +70,39 @@ def build_staging_data_rows(
     generation_date: date,
     product_master_records: Sequence[ProductPriceMasterRecord] = (),
 ) -> tuple[StagingDataRow, ...]:
-    """Map every finalized Product Summary row exactly once without regrouping."""
+    """Project finalized Product Summary rows into NAV + exact-price ERP buckets."""
 
     reference = _your_reference(summary)
     descriptions_by_nav = _usoft_descriptions_by_nav(product_master_records)
-    rows = tuple(
-        StagingDataRow(
+    source_rows = tuple(
+        _staging_row_for_product(
+            product,
+            reference=reference,
+            generation_date=generation_date,
+            descriptions_by_nav=descriptions_by_nav,
+        )
+        for product in summary.product_rows
+    )
+    rows = _aggregate_staging_rows(source_rows)
+    _validate_staging_rows(summary, rows)
+    return rows
+
+
+def _staging_row_for_product(
+    product,
+    *,
+    reference: str,
+    generation_date: date,
+    descriptions_by_nav: dict[str, str],
+) -> StagingDataRow:
+    nav = _normalized_nav(product.nav)
+    return StagingDataRow(
             your_reference=reference,
             posting_date=generation_date,
             sell_to_customer_no=SELL_TO_CUSTOMER_NO,
             currency_code=CURRENCY_CODE,
             item_type=ITEM_TYPE,
-            nav=str(product.nav),
+            nav=nav,
             location_code=LOCATION_CODE,
             quantity=product.quantity,
             unit_of_measure_code=UNIT_OF_MEASURE_CODE,
@@ -92,20 +116,54 @@ def build_staging_data_rows(
             transfer_to_code=None,
             customer_remark=None,
             customer=CUSTOMER,
-            usoft_code=str(product.nav),
-            usoft_product_description=_usoft_description(
-                str(product.nav), descriptions_by_nav
-            ),
+            usoft_code=nav,
+            usoft_product_description=_usoft_description(nav, descriptions_by_nav),
             plan_date=generation_date,
             am_pm=None,
             secondary_type=None,
             quantity_per_unit_of_measure=None,
             line_discount_percent=None,
         )
-        for product in summary.product_rows
-    )
-    _validate_staging_rows(summary, rows)
-    return rows
+
+
+def _aggregate_staging_rows(
+    source_rows: Sequence[StagingDataRow],
+) -> tuple[StagingDataRow, ...]:
+    """Aggregate exact NAV/Decimal-price buckets in first-occurrence order.
+
+    Placeholder NAV has no proven product identity, so every such source row is
+    deliberately retained as its own bucket even when its price matches.
+    """
+    buckets: OrderedDict[tuple[str, Decimal] | tuple[str, Decimal, int], StagingDataRow] = OrderedDict()
+    for index, row in enumerate(source_rows):
+        nav = row.nav.strip()
+        price = row.unit_price_rsp_excl_gst
+        key: tuple[str, Decimal] | tuple[str, Decimal, int]
+        key = (nav, price, index) if nav == PLACEHOLDER_NAV else (nav, price)
+        existing = buckets.get(key)
+        if existing is None:
+            buckets[key] = row
+            continue
+        conflicting_field = _conflicting_non_quantity_field(existing, row)
+        if conflicting_field is not None:
+            raise StagingDataError(
+                "Staging Data aggregation conflict for "
+                f"NAV {nav} at unit price {price}: {conflicting_field}."
+            )
+        buckets[key] = replace(existing, quantity=existing.quantity + row.quantity)
+    return tuple(buckets.values())
+
+
+def _conflicting_non_quantity_field(
+    first: StagingDataRow,
+    candidate: StagingDataRow,
+) -> str | None:
+    for field in fields(StagingDataRow):
+        if field.name == "quantity":
+            continue
+        if getattr(first, field.name) != getattr(candidate, field.name):
+            return field.name
+    return None
 
 
 def _your_reference(summary: WeeklyBillingSummary) -> str:
@@ -162,14 +220,43 @@ def _validate_staging_rows(
     summary: WeeklyBillingSummary,
     rows: tuple[StagingDataRow, ...],
 ) -> None:
-    if len(rows) != len(summary.product_rows):
-        raise StagingDataError("Staging Data row-count control failed.")
-    for product, staging in zip(summary.product_rows, rows, strict=True):
-        if staging.nav != str(product.nav):
-            raise StagingDataError("Staging Data No. control failed.")
-        if staging.quantity != product.quantity:
-            raise StagingDataError("Staging Data Quantity row control failed.")
-        if staging.unit_price_rsp_excl_gst != product.unit_price:
+    expected = _expected_staging_buckets(summary)
+    if len(rows) != len(expected):
+        raise StagingDataError("Staging Data aggregation row-count control failed.")
+    for (key, expected_quantity), staging in zip(expected, rows, strict=True):
+        nav, price = key[:2]
+        if staging.nav != nav:
+            raise StagingDataError("Staging Data No. aggregation key control failed.")
+        if staging.quantity != expected_quantity:
+            raise StagingDataError("Staging Data Quantity aggregation control failed.")
+        if staging.unit_price_rsp_excl_gst != price:
             raise StagingDataError("Staging Data Unit Price row control failed.")
-    if sum(row.quantity for row in rows) != summary.total_quantity:
+    source_total_quantity = sum(product.quantity for product in summary.product_rows)
+    if source_total_quantity != summary.total_quantity:
+        raise StagingDataError("Product Summary Quantity total control failed.")
+    if sum(row.quantity for row in rows) != source_total_quantity:
         raise StagingDataError("Staging Data Quantity total control failed.")
+    keys = [
+        (row.nav, row.unit_price_rsp_excl_gst)
+        for row in rows
+        if row.nav != PLACEHOLDER_NAV
+    ]
+    if len(keys) != len(set(keys)):
+        raise StagingDataError("Staging Data duplicate NAV and Unit Price control failed.")
+
+
+def _expected_staging_buckets(
+    summary: WeeklyBillingSummary,
+) -> tuple[tuple[tuple[str, Decimal] | tuple[str, Decimal, int], int], ...]:
+    buckets: OrderedDict[tuple[str, Decimal] | tuple[str, Decimal, int], int] = OrderedDict()
+    for index, product in enumerate(summary.product_rows):
+        nav = _normalized_nav(product.nav)
+        price = product.unit_price
+        key: tuple[str, Decimal] | tuple[str, Decimal, int]
+        key = (nav, price, index) if nav == PLACEHOLDER_NAV else (nav, price)
+        buckets[key] = buckets.get(key, 0) + product.quantity
+    return tuple(buckets.items())
+
+
+def _normalized_nav(value: object) -> str:
+    return str(value or "").strip()
