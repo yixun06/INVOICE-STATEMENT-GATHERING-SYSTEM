@@ -1829,13 +1829,54 @@ def _render_promotion_subtotal_form(key: str, review: dict[str, Any]) -> None:
     if not groups:
         st.info("Promotion evidence is ambiguous or the subtotal is absent from the source, so it cannot be safely corrected here.")
         return
-    labels = [f"{group.label} · {', '.join(group.member_names)}" for group in groups]
+    saved = draft_promotion_subtotals(st.session_state, review)
     with st.form(f"promotion_subtotal_{key}", border=False):
-        selected = st.selectbox("Promotion group", range(len(groups)), format_func=lambda value: labels[value], key=f"mr_promo_subtotal_group_{key}")
-        subtotal = st.text_input("Promotion Subtotal", key=f"mr_promo_subtotal_{key}")
-        confirmed = st.checkbox("I verified this subtotal is visibly printed in the original Invoice source", key=f"mr_promo_subtotal_confirm_{key}")
+        submitted: dict[str, str] = {}
+        for group in groups:
+            st.write("**Promotion subtotal missing**")
+            st.caption(f"Promotion: {group.label}")
+            st.caption(
+                "Products: "
+                + ", ".join(
+                    f"{name} (Qty {quantity})"
+                    for name, quantity in zip(
+                        group.member_names, group.member_quantities
+                    )
+                )
+            )
+            st.caption(
+                "Source subtotal: "
+                + (
+                    f"RM{group.source_group_total}"
+                    if group.source_group_total
+                    else "Not extracted"
+                )
+            )
+            st.caption(
+                "Source-visible promotion amount: "
+                + (
+                    f"RM{group.advertised_amount}"
+                    if group.advertised_amount
+                    else "Visible in the original Invoice"
+                )
+            )
+            submitted[group.group_id] = st.text_input(
+                "Promotion Subtotal",
+                value=saved.get(group.group_id, ""),
+                key=f"mr_promo_subtotal_{key}_{group.group_id}",
+            )
+        confirmed = st.checkbox(
+            "I confirmed this subtotal from the original Invoice.",
+            key=f"mr_promo_subtotal_confirm_{key}",
+        )
         if st.form_submit_button("Apply & Revalidate", type="primary"):
-            _apply_manual_resolution(key, {"source_confirmed": confirmed, "promotion_group_id": groups[selected].group_id, "source_group_total": subtotal})
+            _apply_manual_resolution(
+                key,
+                {
+                    "source_confirmed": confirmed,
+                    "promotion_subtotals": submitted,
+                },
+            )
 
 
 def _render_income_form(key: str, review: dict[str, Any]) -> None:

@@ -1,3 +1,5 @@
+from streamlit.testing.v1 import AppTest
+
 from src.invoice_app.services.manual_review_resolution import (
     CORRECTION_DRAFTS_KEY,
     MISSING_INCOME,
@@ -11,6 +13,7 @@ from src.invoice_app.services.manual_review_resolution import (
     draft_summary,
     edit_draft_product,
     promotion_group_options,
+    promotion_subtotal_resolution_eligibility,
     promotion_subtotal_groups,
     remove_draft_product,
     resolution_plan,
@@ -426,7 +429,13 @@ def test_missing_source_sku_uses_deterministic_name_variation_match_and_conflict
     assert conflict_state["reviews"] == [conflict_review]
 
 
-def _promotion_review(*, source_status="visible_unresolved", reliable=True, complete=False):
+def _promotion_review(
+    *,
+    source_status="visible_unresolved",
+    reliable=True,
+    complete=False,
+    advertised_amount="20.00",
+):
     review = _review()
     review["reason_code"] = "INCOMPLETE_PROMOTION_EVIDENCE"
     review["reason"] = "INCOMPLETE_PROMOTION_EVIDENCE: subtotal needs review."
@@ -434,7 +443,7 @@ def _promotion_review(*, source_status="visible_unresolved", reliable=True, comp
     member.update({
         "promotion_group_id": "source-group-1",
         "promotion_label": "Any 2 at RM20.00",
-        "promotion_advertised_amount": "20.00",
+        "promotion_advertised_amount": advertised_amount,
         "promotion_target_qty": 2,
         "promotion_member_qty": 1,
         "_promotion_boundary_status": "reliable" if reliable else "ambiguous",
@@ -531,14 +540,213 @@ def test_product_count_draft_can_include_safe_case_one_subtotal_before_one_apply
     assert {str(product["source_group_total"]) for product in state["products"]} == {"20.00"}
 
 
-def test_ambiguous_group_and_source_absent_subtotal_are_not_resolvable():
+def test_ambiguous_group_remains_unresolvable_but_label_amount_can_confirm_missing_subtotal():
     ambiguous = _promotion_review(reliable=False)
     absent = _promotion_review(source_status="absent")
     assert promotion_group_options(ambiguous) == ()
     assert promotion_subtotal_groups(ambiguous) == ()
     assert resolution_plan(ambiguous) is None
-    assert promotion_subtotal_groups(absent) == ()
-    assert resolution_plan(absent) is None
+    assert promotion_subtotal_groups(absent)[0].advertised_amount == "20.00"
+    assert resolution_plan(absent).issue_type == PROMOTION_SUBTOTAL
+
+
+def test_missing_anchors_ambiguous_ownership_and_no_source_amount_fail_closed():
+    missing_anchors = _promotion_review(source_status="absent")
+    missing_anchors["product_payloads"] = []
+    ambiguous_members = _promotion_review(source_status="absent")
+    ambiguous_members["product_payloads"][0][
+        "_promotion_member_ownership_status"
+    ] = "ambiguous"
+    no_source_amount = _promotion_review(
+        source_status="absent", advertised_amount=None
+    )
+
+    for review in (missing_anchors, ambiguous_members, no_source_amount):
+        eligibility = promotion_subtotal_resolution_eligibility(review)
+        assert eligibility.eligible is False
+        assert promotion_subtotal_groups(review) == ()
+        assert resolution_plan(review) is None
+
+
+def test_source_visible_advertised_amount_requires_exact_user_confirmation():
+    review = _promotion_review(source_status="absent")
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    rejected = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "promotion_group_id": "source-group-1",
+            "source_group_total": "16.00",
+        },
+        price_master=_promotion_master(),
+    )
+
+    assert rejected.resolved is False
+    assert rejected.reason == (
+        "Promotion Subtotal must match the source-visible amount RM20.00."
+    )
+    assert state["reviews"] == [review]
+
+
+def test_label_visible_missing_subtotal_reruns_full_revalidation():
+    review = _promotion_review(source_status="absent")
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "promotion_subtotals": {"source-group-1": "20.00"},
+        },
+        price_master=_promotion_master(),
+    )
+
+    assert outcome.resolved is True
+    assert state["reviews"] == []
+    assert state["products"][0]["_promotion_subtotal_resolution"] == (
+        "source_confirmed_manual"
+    )
+
+
+def test_other_ambiguous_promotion_group_keeps_review_after_valid_subtotal_entry():
+    review = _promotion_review(source_status="absent")
+    ambiguous = dict(review["product_payloads"][0])
+    ambiguous.update(
+        {
+            "promotion_group_id": "source-group-2",
+            "promotion_label": "Any 2 enjoy 10% off",
+            "promotion_advertised_amount": None,
+            "source_group_total": "20.00",
+            "promotion_group_total": "20.00",
+            "_promotion_member_ownership_status": "ambiguous",
+            "_promotion_subtotal_source_status": "resolved",
+            "promotion_metadata_status": "incomplete",
+            "promotion_incomplete_reason": "Promotion member ownership is ambiguous.",
+        }
+    )
+    review["product_payloads"].append(ambiguous)
+    review["order_payload"].update(
+        {"merchandise_subtotal": "40.00", "product_price": "40.00"}
+    )
+    eligibility = promotion_subtotal_resolution_eligibility(review)
+    assert [group.group_id for group in eligibility.groups] == ["source-group-1"]
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=resolution_plan(review).key,
+        values={
+            "source_confirmed": True,
+            "promotion_subtotals": {"source-group-1": "20.00"},
+        },
+        price_master=_promotion_master(),
+    )
+
+    assert outcome.resolved is False
+    assert "INCOMPLETE_PROMOTION_EVIDENCE" in outcome.reason
+    assert state["reviews"] == [review]
+
+
+def test_future_order_with_same_structured_evidence_is_not_id_hardcoded():
+    review = _promotion_review(source_status="absent")
+    review["order_id"] = "FUTURE-ORDER-999"
+    review["source_pdf"] = "future-source.pdf"
+    review["order_payload"].update(
+        {"order_id": "FUTURE-ORDER-999", "source_pdf": "future-source.pdf"}
+    )
+    for product in review["product_payloads"]:
+        product.update(
+            {"order_id": "FUTURE-ORDER-999", "source_pdf": "future-source.pdf"}
+        )
+
+    plan = resolution_plan(review)
+
+    assert plan is not None
+    assert plan.issue_type == PROMOTION_SUBTOTAL
+
+
+def _promotion_manual_review_routing_app():
+    from copy import deepcopy
+
+    import streamlit as st
+
+    from src.invoice_app.ui import data_import
+
+    eligible = {
+        "batch_id": "batch",
+        "source_pdf": "eligible.pdf",
+        "platform": "Shopee",
+        "order_id": "ELIGIBLE",
+        "status": "Manual Review",
+        "reason_code": "INCOMPLETE_PROMOTION_EVIDENCE",
+        "reason": "INCOMPLETE_PROMOTION_EVIDENCE: subtotal missing.",
+        "order_payload": {"order_id": "ELIGIBLE"},
+        "product_payloads": [
+            {
+                "product_name": "Product A",
+                "seller_sku": "SKU-A",
+                "quantity": 1,
+                "promotion_group_id": "group-1",
+                "promotion_label": "Any 2 at RM20.00",
+                "promotion_advertised_amount": "20.00",
+                "promotion_target_qty": 2,
+                "_promotion_boundary_status": "reliable",
+                "_promotion_member_ownership_status": "reliable",
+                "_promotion_subtotal_source_status": "absent",
+            },
+            {
+                "product_name": "Product B",
+                "seller_sku": "SKU-B",
+                "quantity": 1,
+                "promotion_group_id": "group-1",
+                "promotion_label": "Any 2 at RM20.00",
+                "promotion_advertised_amount": "20.00",
+                "promotion_target_qty": 2,
+                "_promotion_boundary_status": "reliable",
+                "_promotion_member_ownership_status": "reliable",
+                "_promotion_subtotal_source_status": "absent",
+            },
+        ],
+    }
+    unfixable = deepcopy(eligible)
+    unfixable.update(
+        {
+            "source_pdf": "unfixable.pdf",
+            "order_id": "UNFIXABLE",
+        }
+    )
+    unfixable["product_payloads"][0]["promotion_advertised_amount"] = None
+    unfixable["product_payloads"][1]["promotion_advertised_amount"] = None
+    st.session_state.setdefault("batch_id", "batch")
+    st.session_state.setdefault("orders", [])
+    st.session_state.setdefault("products", [])
+    st.session_state.setdefault("reviews", [eligible, unfixable])
+    data_import._render_manual_review_resolution()
+
+
+def test_fixable_promotion_routes_to_online_resolution_tab_with_source_evidence():
+    app = AppTest.from_function(_promotion_manual_review_routing_app)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert {tab.label for tab in app.tabs} == {
+        "⚠️ Requires Re-upload (1)",
+        "📝 Online Resolution (1)",
+    }
+    captions = {caption.value for caption in app.caption}
+    assert "Promotion: Any 2 at RM20.00" in captions
+    assert "Source subtotal: Not extracted" in captions
+    assert "Source-visible promotion amount: RM20.00" in captions
+    assert any(
+        checkbox.label == "I confirmed this subtotal from the original Invoice."
+        for checkbox in app.checkbox
+    )
 
 
 def test_case_one_source_visible_subtotal_reruns_full_revalidation():

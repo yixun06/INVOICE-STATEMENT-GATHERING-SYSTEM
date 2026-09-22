@@ -54,10 +54,19 @@ class PromotionGroupOption:
     group_id: str
     label: str
     member_names: tuple[str, ...]
+    member_quantities: tuple[int, ...]
     source_group_total: str | None
     advertised_amount: str | None
     target_quantity: int | None
     subtotal_correction_allowed: bool = False
+
+
+@dataclass(frozen=True)
+class PromotionSubtotalResolutionEligibility:
+    eligible: bool
+    reason: str
+    groups: tuple[PromotionGroupOption, ...] = ()
+    missing_fields: tuple[str, ...] = ()
 
 def review_key(review: Mapping[str, Any]) -> str:
     raw = "|".join(str(review.get(name, "")) for name in ("source_pdf", "order_id", "reason", "timestamp"))
@@ -75,8 +84,10 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         return ResolutionPlan(review_key(review), FINAL_AMOUNT)
     if code == SKU_RESOLUTION_REQUIRED:
         return ResolutionPlan(review_key(review), SKU_RESOLUTION)
-    if code == INCOMPLETE_PROMOTION_EVIDENCE and promotion_subtotal_groups(review):
-        return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
+    if code == INCOMPLETE_PROMOTION_EVIDENCE:
+        eligibility = promotion_subtotal_resolution_eligibility(review)
+        if eligibility.eligible:
+            return ResolutionPlan(review_key(review), PROMOTION_SUBTOTAL)
     return None
 
 def synchronize_correction_drafts(state: MutableMapping[str, Any]) -> None:
@@ -202,11 +213,9 @@ def set_draft_promotion_subtotal(
         return ResolutionOutcome(False, "The selected Manual Review record is no longer in the current batch.")
     if not source_confirmed:
         return ResolutionOutcome(False, "Confirm that the subtotal is visible in the original Invoice source.")
-    if group_id not in {option.group_id for option in promotion_subtotal_groups(review)}:
-        return ResolutionOutcome(False, "This promotion group is not eligible for safe subtotal correction.")
-    subtotal = _source_money(value)
-    if subtotal is None:
-        return ResolutionOutcome(False, "Promotion Subtotal must be a source-visible numeric amount.")
+    subtotal, error = _validated_promotion_subtotal(review, group_id, value)
+    if error:
+        return ResolutionOutcome(False, error)
     _ensure_draft(state, review)["promotion_subtotals"][group_id] = subtotal
     return ResolutionOutcome(True, None)
 
@@ -215,8 +224,52 @@ def promotion_group_options(review: Mapping[str, Any]) -> tuple[PromotionGroupOp
     return _promotion_groups(review, subtotal_only=False)
 
 def promotion_subtotal_groups(review: Mapping[str, Any]) -> tuple[PromotionGroupOption, ...]:
-    """Return only Case 1 groups: reliable ownership and visible unresolved subtotal."""
-    return _promotion_groups(review, subtotal_only=True)
+    """Return only deterministic groups with a source-visible subtotal amount."""
+    return promotion_subtotal_resolution_eligibility(review).groups
+
+
+def promotion_subtotal_resolution_eligibility(
+    review: Mapping[str, Any],
+) -> PromotionSubtotalResolutionEligibility:
+    """Classify promotion-subtotal correction from structured source evidence.
+
+    A coordinate-visible unresolved subtotal keeps the established Case 1 path.
+    A missing subtotal is also eligible when the reliable promotion label carries
+    one exact advertised RM amount and every owned member remains deterministic.
+    The advertised amount is evidence for user confirmation, never an automatic
+    correction.
+    """
+    grouped = _grouped_promotion_members(review)
+    if not grouped:
+        return PromotionSubtotalResolutionEligibility(
+            False,
+            "No structured promotion container and members are available.",
+            missing_fields=("promotion_group_id", "promotion_members"),
+        )
+
+    options: list[PromotionGroupOption] = []
+    rejection_reasons: list[str] = []
+    missing_fields: set[str] = set()
+    for group_id, members in grouped.items():
+        option, reason, missing = _promotion_subtotal_option(group_id, members)
+        if option is not None:
+            options.append(option)
+        else:
+            rejection_reasons.append(reason)
+            missing_fields.update(missing)
+    if options:
+        return PromotionSubtotalResolutionEligibility(
+            True,
+            "Reliable promotion members and a source-visible subtotal amount are available.",
+            tuple(options),
+            ("source_group_total",),
+        )
+    return PromotionSubtotalResolutionEligibility(
+        False,
+        "; ".join(dict.fromkeys(rejection_reasons))
+        or "No promotion group is eligible for safe subtotal correction.",
+        missing_fields=tuple(sorted(missing_fields)),
+    )
 
 def apply_product_draft(state: MutableMapping[str, Any], *, key: str, price_master: ProductPriceMaster) -> ResolutionOutcome:
     review = _find_review(state, key)
@@ -281,13 +334,30 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
     elif plan.issue_type == PROMOTION_SUBTOTAL:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(False, "Confirm that the subtotal is visible in the original Invoice source.")
-        group_id = str(values.get("promotion_group_id") or "").strip()
-        if group_id not in {option.group_id for option in promotion_subtotal_groups(review)}:
-            return ResolutionOutcome(False, "This promotion group is not eligible for safe subtotal correction.")
-        subtotal = _source_money(values.get("source_group_total"))
-        if subtotal is None:
-            return ResolutionOutcome(False, "Promotion Subtotal must be a source-visible numeric amount.")
-        _apply_confirmed_promotion_subtotal(products, group_id, subtotal)
+        options = {option.group_id: option for option in promotion_subtotal_groups(review)}
+        submitted = values.get("promotion_subtotals")
+        if submitted is None:
+            submitted = {
+                str(values.get("promotion_group_id") or "").strip(): values.get(
+                    "source_group_total"
+                )
+            }
+        if not isinstance(submitted, Mapping):
+            return ResolutionOutcome(False, "Provide one source-visible subtotal for each eligible promotion group.")
+        normalized: dict[str, str] = {}
+        for group_id in options:
+            subtotal, error = _validated_promotion_subtotal(
+                review, group_id, submitted.get(group_id)
+            )
+            if error:
+                return ResolutionOutcome(False, error)
+            normalized[group_id] = subtotal
+        if set(submitted) - set(options):
+            return ResolutionOutcome(False, "A submitted promotion group is no longer eligible for safe subtotal correction.")
+        draft = _ensure_draft(state, review)
+        draft["promotion_subtotals"].update(normalized)
+        for group_id, subtotal in normalized.items():
+            _apply_confirmed_promotion_subtotal(products, group_id, subtotal)
     elif plan.issue_type == FINAL_AMOUNT:
         if values.get("source_confirmed") is not True:
             return ResolutionOutcome(False, "Confirm that this Final Amount is visible in the original Invoice source.")
@@ -404,21 +474,188 @@ def _missing_product(order: Mapping[str, Any], values: Mapping[str, Any], review
     return (product, None) if not errors else ({}, " ".join(errors))
 
 def _promotion_groups(review: Mapping[str, Any], *, subtotal_only: bool) -> tuple[PromotionGroupOption, ...]:
+    if subtotal_only:
+        return promotion_subtotal_resolution_eligibility(review).groups
+    grouped = _grouped_promotion_members(review)
+    options: list[PromotionGroupOption] = []
+    for group_id, members in grouped.items():
+        leading = members[0]
+        reliable = all(
+            member.get("_promotion_boundary_status") == "reliable"
+            and member.get("_promotion_member_ownership_status") == "reliable"
+            for member in members
+        )
+        complete = bool(str(leading.get("source_group_total") or "").strip()) and leading.get("promotion_metadata_status") != "incomplete"
+        case_one = reliable and leading.get("_promotion_subtotal_source_status") == "visible_unresolved"
+        if not reliable or not (complete or case_one):
+            continue
+        options.append(_promotion_group_option(group_id, members, case_one))
+    return tuple(options)
+
+
+def _grouped_promotion_members(
+    review: Mapping[str, Any],
+) -> dict[str, list[Mapping[str, Any]]]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for item in review.get("product_payloads") or []:
         group_id = str(item.get("promotion_group_id") or "").strip()
         if group_id:
             grouped.setdefault(group_id, []).append(item)
-    options: list[PromotionGroupOption] = []
-    for group_id, members in grouped.items():
-        leading = members[0]
-        reliable = leading.get("_promotion_boundary_status") == "reliable" and leading.get("_promotion_member_ownership_status") == "reliable"
-        complete = bool(str(leading.get("source_group_total") or "").strip()) and leading.get("promotion_metadata_status") != "incomplete"
-        case_one = reliable and leading.get("_promotion_subtotal_source_status") == "visible_unresolved"
-        if not reliable or (subtotal_only and not case_one) or (not subtotal_only and not (complete or case_one)):
-            continue
-        options.append(PromotionGroupOption(group_id, str(leading.get("promotion_label") or leading.get("promotion") or "Promotion"), tuple(str(member.get("product_name") or "Unnamed product") for member in members), str(leading.get("source_group_total")) if leading.get("source_group_total") not in (None, "") else None, str(leading.get("promotion_advertised_amount")) if leading.get("promotion_advertised_amount") not in (None, "") else None, int(leading.get("promotion_target_qty")) if leading.get("promotion_target_qty") not in (None, "") else None, case_one))
-    return tuple(options)
+    return grouped
+
+
+def _promotion_subtotal_option(
+    group_id: str,
+    members: list[Mapping[str, Any]],
+) -> tuple[PromotionGroupOption | None, str, tuple[str, ...]]:
+    missing: list[str] = []
+    if not members:
+        return None, "Promotion members are unavailable.", ("promotion_members",)
+    if not all(
+        member.get("_promotion_boundary_status") == "reliable"
+        for member in members
+    ):
+        missing.append("promotion_boundary")
+    if not all(
+        member.get("_promotion_member_ownership_status") == "reliable"
+        for member in members
+    ):
+        missing.append("promotion_member_ownership")
+
+    member_labels = tuple(
+        str(member.get("promotion_label") or member.get("promotion") or "").strip()
+        for member in members
+    )
+    labels = set(member_labels)
+    labels.discard("")
+    if len(labels) != 1 or any(not label for label in member_labels):
+        missing.append("promotion_label")
+
+    quantities = tuple(_positive_int(member.get("quantity")) for member in members)
+    if any(quantity is None for quantity in quantities) or any(
+        not str(member.get("product_name") or "").strip() for member in members
+    ):
+        missing.append("promotion_members")
+
+    member_targets = tuple(
+        _positive_int(member.get("promotion_target_qty")) for member in members
+    )
+    targets = set(member_targets)
+    targets.discard(None)
+    target = next(iter(targets)) if len(targets) == 1 else None
+    if target is None or any(member_target is None for member_target in member_targets):
+        missing.append("promotion_target_qty")
+
+    source_totals = {
+        _source_money(member.get("source_group_total"), optional=True)
+        for member in members
+    }
+    source_totals.discard("")
+    source_totals.discard(None)
+    if source_totals:
+        missing.append("source_group_total_not_missing")
+
+    statuses = {
+        str(member.get("_promotion_subtotal_source_status") or "").strip()
+        for member in members
+    }
+    member_advertised = tuple(
+        _source_money(member.get("promotion_advertised_amount"), optional=True)
+        for member in members
+    )
+    advertised = set(member_advertised)
+    advertised.discard("")
+    advertised.discard(None)
+    has_coordinate_visible_subtotal = statuses == {"visible_unresolved"}
+    has_label_visible_subtotal = (
+        statuses.issubset({"absent", "unusable"})
+        and bool(statuses)
+        and len(advertised) == 1
+        and all(value not in (None, "") for value in member_advertised)
+    )
+    if not has_coordinate_visible_subtotal and not has_label_visible_subtotal:
+        missing.append("source_visible_promotion_amount")
+
+    if missing:
+        return (
+            None,
+            f"Promotion group {group_id} lacks deterministic source evidence: "
+            + ", ".join(dict.fromkeys(missing))
+            + ".",
+            tuple(dict.fromkeys(missing)),
+        )
+    return (
+        _promotion_group_option(group_id, members, True),
+        "Eligible for source-confirmed promotion subtotal correction.",
+        ("source_group_total",),
+    )
+
+
+def _promotion_group_option(
+    group_id: str,
+    members: list[Mapping[str, Any]],
+    correction_allowed: bool,
+) -> PromotionGroupOption:
+    leading = members[0]
+    return PromotionGroupOption(
+        group_id=group_id,
+        label=str(
+            leading.get("promotion_label")
+            or leading.get("promotion")
+            or "Promotion"
+        ),
+        member_names=tuple(
+            str(member.get("product_name") or "Unnamed product") for member in members
+        ),
+        member_quantities=tuple(
+            int(member.get("quantity", 0) or 0) for member in members
+        ),
+        source_group_total=(
+            str(leading.get("source_group_total"))
+            if leading.get("source_group_total") not in (None, "")
+            else None
+        ),
+        advertised_amount=(
+            str(leading.get("promotion_advertised_amount"))
+            if leading.get("promotion_advertised_amount") not in (None, "")
+            else None
+        ),
+        target_quantity=(
+            int(leading.get("promotion_target_qty"))
+            if leading.get("promotion_target_qty") not in (None, "")
+            else None
+        ),
+        subtotal_correction_allowed=correction_allowed,
+    )
+
+
+def _validated_promotion_subtotal(
+    review: Mapping[str, Any], group_id: str, value: Any
+) -> tuple[str, str | None]:
+    options = {
+        option.group_id: option for option in promotion_subtotal_groups(review)
+    }
+    option = options.get(group_id)
+    if option is None:
+        return "", "This promotion group is not eligible for safe subtotal correction."
+    subtotal = _source_money(value)
+    if subtotal is None:
+        return "", "Promotion Subtotal must be a source-visible numeric amount."
+    advertised = _source_money(option.advertised_amount, optional=True)
+    if advertised not in (None, "") and Decimal(subtotal) != Decimal(advertised):
+        return (
+            "",
+            f"Promotion Subtotal must match the source-visible amount RM{advertised}.",
+        )
+    return subtotal, None
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 def _find_review(state: Mapping[str, Any], key: str) -> dict[str, Any] | None:
     return next((item for item in state.get("reviews", []) if is_manual_review_record(item) and review_key(item) == key), None)

@@ -58,6 +58,8 @@ def revalidate_shopee_invoice(
     """Run the complete post-correction validation chain without writing state."""
     prepared = [dict(product) for product in products]
     _refresh_promotion_membership_quantities(prepared)
+    if promotion_error := validate_shopee_promotion_evidence(prepared):
+        return _failed(prepared, promotion_error)
     working = resolve_promotion_group_totals(
         prepared,
         order.get("product_price"),
