@@ -159,3 +159,45 @@ def test_mixed_sku_rows_preserve_a_deterministic_source_missing_sku_item():
     ]
     assert items[1]["sku_missing_in_source"] is True
     assert [item["variation"] for item in items] == ["Original", "", "1 box"]
+
+
+def test_page_break_sku_continuation_is_not_a_second_product_row():
+    page_one = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("BG Veggie Chips Series Small Packet", 140, 295, 70),
+            _word("15.00", 340, 370, 70), _word("1", 405, 410, 70), _word("15.00", 455, 485, 70),
+            _word("Variation: Dried CornKernel 20g", 140, 285, 80),
+        ),
+    )
+    page_two = PdfPage(
+        number=2,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("Home My Orders Order Details", 35, 95, 20),
+            _word("zenxinorganicfood", 35, 95, 30),
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("SKU:", 140, 162, 70), _word("9551031010373", 165, 220, 70),
+        ),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 1 product", pages=(page_one, page_two)))
+
+    assert len(items) == 1
+    assert items[0]["seller_sku"] == "9551031010373"
+    assert items[0]["product_name"] == "BG Veggie Chips Series Small Packet"
+    assert items[0]["variation"] == "Dried CornKernel 20g"
+    assert items[0]["quantity"] == 1
+    assert items[0]["unit_price"] == Decimal("15.00")
+    assert items[0]["line_total"] == Decimal("15.00")
+    assert items[0]["evidence"] == "positioned-page-continuation"

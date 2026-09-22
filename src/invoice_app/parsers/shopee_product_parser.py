@@ -53,7 +53,64 @@ def parse_positioned_products(document: PdfDocument) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for page in document.pages:
         items.extend(_parse_positioned_page(page))
-    return items
+    return _join_page_continuation_items(items)
+
+
+def _join_page_continuation_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Join a SKU-only continuation to its preceding, measured product row.
+
+    A Seller Centre page break can fall between an item's metric row and its
+    ``SKU:`` line.  The next page repeats the product header, so page-local
+    parsing otherwise yields two records: a source-missing-SKU item on the
+    preceding page and a zero-metric SKU-only fragment on the next page.
+
+    This is deliberately narrower than count-based de-duplication.  A merge is
+    allowed only when the source layout proves that the latter fragment cannot
+    be a product of its own and is immediately adjacent across pages.
+    """
+    resolved: list[dict[str, Any]] = []
+    for item in items:
+        if resolved and _is_sku_only_page_continuation(item):
+            previous = resolved[-1]
+            if _is_measured_source_missing_sku_item(previous) and _is_next_page(previous, item):
+                merged = dict(previous)
+                merged["seller_sku"] = item["seller_sku"]
+                merged["sku_missing_in_source"] = False
+                merged["evidence"] = "positioned-page-continuation"
+                resolved[-1] = merged
+                continue
+        resolved.append(item)
+    return resolved
+
+
+def _is_measured_source_missing_sku_item(item: Mapping[str, Any]) -> bool:
+    return bool(
+        item.get("sku_missing_in_source")
+        and not str(item.get("seller_sku") or "").strip()
+        and item.get("metric_top") is not None
+        and str(item.get("product_name") or "").strip()
+        and int(item.get("quantity") or 0) > 0
+        and item.get("line_total") is not None
+    )
+
+
+def _is_sku_only_page_continuation(item: Mapping[str, Any]) -> bool:
+    return bool(
+        str(item.get("seller_sku") or "").strip()
+        and item.get("metric_top") is None
+        and not str(item.get("product_name") or "").strip()
+        and not str(item.get("variation") or "").strip()
+        and int(item.get("quantity") or 0) == 0
+        and item.get("unit_price") == Decimal("0")
+        and item.get("line_total") == Decimal("0")
+    )
+
+
+def _is_next_page(previous: Mapping[str, Any], continuation: Mapping[str, Any]) -> bool:
+    try:
+        return int(continuation.get("source_page")) == int(previous.get("source_page")) + 1
+    except (TypeError, ValueError):
+        return False
 
 
 def parse_text_products(text: str) -> list[dict[str, Any]]:
@@ -556,6 +613,11 @@ def _parse_positioned_items_without_sku(
                     name_parts.append(candidate)
 
         product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
+        variation = variation or _variation_after_metric_row(
+            rows,
+            metric_index,
+            columns,
+        )
         item = {
             "product_name": product_name,
             "seller_sku": "",
@@ -579,6 +641,31 @@ def _parse_positioned_items_without_sku(
         items.append(item)
         previous_metric = metric_index
     return items
+
+
+def _variation_after_metric_row(
+    rows: list[_Row],
+    metric_index: int,
+    columns: _Columns,
+) -> str:
+    """Return the immediately following source-owned Variation, if present."""
+    for row in rows[metric_index + 1 :]:
+        if _metrics_from_positioned_row(row, columns) is not None:
+            break
+        product_words = [
+            word
+            for word in row.words
+            if word.x0 >= columns.product_left - 2 and word.center_x < columns.unit_left
+        ]
+        candidate = normalize_whitespace(" ".join(word.text for word in product_words))
+        if not candidate or _is_product_noise(candidate):
+            continue
+        if candidate.lower().startswith("variation:"):
+            return candidate.split(":", 1)[1].strip()
+        # The next product's source text begins before a Variation line, so it
+        # cannot belong to the measured row above.
+        break
+    return ""
 
 
 def _is_reliable_source_missing_sku_item(item: Mapping[str, Any]) -> bool:

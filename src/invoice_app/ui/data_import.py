@@ -110,6 +110,7 @@ from ..services.manual_review_resolution import (
     promotion_group_options,
     promotion_subtotal_groups,
     remove_draft_product,
+    review_presentation_key,
     resolution_plan,
     set_financial_enrichment,
     set_draft_promotion_subtotal,
@@ -174,6 +175,11 @@ _INVOICE_UPLOAD_PRISTINE = "pristine"
 _INVOICE_UPLOAD_SELECTED = "selected"
 _INVOICE_UPLOAD_NEEDS_ATTENTION = "needs_attention"
 _INVOICE_UPLOAD_RESOLVED = "resolved"
+_MANUAL_REVIEW_ONLINE = "online_resolution"
+_MANUAL_REVIEW_REUPLOAD = "requires_reupload"
+_MANUAL_REVIEW_ACTIVE_SECTION = "manual_review_active_section"
+_MANUAL_REVIEW_ACTIVE_KEY = "manual_review_active_key"
+_MANUAL_REVIEW_TAB_WIDGET = "manual_review_tab_widget"
 def initialize_data_import_state() -> None:
     """Initialize presentation-only state once per Streamlit session."""
     st.session_state.setdefault("data_import_step", 1)
@@ -1421,6 +1427,12 @@ def _render_recovery_notice() -> None:
 def _render_manual_review_resolution() -> None:
     synchronize_correction_drafts(st.session_state)
     reviews = [item for item in st.session_state.get("reviews", []) if str(item.get("status", "")).strip() in {"", "Manual Review"}]
+    unfixable_reviews = [r for r in reviews if resolution_plan(r) is None]
+    fixable_reviews = [r for r in reviews if resolution_plan(r) is not None]
+    unfixable_reviews, fixable_reviews = _synchronize_manual_review_focus(
+        unfixable_reviews,
+        fixable_reviews,
+    )
     notice = st.session_state.pop("manual_resolution_notice", None)
     if notice:
         (st.success if notice.startswith("Correction applied") else st.warning)(notice)
@@ -1429,8 +1441,6 @@ def _render_manual_review_resolution() -> None:
     st.subheader("Resolve Manual Review")
 
     review_sources = [str(item.get("source_pdf") or "").strip() for item in reviews]
-    unfixable_reviews = [r for r in reviews if resolution_plan(r) is None]
-    fixable_reviews = [r for r in reviews if resolution_plan(r) is not None]
 
     # Download All Manual Reviews (both unfixable and fixable)
     all_output = io.StringIO()
@@ -1459,10 +1469,15 @@ def _render_manual_review_resolution() -> None:
             key="download_all_manual_reviews_csv",
         )
 
-    tab_unfixable, tab_fixable = st.tabs([
-        f"⚠️ Requires Re-upload ({len(unfixable_reviews)})",
-        f"📝 Online Resolution ({len(fixable_reviews)})",
-    ])
+    reupload_tab_label = f"⚠️ Requires Re-upload ({len(unfixable_reviews)})"
+    online_tab_label = f"📝 Online Resolution ({len(fixable_reviews)})"
+    active_section = st.session_state.get(_MANUAL_REVIEW_ACTIVE_SECTION)
+    tab_unfixable, tab_fixable = st.tabs(
+        [reupload_tab_label, online_tab_label],
+        default=(online_tab_label if active_section == _MANUAL_REVIEW_ONLINE else reupload_tab_label),
+        key=_MANUAL_REVIEW_TAB_WIDGET,
+        on_change="rerun",
+    )
 
     with tab_unfixable:
         if not unfixable_reviews:
@@ -1601,15 +1616,77 @@ def _render_manual_review_resolution() -> None:
                     _render_financial_enrichment_draft(plan.key, review)
 
 
+def _synchronize_manual_review_focus(
+    unfixable_reviews: list[dict[str, Any]],
+    fixable_reviews: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Restore session-only Manual Review focus against freshly rebuilt reviews."""
+    state = st.session_state
+    active_section = state.get(_MANUAL_REVIEW_ACTIVE_SECTION)
+    if active_section not in {_MANUAL_REVIEW_ONLINE, _MANUAL_REVIEW_REUPLOAD}:
+        state[_MANUAL_REVIEW_ACTIVE_SECTION] = (
+            _MANUAL_REVIEW_ONLINE if fixable_reviews else _MANUAL_REVIEW_REUPLOAD
+        )
+
+    active_key = state.get(_MANUAL_REVIEW_ACTIVE_KEY)
+    if active_key:
+        matching_fixable = [
+            review for review in fixable_reviews
+            if review_presentation_key(review) == active_key
+        ]
+        matching_unfixable = [
+            review for review in unfixable_reviews
+            if review_presentation_key(review) == active_key
+        ]
+        if matching_fixable:
+            state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
+            fixable_reviews = matching_fixable + [
+                review for review in fixable_reviews if review not in matching_fixable
+            ]
+        elif matching_unfixable:
+            if state.get(_MANUAL_REVIEW_ACTIVE_SECTION) == _MANUAL_REVIEW_ONLINE:
+                state["manual_resolution_notice"] = (
+                    "After revalidation, this Invoice still has a source-structure issue "
+                    "and now requires re-upload. "
+                    f"Reason: {matching_unfixable[0].get('reason') or 'Manual Review required.'}"
+                )
+            state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_REUPLOAD
+            unfixable_reviews = matching_unfixable + [
+                review for review in unfixable_reviews if review not in matching_unfixable
+            ]
+        else:
+            # The resolved review must not be retained merely for presentation.
+            state.pop(_MANUAL_REVIEW_ACTIVE_KEY, None)
+
+    return unfixable_reviews, fixable_reviews
+
+
+def _preserve_manual_review_resolution_context(key: str, *, resolved: bool, reason: str | None) -> None:
+    """Set only presentation state before a Streamlit rerun after an action."""
+    st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
+    if resolved:
+        st.session_state.pop(_MANUAL_REVIEW_ACTIVE_KEY, None)
+        st.session_state.manual_resolution_notice = "Correction applied and the Invoice passed revalidation."
+    else:
+        st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
+        st.session_state.manual_resolution_notice = (
+            f"Still needs review — {reason or 'Correct the source-visible values and try again.'}"
+        )
+
+
 def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
     try:
         master, _ = load_configured_product_price_master()
         outcome = apply_resolution(st.session_state, key=key, values=values, price_master=master)
     except ProductMasterSourceError as error:
+        st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
+        st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
         st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
     else:
-        st.session_state.manual_resolution_notice = (
-            "Correction applied and revalidated. Continue to Reconcile." if outcome.resolved else f"Still needs review — {outcome.reason}"
+        _preserve_manual_review_resolution_context(
+            key,
+            resolved=outcome.resolved,
+            reason=outcome.reason,
         )
     st.rerun()
 
@@ -1815,11 +1892,14 @@ def _apply_product_draft(key: str) -> None:
         master, _ = load_configured_product_price_master()
         outcome = apply_product_draft(st.session_state, key=key, price_master=master)
     except ProductMasterSourceError as error:
+        st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
+        st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
         st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
     else:
-        st.session_state.manual_resolution_notice = (
-            "Correction applied and revalidated. Continue to Reconcile."
-            if outcome.resolved else f"Still needs review — {outcome.reason}"
+        _preserve_manual_review_resolution_context(
+            key,
+            resolved=outcome.resolved,
+            reason=outcome.reason,
         )
     st.rerun()
 

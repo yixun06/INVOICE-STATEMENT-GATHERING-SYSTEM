@@ -19,6 +19,7 @@ from src.invoice_app.services.workflow_navigation import (
     request_navigation,
 )
 from src.invoice_app.services.historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
+from src.invoice_app.services.manual_review_resolution import review_presentation_key
 from src.invoice_app.review_reason_codes import (
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
@@ -557,6 +558,64 @@ def test_product_count_manual_review_renders_session_draft_without_derived_field
     assert "NAV" not in labels
     assert "Product Master Unit Price" not in labels
     assert "Promotion Group ID" not in labels
+
+
+def test_manual_review_revalidation_keeps_the_same_online_source_focused(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    review = {
+        "batch_id": "focus-batch", "platform": "Shopee", "order_id": "SHP-FOCUS",
+        "source_pdf": "focus.pdf", "status": "Manual Review",
+        "reason_code": PRODUCT_COUNT_MISMATCH,
+        "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.",
+        "order_payload": {"platform": "Shopee", "order_id": "SHP-FOCUS"},
+        "product_payloads": [{"seller_sku": "SKU-1", "product_name": "First", "quantity": 1}],
+    }
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True, "navigation": "Data Import", "batch_id": "focus-batch",
+        "import_source_type": "Platform Orders", "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1}, "orders": [], "products": [],
+        "processing_errors": [], "duplicate_skipped": [], "unsupported_files": [], "reviews": [review],
+        "manual_review_active_section": "online_resolution",
+        "manual_review_active_key": review_presentation_key(review),
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["manual_review_active_section"] == "online_resolution"
+    assert any("Online Resolution" in tab.label for tab in app.tabs)
+
+
+def test_manual_review_reclassification_explains_the_section_change(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prior_online_review = {
+        "platform": "Shopee", "order_id": "SHP-RECLASSIFIED", "source_pdf": "reclassified.pdf",
+        "status": "Manual Review", "reason_code": PRODUCT_COUNT_MISMATCH,
+        "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.",
+    }
+    reupload_review = {
+        **prior_online_review,
+        "reason_code": INCOME_SOURCE_INCOMPLETE,
+        "reason": "Income Completion Anchor Missing: Source Document Is Incomplete.",
+    }
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True, "navigation": "Data Import", "batch_id": "focus-batch",
+        "import_source_type": "Platform Orders", "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 1}, "orders": [], "products": [],
+        "processing_errors": [], "duplicate_skipped": [], "unsupported_files": [], "reviews": [reupload_review],
+        "manual_review_active_section": "online_resolution",
+        "manual_review_active_key": review_presentation_key(prior_online_review),
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["manual_review_active_section"] == "requires_reupload"
+    assert any("now requires re-upload" in warning.value for warning in app.warning)
 
 
 def test_sidebar_blocks_navigation_only_during_processing_and_restores_afterward(tmp_path, monkeypatch):

@@ -72,6 +72,22 @@ def review_key(review: Mapping[str, Any]) -> str:
     raw = "|".join(str(review.get(name, "")) for name in ("source_pdf", "order_id", "reason", "timestamp"))
     return sha256(raw.encode("utf-8")).hexdigest()[:16]
 
+
+def review_presentation_key(review: Mapping[str, Any]) -> str:
+    """Return the stable, session-only identity used to restore UI focus.
+
+    The audit key intentionally includes the review reason and timestamp.  A
+    revalidation can legitimately change either of those, so the presentation
+    layer uses only the stable source/order identity and never writes it to
+    staging or persistence.
+    """
+    raw = "|".join(
+        str(review.get(name, ""))
+        for name in ("platform", "source_pdf", "order_id")
+    )
+    return sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
     reason = str(review.get("reason") or "")
     code = str(review.get("reason_code") or "")
