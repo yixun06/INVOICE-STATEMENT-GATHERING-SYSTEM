@@ -7,6 +7,7 @@ from src.invoice_app.parsers.shopee_product_parser import (
     _parse_positioned_item_block,
     parse_positioned_products,
     reconcile_product_candidates,
+    resolve_promotion_group_totals,
 )
 
 
@@ -106,6 +107,26 @@ def test_coordinate_product_name_rejoins_a_two_letter_prefix_before_pipe_separat
     assert item["product_name"] == "[HALAL] Siberian Haskap Berry Elixir | 100% Pure | Natural Antioxidant Superfood"
 
 
+def test_coordinate_product_name_rejoins_a_single_capital_before_short_suffix():
+    columns = _Columns(
+        product_left=100,
+        unit_left=335,
+        unit_quantity_boundary=390,
+        quantity_subtotal_boundary=430,
+    )
+    block = [
+        _row(100, _word("Jasmine with Ceylon Black T", 110, 326, 100)),
+        _row(110, _word("ea", 110, 120, 110)),
+        _row(120, _word("18.90", 350, 370, 120), _word("1", 405, 410, 120)),
+        _row(130, _word("SKU:", 110, 130, 130), _word("SKU-1", 135, 165, 130)),
+    ]
+
+    item = _parse_positioned_item_block(block, columns, ())
+
+    assert item is not None
+    assert item["product_name"] == "Jasmine with Ceylon Black Tea"
+
+
 def test_coordinate_product_name_keeps_space_for_an_ordinary_wrapped_word():
     columns = _Columns(
         product_left=100,
@@ -161,6 +182,111 @@ def test_mixed_sku_rows_preserve_a_deterministic_source_missing_sku_item():
     assert [item["variation"] for item in items] == ["Original", "", "1 box"]
 
 
+def _layout_product_page(skus):
+    words = [
+        _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+        _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+        _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+    ]
+    for index, sku in enumerate(skus):
+        top = 70 + index * 30
+        words.extend((
+            _word(f"Product {index + 1}", 140, 250, top),
+            _word(f"{10 + index}.00", 340, 370, top + 10),
+            _word("1", 405, 410, top + 10),
+            _word(f"{10 + index}.00", 455, 485, top + 10),
+        ))
+        if sku:
+            words.extend((
+                _word("SKU:", 140, 162, top + 20),
+                _word(sku, 165, 215, top + 20),
+            ))
+    stop_top = 80 + len(skus) * 30
+    words.extend((
+        _word("Merchandise", 110, 190, stop_top),
+        _word("Subtotal", 195, 245, stop_top),
+    ))
+    return PdfPage(number=1, width=600, height=800, text="", words=tuple(words))
+
+
+def test_metric_regions_preserve_missing_first_seller_sku():
+    items = parse_positioned_products(
+        PdfDocument(text="Total 2 products", pages=(_layout_product_page(("", "SKU-2")),))
+    )
+
+    assert [(item["product_name"], item["seller_sku"]) for item in items] == [
+        ("Product 1", ""),
+        ("Product 2", "SKU-2"),
+    ]
+    assert items[0]["sku_missing_in_source"] is True
+
+
+def test_metric_regions_preserve_missing_last_seller_sku():
+    items = parse_positioned_products(
+        PdfDocument(text="Total 2 products", pages=(_layout_product_page(("SKU-1", "")),))
+    )
+
+    assert [(item["product_name"], item["seller_sku"]) for item in items] == [
+        ("Product 1", "SKU-1"),
+        ("Product 2", ""),
+    ]
+    assert items[1]["sku_missing_in_source"] is True
+
+
+def test_metric_regions_preserve_consecutive_missing_seller_skus():
+    page = _layout_product_page(("SKU-1", "", "", "SKU-4"))
+
+    without_declared_count = parse_positioned_products(
+        PdfDocument(text="", pages=(page,))
+    )
+    mismatched_declared_count = parse_positioned_products(
+        PdfDocument(text="Total 99 products", pages=(page,))
+    )
+
+    expected = ["SKU-1", "", "", "SKU-4"]
+    assert [item["seller_sku"] for item in without_declared_count] == expected
+    assert [item["seller_sku"] for item in mismatched_declared_count] == expected
+    assert [item["sku_missing_in_source"] for item in without_declared_count] == [
+        False, True, True, False,
+    ]
+
+
+def test_promotion_metric_regions_include_middle_product_without_sku():
+    page = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Any 3 at RM37.80", 100, 220, 65),
+            _word("Longjing Tea", 140, 250, 75), _word("16.87", 340, 370, 85),
+            _word("1", 405, 410, 85), _word("SKU:", 140, 162, 95),
+            _word("SKU-LONGJING", 165, 240, 95),
+            _word("Jasmine Tea", 140, 250, 105), _word("37.80", 455, 485, 110),
+            _word("18.90", 340, 370, 115), _word("1", 405, 410, 115),
+            _word("Rose Tea", 140, 250, 135), _word("16.87", 340, 370, 145),
+            _word("1", 405, 410, 145), _word("SKU:", 140, 162, 155),
+            _word("SKU-ROSE", 165, 225, 155),
+            _word("Merchandise", 110, 190, 180), _word("Subtotal", 195, 245, 180),
+        ),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 3 products", pages=(page,)))
+    resolve_promotion_group_totals(items, Decimal("37.80"))
+
+    assert [item["product_name"] for item in items] == [
+        "Longjing Tea", "Jasmine Tea", "Rose Tea",
+    ]
+    assert [item["seller_sku"] for item in items] == [
+        "SKU-LONGJING", "", "SKU-ROSE",
+    ]
+    assert len({item["promotion_group_id"] for item in items}) == 1
+    assert {item["source_group_total"] for item in items} == {Decimal("37.80")}
+
+
 def test_page_break_sku_continuation_is_not_a_second_product_row():
     page_one = PdfPage(
         number=1,
@@ -201,6 +327,75 @@ def test_page_break_sku_continuation_is_not_a_second_product_row():
     assert items[0]["unit_price"] == Decimal("15.00")
     assert items[0]["line_total"] == Decimal("15.00")
     assert items[0]["evidence"] == "positioned-page-continuation"
+
+
+def test_next_page_product_with_own_metrics_never_merges_backwards():
+    page_one = PdfPage(
+        number=1, width=600, height=800, text="", words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("First Product", 140, 250, 70), _word("10.00", 340, 370, 80),
+            _word("1", 405, 410, 80), _word("10.00", 455, 485, 80),
+        ),
+    )
+    page_two = PdfPage(
+        number=2, width=600, height=800, text="", words=(
+            _word("Second Product", 140, 250, 30), _word("20.00", 340, 370, 40),
+            _word("1", 405, 410, 40), _word("20.00", 455, 485, 40),
+            _word("SKU:", 140, 162, 50), _word("SKU-SECOND", 165, 230, 50),
+            _word("Merchandise", 110, 190, 80), _word("Subtotal", 195, 245, 80),
+        ),
+    )
+
+    items = parse_positioned_products(
+        PdfDocument(text="Total 2 products", pages=(page_one, page_two))
+    )
+
+    assert [(item["product_name"], item["seller_sku"]) for item in items] == [
+        ("First Product", ""),
+        ("Second Product", "SKU-SECOND"),
+    ]
+    assert items[0]["sku_missing_in_source"] is True
+
+
+def test_promotion_container_context_and_group_identity_continue_across_pages():
+    page_one = PdfPage(
+        number=1, width=600, height=800, text="", words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Any 2 at RM15.00", 100, 220, 65),
+            _word("Promotion One", 140, 250, 75), _word("10.00", 340, 370, 85),
+            _word("1", 405, 410, 85), _word("SKU:", 140, 162, 95),
+            _word("PROMO-ONE", 165, 225, 95),
+        ),
+    )
+    page_two = PdfPage(
+        number=2, width=600, height=800, text="", words=(
+            _word("Promotion Two", 140, 250, 30), _word("10.00", 340, 370, 40),
+            _word("1", 405, 410, 40), _word("SKU:", 140, 162, 50),
+            _word("PROMO-TWO", 165, 225, 50), _word("15.00", 455, 485, 50),
+            _word("Normal Product", 140, 250, 70), _word("5.00", 340, 370, 80),
+            _word("1", 405, 410, 80), _word("5.00", 455, 485, 80),
+            _word("SKU:", 140, 162, 90), _word("NORMAL", 165, 215, 90),
+            _word("Merchandise", 110, 190, 120), _word("Subtotal", 195, 245, 120),
+        ),
+    )
+
+    items = parse_positioned_products(
+        PdfDocument(text="Total 3 products", pages=(page_one, page_two))
+    )
+    resolve_promotion_group_totals(items, Decimal("20.00"))
+
+    assert len(items) == 3
+    assert {
+        item["promotion_group_id"] for item in items[:2]
+    } == {"shopee-promotion:p1:section1:group1"}
+    assert items[2].get("promotion_group_id") is None
+    assert {item["source_group_total"] for item in items[:2]} == {
+        Decimal("15.00")
+    }
 
 
 def test_headerless_continuation_page_owns_products_and_excludes_chrome_sidebar_and_promotion_money():

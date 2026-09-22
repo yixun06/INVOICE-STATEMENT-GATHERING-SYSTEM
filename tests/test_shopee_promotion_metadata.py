@@ -2,7 +2,7 @@ from decimal import Decimal
 from src.invoice_app.pdf_document import PdfHorizontalRule, PdfWord
 
 from src.invoice_app.parsers.shopee_product_parser import _Columns, _Row, _apply_group_promotion, _is_struck_through, _parse_positioned_item_block, resolve_promotion_group_totals
-from src.invoice_app.parsers.validation import count_product_anchor_items, validate_shopee_product_amounts, validate_shopee_promotion_evidence
+from src.invoice_app.parsers.validation import count_product_anchor_items, validate_product_items, validate_shopee_product_amounts, validate_shopee_promotion_evidence
 
 
 def _item(sku, quantity, subtotal, promotion=""):
@@ -24,6 +24,36 @@ def test_normal_product_has_no_promotion_metadata():
 
     assert "promotion_group_id" not in item
     assert item["source_line_subtotal"] == Decimal("20.00")
+
+
+def test_complete_group_evidence_replaces_member_line_total_without_fabrication():
+    members = [_item("A", 1, None), _item("B", 1, None)]
+    for member in members:
+        member["promotion_group_id"] = "p1:group1"
+        member["source_group_total"] = Decimal("15.00")
+
+    assert validate_product_items(members, require_sku=True) == []
+    assert all(member["line_total"] is None for member in members)
+    assert validate_shopee_product_amounts(
+        members,
+        Decimal("15.00"),
+        product_price=Decimal("15.00"),
+    ) is None
+
+
+def test_partial_group_evidence_and_normal_missing_line_total_still_fail_closed():
+    first, second = _item("A", 1, None), _item("B", 1, None)
+    for member in (first, second):
+        member["promotion_group_id"] = "p1:group1"
+    first["source_group_total"] = Decimal("15.00")
+
+    assert validate_product_items([first, second], require_sku=True) == [
+        "Item 2 is missing Line Total."
+    ]
+    assert validate_product_items(
+        [_item("NORMAL", 1, None)],
+        require_sku=True,
+    ) == ["Item 1 is missing Line Total."]
 
 
 def test_container_membership_is_not_limited_by_any_target_quantity():

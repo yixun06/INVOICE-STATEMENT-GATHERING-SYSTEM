@@ -614,6 +614,60 @@ def test_label_visible_missing_subtotal_reruns_full_revalidation():
     )
 
 
+def test_confirmed_group_subtotal_survives_revalidation_for_every_member_once():
+    review = _promotion_review(source_status="absent", advertised_amount="15.00")
+    review["order_payload"].update({
+        "merchandise_subtotal": "15.00",
+        "product_price": "15.00",
+        "order_income": "15.00",
+    })
+    template = review["product_payloads"][0]
+    template.update({
+        "promotion_label": "Any 4 at RM15.00",
+        "promotion_advertised_amount": "15.00",
+        "promotion_target_qty": 4,
+        "unit_price": "4.90",
+    })
+    review["product_payloads"] = [
+        {
+            **template,
+            "seller_sku": f"SKU-{index}",
+            "product_name": f"Member {index}",
+        }
+        for index in range(1, 5)
+    ]
+    master = ProductPriceMaster.from_rows([
+        {
+            "seller_sku": f"SKU-{index}",
+            "product_name": f"Member {index}",
+            "unit_selling_price": "4.90",
+            "nav_code": f"NAV-{index}",
+        }
+        for index in range(1, 5)
+    ])
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=resolution_plan(review).key,
+        values={
+            "source_confirmed": True,
+            "promotion_subtotals": {"source-group-1": "15.00"},
+        },
+        price_master=master,
+    )
+
+    assert outcome.resolved is True
+    assert len(state["products"]) == 4
+    assert {str(product["source_group_total"]) for product in state["products"]} == {
+        "15.00"
+    }
+    assert {product["promotion_group_id"] for product in state["products"]} == {
+        "source-group-1"
+    }
+    assert all(product["line_total"] == "N/A" for product in state["products"])
+
+
 def test_missing_sku_and_promotion_subtotal_are_applied_in_one_full_revalidation():
     review = _promotion_review(source_status="absent")
     review["reason_code"] = SKU_RESOLUTION_REQUIRED

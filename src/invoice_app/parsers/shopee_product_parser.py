@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
 from itertools import product
-from typing import Any
+from typing import Any, Mapping
 
 from ..pdf_document import PdfDocument, PdfHorizontalRule, PdfPage, PdfWord
 from ..utils.normalize import normalize_product_identity, normalize_whitespace, parse_decimal, parse_quantity
@@ -38,6 +38,7 @@ class _Columns:
     unit_left: float
     unit_quantity_boundary: float
     quantity_subtotal_boundary: float
+    subtotal_right: float = float("inf")
 
 
 _SOURCE_RETURN_REFUND_QUANTITY = "source_return_refund_quantity"
@@ -52,15 +53,41 @@ _ITEM_RETURN_REFUND_PREFIX = re.compile(
 def parse_positioned_products(document: PdfDocument) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     continuation_columns: _Columns | None = None
+    continuation_promotion: tuple[str, str] | None = None
     for page in document.pages:
         rows = _group_words_into_rows(page.words)
         header_indexes = [index for index, row in enumerate(rows) if _is_product_header(row.text)]
         if header_indexes:
-            items.extend(_parse_positioned_page(page))
+            items.extend(
+                _parse_positioned_page(
+                    page,
+                    leading_promotion=(continuation_promotion or ("", ""))[0],
+                    leading_promotion_group_id=(
+                        continuation_promotion or ("", "")
+                    )[1],
+                )
+            )
             last_header = header_indexes[-1]
             continuation_columns = _columns_from_header(rows[last_header])
-            if any(_is_stop_line(row.text) for row in rows[last_header + 1 :]):
+            section_end = next(
+                (
+                    index
+                    for index in range(last_header + 1, len(rows))
+                    if _is_stop_line(rows[index].text)
+                ),
+                len(rows),
+            )
+            continuation_promotion = _trailing_promotion_context(
+                rows[last_header + 1 : section_end],
+                continuation_columns,
+                promotion_group_id=_promotion_group_id(
+                    page.number,
+                    len(header_indexes),
+                ),
+            )
+            if section_end < len(rows):
                 continuation_columns = None
+                continuation_promotion = None
             continue
         if continuation_columns is None:
             continue
@@ -76,10 +103,20 @@ def parse_positioned_products(document: PdfDocument) -> list[dict[str, Any]]:
                 page_number=page.number,
                 horizontal_rules=page.horizontal_rules,
                 promotion_group_id=_promotion_group_id(page.number, 1),
+                leading_promotion=(continuation_promotion or ("", ""))[0],
+                leading_promotion_group_id=(
+                    continuation_promotion or ("", "")
+                )[1],
             )
+        )
+        continuation_promotion = _trailing_promotion_context(
+            rows[:section_end],
+            continuation_columns,
+            promotion_group_id=_promotion_group_id(page.number, 1),
         )
         if section_end < len(rows):
             continuation_columns = None
+            continuation_promotion = None
     return _join_page_continuation_items(items)
 
 
@@ -117,7 +154,7 @@ def _is_measured_source_missing_sku_item(item: Mapping[str, Any]) -> bool:
         and item.get("metric_top") is not None
         and str(item.get("product_name") or "").strip()
         and int(item.get("quantity") or 0) > 0
-        and item.get("line_total") is not None
+        and item.get("unit_price") is not None
     )
 
 
@@ -250,7 +287,12 @@ def _text_sku_belongs_to_positioned_sku(text_sku: str, positioned_sku: str) -> b
     return bool(trailing) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", token) for token in trailing)
 
 
-def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
+def _parse_positioned_page(
+    page: PdfPage,
+    *,
+    leading_promotion: str = "",
+    leading_promotion_group_id: str = "",
+) -> list[dict[str, Any]]:
     rows = _group_words_into_rows(page.words)
     header_indexes = [index for index, row in enumerate(rows) if _is_product_header(row.text)]
     items: list[dict[str, Any]] = []
@@ -274,6 +316,10 @@ def _parse_positioned_page(page: PdfPage) -> list[dict[str, Any]]:
                 page_number=page.number,
                 horizontal_rules=page.horizontal_rules,
                 promotion_group_id=_promotion_group_id(page.number, header_position + 1),
+                leading_promotion=(leading_promotion if header_position == 0 else ""),
+                leading_promotion_group_id=(
+                    leading_promotion_group_id if header_position == 0 else ""
+                ),
             )
         )
 
@@ -316,6 +362,7 @@ def _columns_from_header(header: _Row) -> _Columns | None:
         unit_left=min(word.x0 for word in unit_words) - 20,
         unit_quantity_boundary=(unit_center + quantity_center) / 2,
         quantity_subtotal_boundary=(quantity_center + subtotal_center) / 2,
+        subtotal_right=max(word.x1 for word in subtotal_words) + 20,
     )
 
 
@@ -447,8 +494,8 @@ def _is_split_product_name_word(
         re.search(r"[a-z]{5,}$", previous_text)
         and re.match(r"^[a-z][,.;:](?:\s|$)", current_text)
     ) or (
-        re.search(r"\b[A-Z][a-z]$", previous_text)
-        and re.match(r"^[a-z]{2}\s+\|(?:\s|$)", current_text)
+        re.search(r"\b[A-Z](?:[a-z])?$", previous_text)
+        and re.match(r"^[a-z]{1,2}(?:\s+\||$)", current_text)
     )
     return bool(
         split_suffix
@@ -471,7 +518,13 @@ def _metrics_from_positioned_row(
         for word in row.words
         if columns.unit_quantity_boundary <= word.center_x < columns.quantity_subtotal_boundary
     ]
-    subtotal_words = [word for word in row.words if word.center_x >= columns.quantity_subtotal_boundary]
+    subtotal_words = [
+        word
+        for word in row.words
+        if columns.quantity_subtotal_boundary
+        <= word.center_x
+        <= columns.subtotal_right
+    ]
 
     unit_price = _first_decimal(" ".join(word.text for word in unit_words))
     quantity_match = re.search(r"\b(\d+)\b", " ".join(word.text for word in quantity_words))
@@ -495,7 +548,10 @@ def _promotion_subtotal_candidates(
     candidates: list[dict[str, Any]] = []
     for row_index, row in enumerate(block):
         for word_index, word in enumerate(row.words):
-            if word.x1 < columns.quantity_subtotal_boundary:
+            if (
+                word.x1 < columns.quantity_subtotal_boundary
+                or word.center_x > columns.subtotal_right
+            ):
                 continue
             amount = _first_decimal(word.text)
             if amount is None or not re.search(r"\d+\.\d{2}", word.text.replace(",", "")):
@@ -566,7 +622,9 @@ def _subtotal_column_decimal(row: _Row, columns: _Columns) -> Decimal | None:
     subtotal_words = [
         word
         for word in row.words
-        if word.center_x >= columns.quantity_subtotal_boundary
+        if columns.quantity_subtotal_boundary
+        <= word.center_x
+        <= columns.subtotal_right
     ]
     return _first_decimal(" ".join(word.text for word in subtotal_words))
 
@@ -574,19 +632,35 @@ def _parse_positioned_items_without_sku(
     rows: list[_Row],
     columns: _Columns,
     page_number: int,
+    horizontal_rules: tuple[PdfHorizontalRule, ...],
 ) -> list[dict[str, Any]]:
+    """Build one source product per metric row; SKU is optional child evidence."""
     items: list[dict[str, Any]] = []
+    metric_indexes = [
+        index
+        for index, row in enumerate(rows)
+        if _metrics_from_positioned_row(row, columns) is not None
+    ]
     previous_metric = -1
-    for metric_index, row in enumerate(rows):
+    for position, metric_index in enumerate(metric_indexes):
+        row = rows[metric_index]
         metrics = _metrics_from_positioned_row(row, columns)
-        if metrics is None or metrics[2] is None or metrics[2] == 0:
-            continue
+        assert metrics is not None
         unit_price, quantity, line_total = metrics
-        name_parts: list[str] = []
+        next_metric = (
+            metric_indexes[position + 1]
+            if position + 1 < len(metric_indexes)
+            else len(rows)
+        )
+        name_parts: list[tuple[str, PdfWord, PdfWord]] = []
         source_return_refund_quantities: list[int] = []
         source_return_refund_errors: list[str] = []
         variation = ""
+        promotion = ""
         for candidate_row in rows[previous_metric + 1 : metric_index + 1]:
+            if _promotion_details(candidate_row.text) is not None:
+                promotion = candidate_row.text
+                continue
             product_words = _positioned_product_words(candidate_row, columns)
             candidate = normalize_whitespace(" ".join(word.text for word in product_words))
             if not candidate or _is_product_noise(candidate):
@@ -604,27 +678,46 @@ def _parse_positioned_items_without_sku(
                     source_return_refund_errors,
                 )
                 if candidate:
-                    name_parts.append(candidate)
+                    name_parts.append(
+                        (candidate, product_words[0], product_words[-1])
+                    )
 
-        product_name, variation = normalize_product_identity(" ".join(name_parts), variation)
+        product_name, variation = normalize_product_identity(
+            _join_coordinate_product_name_parts(name_parts, columns),
+            variation,
+        )
         variation = variation or _variation_after_metric_row(
             rows,
             metric_index,
             columns,
         )
+        trailing_rows = rows[metric_index + 1 : next_metric]
+        seller_sku = next(
+            (
+                value
+                for candidate_row in trailing_rows
+                if (value := _extract_positioned_sku_value(candidate_row, columns))
+            ),
+            "",
+        )
         item = {
             "product_name": product_name,
-            "seller_sku": "",
+            "seller_sku": seller_sku,
             "quantity": quantity,
             "unit_price": unit_price,
             "line_total": line_total,
             "source_line_subtotal": line_total,
             "variation": variation,
-            "promotion": "",
-            "evidence": "positioned-no-sku",
+            "promotion": promotion,
+            "evidence": "positioned-metric-region",
             "source_page": page_number,
-            "sku_missing_in_source": True,
+            "sku_missing_in_source": not bool(seller_sku),
             "metric_top": row.top,
+            "_promotion_subtotal_candidates": _promotion_subtotal_candidates(
+                trailing_rows,
+                columns,
+                horizontal_rules,
+            ),
         }
         _attach_source_return_refund_evidence(
             item,
@@ -644,6 +737,8 @@ def _parse_positioned_section(
     page_number: int,
     horizontal_rules: tuple[PdfHorizontalRule, ...],
     promotion_group_id: str,
+    leading_promotion: str = "",
+    leading_promotion_group_id: str = "",
 ) -> list[dict[str, Any]]:
     """Parse one coordinate-owned product section, including a continued page."""
     sku_indexes = [
@@ -660,34 +755,54 @@ def _parse_positioned_section(
             section_items.append(item)
         previous_sku = sku_index
 
-    metric_items = _parse_positioned_items_without_sku(rows, columns, page_number)
-    if not sku_indexes:
-        section_items = metric_items
-    else:
-        by_metric_top = {
-            item["metric_top"]: item
-            for item in metric_items
-            if item.get("metric_top") is not None
-        }
-        anchored_metric_tops = {
-            item["metric_top"]
-            for item in section_items
-            if item.get("metric_top") is not None
-        }
-        for item in section_items:
-            candidate = by_metric_top.get(item.get("metric_top"))
-            if candidate is not None and candidate.get("product_name"):
-                item["product_name"] = candidate["product_name"]
-        section_items.extend(
-            item
-            for item in metric_items
-            if item.get("metric_top") not in anchored_metric_tops
-            and _is_reliable_source_missing_sku_item(item)
+    metric_items = _parse_positioned_items_without_sku(
+        rows,
+        columns,
+        page_number,
+        horizontal_rules,
+    )
+    sku_only_items = [
+        item for item in section_items if item.get("metric_top") is None
+    ]
+    section_items = [*sku_only_items, *metric_items]
+    if leading_promotion and metric_items and not metric_items[0].get("promotion"):
+        metric_items[0]["promotion"] = leading_promotion
+        metric_items[0]["_promotion_group_id_override"] = (
+            leading_promotion_group_id
         )
-        section_items.sort(key=lambda item: float(item.get("metric_top") or 0))
 
     _apply_group_promotion(section_items, promotion_group_id=promotion_group_id)
     return section_items
+
+
+def _trailing_promotion_context(
+    rows: list[_Row],
+    columns: _Columns | None,
+    *,
+    promotion_group_id: str,
+) -> tuple[str, str] | None:
+    """Carry an open source promotion container across a physical page break."""
+    if columns is None:
+        return None
+    pending = ""
+    pending_group_number = 0
+    group_number = 0
+    for row in rows:
+        if _promotion_details(row.text) is not None:
+            group_number += 1
+            pending = row.text
+            pending_group_number = group_number
+            continue
+        metrics = _metrics_from_positioned_row(row, columns)
+        if pending and metrics is not None and metrics[2] is not None:
+            pending = ""
+            pending_group_number = 0
+    if not pending:
+        return None
+    return (
+        pending,
+        f"{promotion_group_id}:group{pending_group_number}",
+    )
 
 
 def _variation_after_metric_row(
@@ -716,7 +831,7 @@ def _is_reliable_source_missing_sku_item(item: Mapping[str, Any]) -> bool:
         item.get("metric_top") is not None
         and str(item.get("product_name") or "").strip()
         and int(item.get("quantity") or 0) > 0
-        and item.get("line_total") is not None
+        and item.get("unit_price") is not None
         and not str(item.get("seller_sku") or "").strip()
     )
 
@@ -758,7 +873,9 @@ def _apply_group_promotion(
             continue
 
         group_number += 1
-        group_id = f"{promotion_group_id}:group{group_number}"
+        group_id = str(item.pop("_promotion_group_id_override", "") or "").strip()
+        if not group_id:
+            group_id = f"{promotion_group_id}:group{group_number}"
         participating_qty = sum(int(member.get("quantity", 0) or 0) for member in members)
         _set_provisional_group_metadata(
             members,
