@@ -173,6 +173,14 @@ def test_order_sku_adjustment_rows_serialize_in_schema_order():
     assert plan.rows[2][positions["adjustment_amount"]] == "-1.00"
 
 
+def test_no_adjustment_statement_writes_no_adjustment_rows_or_events():
+    plan = _plan(statement=_statement(adjustments=False))
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+
+    assert [row[positions["record_type"]] for row in plan.rows] == ["ORDER", "SKU"]
+    assert plan.order_adjustments == ()
+
+
 def test_adjustment_evidence_never_rewrites_original_invoice_business_facts():
     original = _order(final_amount="10.00", order_income="9.00")
     plan = _plan(statement=_statement(adjustments=True), order=original)

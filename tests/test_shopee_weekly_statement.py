@@ -19,6 +19,8 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     _parse_income_rows,
     parse_shopee_weekly_statement,
     WeeklyStatementParseError,
+    INVALID_REQUIRED_HEADER,
+    MISSING_REQUIRED_WORKSHEET,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     ALREADY_IMPORTED,
@@ -103,6 +105,86 @@ def _summary_mutation(mutator):
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _workbook_mutation(mutator) -> bytes:
+    workbook = load_workbook(BytesIO(SAMPLE.read_bytes()))
+    mutator(workbook)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def test_valid_statement_without_adjustment_sheet_is_accepted_as_no_events():
+    source = _workbook_mutation(
+        lambda workbook: workbook.remove(workbook["Adjustment"])
+    )
+
+    parsed = parse_shopee_weekly_statement(
+        source,
+        source_filename="statement-without-adjustment.xlsx",
+    )
+
+    assert parsed.adjustments == ()
+    assert parsed.adjustment_control_total == Decimal("0.00")
+    assert parsed.adjustment_footer_total is None
+    assert "Adjustment" not in parsed.dimension_fallback_sheets
+    assert validate_shopee_weekly_statement(parsed) == ()
+
+
+def test_present_but_malformed_adjustment_sheet_still_fails_closed():
+    source = _workbook_mutation(
+        lambda workbook: setattr(
+            workbook["Adjustment"]["A13"],
+            "value",
+            "Unsupported Sequence Header",
+        )
+    )
+
+    with pytest.raises(WeeklyStatementParseError) as error:
+        parse_shopee_weekly_statement(
+            source,
+            source_filename="malformed-adjustment.xlsx",
+        )
+
+    assert error.value.code == INVALID_REQUIRED_HEADER
+    assert error.value.sheet_name == "Adjustment"
+
+
+def test_present_empty_valid_adjustment_sheet_keeps_existing_contract():
+    def empty_adjustment(workbook):
+        sheet = workbook["Adjustment"]
+        sheet.delete_rows(14, 3)
+        sheet["E8"] = Decimal("0.00")
+        sheet["E15"] = Decimal("0.00")
+
+    parsed = parse_shopee_weekly_statement(
+        _workbook_mutation(empty_adjustment),
+        source_filename="empty-adjustment.xlsx",
+    )
+
+    assert parsed.adjustments == ()
+    assert parsed.adjustment_control_total == Decimal("0.00")
+    assert parsed.adjustment_footer_total == Decimal("0.00")
+    assert validate_shopee_weekly_statement(parsed) == ()
+
+
+def test_missing_non_adjustment_sheet_remains_structured_source_failure():
+    source = _workbook_mutation(
+        lambda workbook: workbook.remove(workbook["Income"])
+    )
+
+    staged = stage_shopee_weekly_statement(
+        source,
+        source_filename="statement-without-income.xlsx",
+    )
+
+    assert staged.result == REJECTED
+    assert staged.statement is None
+    assert staged.source_error is not None
+    assert staged.source_error.code == MISSING_REQUIRED_WORKSHEET
+    assert staged.source_error.sheet_name == "Income"
+    assert "Adjustment" in staged.source_error.available_sheets
 
 
 @pytest.mark.parametrize(

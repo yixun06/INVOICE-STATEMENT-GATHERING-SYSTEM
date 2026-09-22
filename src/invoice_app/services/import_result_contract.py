@@ -98,6 +98,16 @@ class SessionState:
 
 
 @dataclass(frozen=True)
+class SourceErrorPresentation:
+    title: str
+    message: str
+    next_step: str
+    validation_code: str
+    source_filename: str
+    technical_details: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ImportResult:
     source_type: str
     batch_status: str
@@ -107,3 +117,4 @@ class ImportResult:
     commit_readiness: CommitReadiness
     session_state: SessionState
     source_specific_details: Mapping[str, Any] = field(default_factory=dict)
+    source_error: SourceErrorPresentation | None = None

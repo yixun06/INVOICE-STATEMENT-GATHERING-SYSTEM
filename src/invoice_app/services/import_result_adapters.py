@@ -27,6 +27,7 @@ from .import_result_contract import (
     ReconciliationException,
     ReconciliationResult,
     SessionState,
+    SourceErrorPresentation,
     SourceSummary,
     SummaryItem,
     ValidationIssue,
@@ -41,6 +42,46 @@ from .shopee_statement_item_matching import (
 
 PLATFORM_ORDERS = "Platform Orders"
 SHOPEE_WEEKLY_STATEMENT = "Shopee Weekly Statement"
+STATEMENT_SOURCE_ERROR = "STATEMENT_SOURCE_ERROR"
+
+
+def _statement_source_error_presentation(stage: StagedShopeeWeeklyStatement) -> SourceErrorPresentation | None:
+    error = stage.source_error
+    if error is None:
+        return None
+    if error.code == "MISSING_REQUIRED_WORKSHEET":
+        sheet = error.sheet_name or (error.expected[0] if error.expected else "required")
+        title = "Statement format is incomplete"
+        message = f"Required worksheet `{sheet}` was not found."
+        next_step = "Upload the complete Shopee Statement workbook."
+    elif error.code == "INVALID_REQUIRED_HEADER":
+        sheet = error.sheet_name or "required"
+        title = "Statement format is not supported"
+        message = f"Worksheet `{sheet}` does not contain the expected columns."
+        next_step = "Upload the original Shopee Statement export without changing its structure."
+    elif error.code == "INVALID_WORKBOOK":
+        title = "Statement could not be opened"
+        message = "The uploaded file could not be read as a valid Shopee Weekly Statement."
+        next_step = "Download the Statement again from Shopee and upload the original `.xlsx`."
+    else:
+        title = "Statement cannot be validated"
+        message = "The workbook does not satisfy the supported Shopee Weekly Statement format."
+        next_step = "Upload the original complete Shopee Statement export."
+    return SourceErrorPresentation(
+        title=title,
+        message=message,
+        next_step=next_step,
+        validation_code=error.code,
+        source_filename=error.source_filename,
+        technical_details={
+            "validation_code": error.code,
+            "source_filename": error.source_filename,
+            "worksheet": error.sheet_name,
+            "expected": error.expected,
+            "worksheet_list": error.available_sheets,
+            "underlying_error": error.technical_message,
+        },
+    )
 
 
 def adapt_platform_orders_import_result(
@@ -193,6 +234,7 @@ def adapt_shopee_weekly_statement_import_result(
     validation_blockers: list[ValidationIssue] = []
     warnings: list[ValidationIssue] = []
     statement = stage.statement if stage else None
+    source_error = _statement_source_error_presentation(stage) if stage else None
     stage_source = stage.source_filename if stage else None
     stage_recovery_actions = recovery_actions_for_source(
         source=stage_source,
@@ -346,6 +388,7 @@ def adapt_shopee_weekly_statement_import_result(
     source_details = {
         "stage": stage,
         "statement": statement,
+        "statement_source_error": source_error,
         "order_reconciliations": tuple(stage.order_reconciliations) if stage else (),
         "adjustment_reconciliations": tuple(stage.adjustment_reconciliations) if stage else (),
         "shipping_fee_discrepancies": tuple(statement.shipping_fee_discrepancies) if statement else (),
@@ -361,7 +404,11 @@ def adapt_shopee_weekly_statement_import_result(
     )
     return ImportResult(
         source_type=SHOPEE_WEEKLY_STATEMENT,
-        batch_status="Ready to Commit" if ready else ("Not Ready" if stage else "No Active Batch"),
+        batch_status=(
+            STATEMENT_SOURCE_ERROR
+            if source_error is not None
+            else "Ready to Commit" if ready else ("Not Ready" if stage else "No Active Batch")
+        ),
         source_summary=SourceSummary(
             title="Shopee Weekly Statement result",
             items=summary_items,
@@ -387,6 +434,7 @@ def adapt_shopee_weekly_statement_import_result(
             batch_id=batch_id,
         ),
         source_specific_details=source_details,
+        source_error=source_error,
     )
 
 
@@ -401,6 +449,7 @@ def _adapt_v2_statement_review(
     statement = stage.statement
     batch = review.reconciliation_v2
     source = stage.source_filename
+    source_error = _statement_source_error_presentation(stage)
     recovery_actions = recovery_actions_for_source(
         source=source,
         action_type=REMOVE_STAGED_SOURCE,
@@ -483,6 +532,7 @@ def _adapt_v2_statement_review(
         "shipping_fee_discrepancies": (
             tuple(statement.shipping_fee_discrepancies) if statement else ()
         ),
+        "statement_source_error": source_error,
     }
     if stage.already_imported and statement is not None:
         source_items = (
@@ -648,7 +698,9 @@ def _adapt_v2_statement_review(
         )
     else:
         commit_reasons = ()
-    if coverage_incomplete:
+    if source_error is not None:
+        batch_status = STATEMENT_SOURCE_ERROR
+    elif coverage_incomplete:
         batch_status = "INVOICE_COVERAGE_INCOMPLETE"
     elif review.commit_ready:
         batch_status = "Ready to Commit"
@@ -714,4 +766,5 @@ def _adapt_v2_statement_review(
             batch_id=batch_id,
         ),
         source_specific_details=source_details,
+        source_error=source_error,
     )

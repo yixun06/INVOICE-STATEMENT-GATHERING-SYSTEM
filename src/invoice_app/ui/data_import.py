@@ -476,6 +476,8 @@ def _render_validation_step(
     is_platform_orders = bool(
         result.source_specific_details.get("show_platform_order_outcomes")
     )
+    if _render_statement_source_error(result):
+        return
     _render_validation_status(result)
 
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
@@ -563,6 +565,41 @@ def _render_validation_status(result: ImportResult) -> None:
             else _commit_readiness_reason(result)
         )
     render_authoritative_status(title="Needs Attention", message=message, state="blocked")
+
+
+def _render_statement_source_error(result: ImportResult) -> bool:
+    """Render workbook-level failure without creating an order-level work item."""
+
+    error = result.source_error
+    if result.source_type != SHOPEE_WEEKLY_STATEMENT or error is None:
+        return False
+    render_authoritative_status(
+        title=error.title,
+        message=error.message,
+        state="blocked",
+    )
+    st.write(f"**What to do:** {error.next_step}")
+    with st.container(horizontal=True):
+        if st.button(
+            "Upload another Statement",
+            type="primary",
+            icon=":material/upload_file:",
+            key="replace_invalid_statement",
+        ):
+            actions = recovery_actions_for_source(
+                source=error.source_filename,
+                action_type=REMOVE_STAGED_SOURCE,
+                remove_label="Upload another Statement",
+                include_details=False,
+            )
+            action = next((item for item in actions if item.allowed), None)
+            if action is not None:
+                st.session_state.pending_validation_recovery_action = action
+                st.session_state.pending_validation_recovery_context = "remove_statement"
+                st.rerun()
+    with st.expander("Technical details (for audit)", expanded=False):
+        st.json(dict(error.technical_details))
+    return True
 
 
 def _statement_invoice_coverage(result: ImportResult) -> Any | None:
@@ -1884,6 +1921,8 @@ def _render_reconciliation_step() -> None:
     if _render_stale_statement_refresh("statement_reconciliation_stale_refresh"):
         return
     result = _current_import_result()
+    if _render_statement_source_error(result):
+        return
     if _statement_invoice_coverage(result) is not None:
         _render_statement_invoice_coverage_status(result)
         _render_statement_refresh_action(
@@ -2080,6 +2119,8 @@ def _render_review_and_commit_step() -> None:
         _render_source_summary(result)
         return
     if _render_statement_already_imported():
+        return
+    if _render_statement_source_error(result):
         return
     if st.session_state.get("weekly_statement_commit_completed"):
         st.success("Statement Commit Complete.", icon=":material/check_circle:")

@@ -97,6 +97,24 @@ def test_weekly_statement_adapter_preserves_staged_source_specific_details():
     assert result.commit_readiness.ready is stage.eligible_for_future_atomic_commit
 
 
+def test_weekly_statement_adapter_exposes_structured_source_error_state():
+    stage = stage_shopee_weekly_statement(
+        b"not an xlsx workbook",
+        source_filename="corrupt.xlsx",
+    )
+
+    result = adapt_shopee_weekly_statement_import_result(
+        stage,
+        batch_id="weekly-source-error",
+    )
+
+    assert result.batch_status == "STATEMENT_SOURCE_ERROR"
+    assert result.source_error is not None
+    assert result.source_error.validation_code == "INVALID_WORKBOOK"
+    assert result.source_error.title == "Statement could not be opened"
+    assert result.source_specific_details["statement_source_error"] is result.source_error
+
+
 def test_data_import_validation_displays_platform_contract_summary(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))

@@ -860,3 +860,82 @@ def test_partial_invoice_coverage_ui_is_direct_and_preserves_statement_summary()
         "Invoice not imported",
         "Invoice items missing",
     )
+
+
+def _statement_source_error_app() -> None:
+    from src.invoice_app.services.import_result_contract import (
+        CommitReadiness,
+        ImportResult,
+        ReconciliationResult,
+        SessionState,
+        SourceErrorPresentation,
+        SourceSummary,
+        ValidationIssue,
+        ValidationResult,
+    )
+    from src.invoice_app.ui import data_import
+
+    result = ImportResult(
+        source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
+        batch_status="STATEMENT_SOURCE_ERROR",
+        source_summary=SourceSummary(title="Statement"),
+        validation=ValidationResult(
+            blocking_issues=(
+                ValidationIssue(
+                    layer="statement_validation",
+                    severity="error",
+                    blocking=True,
+                    reason="Missing required sheet(s): Income",
+                ),
+            ),
+        ),
+        reconciliation=ReconciliationResult(
+            available=False,
+            status="Not Available",
+        ),
+        commit_readiness=CommitReadiness(
+            ready=False,
+            status="Not Ready",
+        ),
+        session_state=SessionState(
+            applied_to_current_session=True,
+            label="Applied to Current Session",
+        ),
+        source_error=SourceErrorPresentation(
+            title="Statement format is incomplete",
+            message="Required worksheet `Income` was not found.",
+            next_step="Upload the complete Shopee Statement workbook.",
+            validation_code="MISSING_REQUIRED_WORKSHEET",
+            source_filename="statement.xlsx",
+            technical_details={
+                "validation_code": "MISSING_REQUIRED_WORKSHEET",
+                "source_filename": "statement.xlsx",
+                "worksheet": "Income",
+            },
+        ),
+    )
+    data_import._render_statement_source_error(result)
+
+
+def test_source_level_statement_failure_is_one_direct_error_card():
+    app = AppTest.from_function(_statement_source_error_app)
+
+    app.run()
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    assert "Statement format is incomplete" in app.error[0].value
+    assert "Required worksheet `Income` was not found" in app.error[0].value
+    assert any(
+        "Upload the complete Shopee Statement workbook" in item.value
+        for item in app.markdown
+    )
+    assert "Needs Attention" not in {item.value for item in app.subheader}
+    assert not any("affected order" in item.value for item in app.error)
+    assert not any("unresolved issue" in item.value for item in app.error)
+    assert app.dataframe == []
+    assert app.pills == []
+    assert "Technical details (for audit)" in {
+        item.label for item in app.expander
+    }
+    assert "Upload another Statement" in {item.label for item in app.button}

@@ -42,6 +42,16 @@ class ValidationIssue:
 
 
 @dataclass(frozen=True)
+class StatementSourceError:
+    code: str
+    technical_message: str
+    source_filename: str
+    sheet_name: str | None = None
+    expected: tuple[str, ...] = ()
+    available_sheets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class StatementReference:
     file_hash: str
     statement_period_from: date
@@ -80,6 +90,7 @@ class StagedShopeeWeeklyStatement:
     order_reconciliations: tuple[OrderReconciliation, ...]
     adjustment_reconciliations: tuple[AdjustmentReconciliation, ...]
     whole_statement_atomic: bool = True
+    source_error: StatementSourceError | None = None
 
     @property
     def eligible_for_future_atomic_commit(self) -> bool:
@@ -109,6 +120,14 @@ def stage_shopee_weekly_statement(
             source, source_filename=source_filename
         )
     except (WeeklyStatementParseError, OSError) as exc:
+        source_error = StatementSourceError(
+            code=getattr(exc, "code", "OTHER_SOURCE_CONTRACT_FAILURE"),
+            technical_message=str(exc),
+            source_filename=getattr(exc, "source_filename", source_filename or ""),
+            sheet_name=getattr(exc, "sheet_name", None),
+            expected=tuple(getattr(exc, "expected", ()) or ()),
+            available_sheets=tuple(getattr(exc, "available_sheets", ()) or ()),
+        )
         return StagedShopeeWeeklyStatement(
             result=REJECTED,
             source_filename=getattr(exc, "source_filename", source_filename or ""),
@@ -120,6 +139,7 @@ def stage_shopee_weekly_statement(
             duplicate_status=None,
             order_reconciliations=(),
             adjustment_reconciliations=(),
+            source_error=source_error,
         )
     return stage_parsed_shopee_weekly_statement(
         statement,

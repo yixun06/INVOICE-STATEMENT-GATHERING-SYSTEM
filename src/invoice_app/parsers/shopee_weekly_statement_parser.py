@@ -19,8 +19,14 @@ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 REQUIRED_SHEETS = (
     "Summary", "Income", "Service Fee Details",
-    "Shipping Fee Discrepancy", "Adjustment",
+    "Shipping Fee Discrepancy",
 )
+OPTIONAL_SHEETS = ("Adjustment",)
+
+MISSING_REQUIRED_WORKSHEET = "MISSING_REQUIRED_WORKSHEET"
+INVALID_REQUIRED_HEADER = "INVALID_REQUIRED_HEADER"
+INVALID_WORKBOOK = "INVALID_WORKBOOK"
+OTHER_SOURCE_CONTRACT_FAILURE = "OTHER_SOURCE_CONTRACT_FAILURE"
 INCOME_COMPONENT_COLUMNS = (
     "Product Price", "Refund Amount",
     "Shipping Fee Paid by Buyer (excl. SST)",
@@ -192,8 +198,22 @@ class ParsedShopeeWeeklyStatement:
 
 
 class WeeklyStatementParseError(ValueError):
-    def __init__(self, message: str, *, source_filename: str = "", file_hash: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = OTHER_SOURCE_CONTRACT_FAILURE,
+        sheet_name: str | None = None,
+        expected: tuple[str, ...] = (),
+        available_sheets: tuple[str, ...] = (),
+        source_filename: str = "",
+        file_hash: str = "",
+    ) -> None:
         super().__init__(message)
+        self.code = code
+        self.sheet_name = sheet_name
+        self.expected = expected
+        self.available_sheets = available_sheets
         self.source_filename = source_filename
         self.file_hash = file_hash
 
@@ -207,6 +227,7 @@ def parse_shopee_weekly_statement(
     if filename and Path(filename).suffix.casefold() != ".xlsx":
         raise WeeklyStatementParseError(
             "Shopee Weekly Statement must be an .xlsx workbook.",
+            code=INVALID_WORKBOOK,
             source_filename=filename, file_hash=file_hash,
         )
     try:
@@ -220,6 +241,7 @@ def parse_shopee_weekly_statement(
     except (BadZipFile, OSError, ValueError, KeyError) as exc:
         raise WeeklyStatementParseError(
             f"Unreadable or corrupt Weekly Statement workbook: {exc}",
+            code=INVALID_WORKBOOK,
             source_filename=filename, file_hash=file_hash,
         ) from exc
 
@@ -228,6 +250,10 @@ def parse_shopee_weekly_statement(
         if missing:
             raise WeeklyStatementParseError(
                 "Missing required sheet(s): " + ", ".join(missing),
+                code=MISSING_REQUIRED_WORKSHEET,
+                sheet_name=missing[0] if len(missing) == 1 else None,
+                expected=tuple(missing),
+                available_sheets=tuple(workbook.sheetnames),
                 source_filename=filename, file_hash=file_hash,
             )
         fallback_sheets: list[str] = []
@@ -246,28 +272,46 @@ def parse_shopee_weekly_statement(
             workbook_bytes, workbook["Shipping Fee Discrepancy"],
             SHIPPING_REQUIRED_COLUMNS, fallback_sheets,
         )
-        adjustment_rows = _read_worksheet_rows(
-            workbook_bytes, workbook["Adjustment"],
-            ADJUSTMENT_REQUIRED_COLUMNS, fallback_sheets,
+        adjustment_rows = (
+            _read_worksheet_rows(
+                workbook_bytes, workbook["Adjustment"],
+                ADJUSTMENT_REQUIRED_COLUMNS, fallback_sheets,
+            )
+            if "Adjustment" in workbook.sheetnames
+            else None
         )
         period_from = _required_label_date(summary_rows, "From", "Summary")
         period_to = _required_label_date(summary_rows, "to", "Summary")
         summary_lines = _parse_summary_lines(summary_rows)
         summary_total = _summary_amount(summary_lines, "3. Total Released Amount")
-        adjustment_control = _required_label_decimal(
-            adjustment_rows, "Total Adjustment Amount", "Adjustment"
+        adjustment_control = (
+            _required_label_decimal(
+                adjustment_rows, "Total Adjustment Amount", "Adjustment"
+            )
+            if adjustment_rows is not None
+            else Decimal("0.00")
         )
-        adjustment_footer = _optional_label_decimal(adjustment_rows, "Total Amount")
+        adjustment_footer = (
+            _optional_label_decimal(adjustment_rows, "Total Amount")
+            if adjustment_rows is not None
+            else None
+        )
         issues: list[SourceValueIssue] = []
         parsed_income = _parse_income_rows(income_rows, issues)
         parsed_service = _parse_service_fee_rows(service_rows, issues)
         parsed_shipping = _parse_shipping_rows(shipping_rows, issues)
-        parsed_adjustments = _parse_adjustment_rows(adjustment_rows, issues)
+        parsed_adjustments = (
+            _parse_adjustment_rows(adjustment_rows, issues)
+            if adjustment_rows is not None
+            else []
+        )
     except WeeklyStatementParseError as exc:
         if not exc.source_filename:
             exc.source_filename = filename
         if not exc.file_hash:
             exc.file_hash = file_hash
+        if not exc.available_sheets:
+            exc.available_sheets = tuple(workbook.sheetnames)
         raise
     finally:
         workbook.close()
@@ -412,7 +456,10 @@ def _require_header(
     found = _find_header(rows, required_headers)
     if found is None:
         raise WeeklyStatementParseError(
-            f"{sheet} is missing required column(s): " + ", ".join(required_headers)
+            f"{sheet} is missing required column(s): " + ", ".join(required_headers),
+            code=INVALID_REQUIRED_HEADER,
+            sheet_name=sheet,
+            expected=required_headers,
         )
     return found
 
