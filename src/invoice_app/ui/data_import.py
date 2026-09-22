@@ -1234,6 +1234,8 @@ def _render_recovery_confirmation() -> None:
         _render_duplicate_removal_confirmation()
     elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "already_imported_sources":
         _render_already_imported_removal_confirmation()
+    elif isinstance(bulk, dict) and bulk.get("confirmation_kind") == "non_new_sources":
+        _render_non_new_removal_confirmation()
     else:
         _render_source_removal_confirmation()
 
@@ -2005,6 +2007,32 @@ def _render_already_imported_removal_confirmation() -> None:
     )
 
 
+@st.dialog("Remove All Non-NEW Sources?", icon=":material/warning:")
+def _render_non_new_removal_confirmation() -> None:
+    bulk = st.session_state.get("pending_validation_bulk_recovery")
+    sources = tuple(bulk.get("sources", ())) if isinstance(bulk, dict) else ()
+    if not sources:
+        _clear_pending_recovery()
+        st.rerun()
+    count = len(sources)
+    _render_pending_recovery_dialog(
+        body=(
+            f"{count} source PDF{'s' if count != 1 else ''} containing non-NEW "
+            "Invoice results will be removed only from this current staging batch. "
+            "If one of these PDFs also contains a NEW order, that whole PDF and all "
+            "of its staged records will be removed. Existing UAT2 data and archived "
+            "source files will not be changed."
+        ),
+        confirm_label=f"Remove {count} PDF{'s' if count != 1 else ''}",
+        confirm_key="confirm_remove_all_non_new_sources",
+        cancel_label="Cancel",
+        cancel_key="cancel_remove_all_non_new_sources",
+        failure_message=(
+            "Unable to remove the non-NEW sources. Your current work has been kept."
+        ),
+    )
+
+
 def _render_product_master_revalidation(entries: tuple[Any, ...]) -> None:
     notice = st.session_state.pop("product_master_revalidation_notice", None)
     if notice:
@@ -2411,6 +2439,13 @@ def _render_historical_status_details(
         st.caption("No target Shopee Invoice source is ready for historical classification.")
         return
     if allow_removal:
+        non_new_sources = tuple(
+            dict.fromkeys(
+                entry.source_filename
+                for entry in entries
+                if entry.status is not IntakeStatus.NEW and entry.source_filename
+            )
+        )
         already_count = sum(
             entry.status is IntakeStatus.ALREADY_IMPORTED for entry in entries
         )
@@ -2444,6 +2479,16 @@ def _render_historical_status_details(
                     "Mixed source — manual review / safe recovery required for "
                     f"{retained_count} source{'s' if retained_count != 1 else ''}."
                 )
+        if non_new_sources and st.button(
+            "Remove all non-NEW source PDFs from current batch",
+            icon=":material/delete_sweep:",
+            key=f"{key_prefix}_remove_all_non_new_sources",
+        ):
+            _queue_bulk_recovery(
+                list(non_new_sources),
+                label="Remove all non-NEW source PDFs",
+                confirmation_kind="non_new_sources",
+            )
     with st.expander("Historical classification details", expanded=False):
         st.dataframe(
             [

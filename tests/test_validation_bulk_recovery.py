@@ -604,3 +604,95 @@ def test_already_imported_bulk_recovery_ui_requires_confirmation_and_is_staging_
     assert [row["order_id"] for row in app.session_state.filtered_state["orders"]] == [
         "NEW",
     ]
+
+
+def _all_non_new_bulk_recovery_app():
+    import streamlit as st
+    from src.invoice_app.services.historical_invoice_intake import (
+        IntakeStatus,
+        InvoiceIntakeEntry,
+    )
+    from src.invoice_app.ui import data_import
+
+    st.session_state.setdefault(
+        "orders",
+        [
+            {
+                "platform": "Shopee", "source_pdf": "stored.pdf",
+                "order_id": "STORED", "status": "Accepted",
+            },
+            {
+                "platform": "Shopee", "source_pdf": "conflict.pdf",
+                "order_id": "CONFLICT", "status": "Accepted",
+            },
+            {
+                "platform": "Shopee", "source_pdf": "conflict.pdf",
+                "order_id": "NEW-IN-MIXED-PDF", "status": "Accepted",
+            },
+            {
+                "platform": "Shopee", "source_pdf": "review.pdf",
+                "order_id": "REVIEW", "status": "Accepted",
+            },
+            {
+                "platform": "Shopee", "source_pdf": "new.pdf",
+                "order_id": "NEW", "status": "Accepted",
+            },
+        ],
+    )
+    for bucket in (
+        "products",
+        "reviews",
+        "duplicate_skipped",
+        "unsupported_files",
+        "processing_errors",
+    ):
+        st.session_state.setdefault(bucket, [])
+    entries = (
+        InvoiceIntakeEntry(
+            "stored", "stored.pdf", "a" * 64, "STORED",
+            IntakeStatus.ALREADY_IMPORTED, None, None,
+        ),
+        InvoiceIntakeEntry(
+            "conflict", "conflict.pdf", "b" * 64, "CONFLICT",
+            IntakeStatus.SOURCE_CONFLICT, "Stored source differs.", None,
+        ),
+        InvoiceIntakeEntry(
+            "new-mixed", "conflict.pdf", "b" * 64, "NEW-IN-MIXED-PDF",
+            IntakeStatus.NEW, None, None,
+        ),
+        InvoiceIntakeEntry(
+            "review", "review.pdf", "c" * 64, "REVIEW",
+            IntakeStatus.NEEDS_REVIEW, "Review required.", None,
+        ),
+        InvoiceIntakeEntry(
+            "new", "new.pdf", "d" * 64, "NEW",
+            IntakeStatus.NEW, None, None,
+        ),
+    )
+    if data_import._has_pending_recovery():
+        data_import._render_recovery_confirmation()
+    else:
+        data_import._render_historical_status_details(
+            entries,
+            allow_removal=True,
+            key_prefix="test_all_non_new",
+        )
+
+
+def test_all_non_new_bulk_recovery_removes_every_non_new_source_in_one_action():
+    app = AppTest.from_function(_all_non_new_bulk_recovery_app)
+
+    app.run()
+    next(
+        button for button in app.button
+        if button.label == "Remove all non-NEW source PDFs from current batch"
+    ).click().run()
+    assert [row["order_id"] for row in app.session_state.filtered_state["orders"]] == [
+        "STORED", "CONFLICT", "NEW-IN-MIXED-PDF", "REVIEW", "NEW",
+    ]
+    next(button for button in app.button if button.label == "Remove 3 PDFs").click().run()
+
+    assert app.exception == []
+    assert [row["order_id"] for row in app.session_state.filtered_state["orders"]] == [
+        "NEW",
+    ]
