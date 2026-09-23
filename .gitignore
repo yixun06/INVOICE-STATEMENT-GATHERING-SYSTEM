@@ -23,6 +23,8 @@ Thumbs.db
 /.env.*
 
 # Local test/cache output
+/.tmp-*
+/.pytest_temp/
 /.pytest-*
 /.pytest_cache/
 
