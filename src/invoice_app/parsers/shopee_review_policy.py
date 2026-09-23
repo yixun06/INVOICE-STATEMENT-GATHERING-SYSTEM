@@ -12,6 +12,7 @@ from .validation import (
     extract_expected_product_count,
     format_validation_errors,
     validate_product_items,
+    validate_shopee_final_amount_adjustment,
     validate_shopee_financial_reconciliation,
     validate_shopee_promotion_evidence,
     validate_shopee_product_amounts,
@@ -24,7 +25,6 @@ from ..review_reason_codes import (
     FINAL_AMOUNT_EXTRACTION_MISSING,
     FINANCIAL_LAYOUT_UNRESOLVED,
     NO_VALID_PRODUCTS,
-    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
     PRODUCT_AMOUNT_RECONCILIATION_FAILED,
     PRODUCT_COUNT_MISMATCH,
     SKU_RESOLUTION_REQUIRED,
@@ -175,26 +175,6 @@ def find_shopee_review_issue(
                 reason_code=INCOME_DETAILS_REQUIRED_FIELD_MISSING,
             )
 
-    if data.post_order_adjustment_observed:
-        if data.post_order_adjustment_final_amount_consistent is None:
-            return ShopeeReviewIssue(
-                order_id=data.order_id,
-                reason=(
-                    "Post-order adjustment evidence requires source-visible Order Income "
-                    "and Final Amount; no missing value was reconstructed."
-                ),
-                reason_code=POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
-            )
-        if not data.post_order_adjustment_final_amount_consistent:
-            return ShopeeReviewIssue(
-                order_id=data.order_id,
-                reason=(
-                    "Post-order adjustment evidence conflicts: source Order Income plus "
-                    "the completed adjustment does not equal source Final Amount."
-                ),
-                reason_code=POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
-            )
-
     product_amount_error = validate_shopee_product_amounts(
         product_items,
         data.income.get("merchandise_subtotal"),
@@ -216,6 +196,20 @@ def find_shopee_review_issue(
     )
     if financial_error:
         return ShopeeReviewIssue(order_id=data.order_id, reason=financial_error)
+
+    adjustment_issue = validate_shopee_final_amount_adjustment(
+        data.income,
+        label_presence=data.income_label_presence,
+        adjustment_observed=data.post_order_adjustment_observed,
+        adjustment_amount=data.post_order_adjustment_amount,
+    )
+    if adjustment_issue is not None:
+        reason, reason_code = adjustment_issue
+        return ShopeeReviewIssue(
+            order_id=data.order_id,
+            reason=reason,
+            reason_code=reason_code,
+        )
 
     return None
 

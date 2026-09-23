@@ -488,6 +488,11 @@ def _revalidate_and_accept(
         order,
         order.get("refund_amount"),
         layout=revalidated.invoice_financial_layout or "",
+        label_presence=(
+            frozenset(order.get("_income_label_presence") or ())
+            if "_income_label_presence" in order
+            else None
+        ),
     )
     accepted_products = [dict(product) for product in revalidated.products]
     for product, enrichment in zip(accepted_products, revalidated.master_enrichment):

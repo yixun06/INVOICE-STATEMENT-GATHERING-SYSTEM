@@ -84,6 +84,7 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
             income,
             data.refund_amount,
             layout=data.invoice_financial_layout,
+            label_presence=data.income_label_presence,
         ),
         "source_pdf": data.source_pdf,
         "gross_sales": _financial_value(income, "merchandise_subtotal"),

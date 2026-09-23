@@ -31,6 +31,11 @@ _RETURN_REFUND_AFTER_COMPLETED_ROW = re.compile(
     rf"(?P<amount_before>{MONEY_PATTERN})\s*(?:\n\s*)?Completed)",
     flags=re.IGNORECASE,
 )
+_RETURN_REFUND_AFTER_COMPLETED_EVIDENCE = re.compile(
+    rf"\b(?P<date>\d{{2}}/\d{{2}}/\d{{4}})\s+"
+    r"Return\s+Refund\s+Adjustment\s+After\s+Order\s+Completed\b",
+    flags=re.IGNORECASE,
+)
 
 INCOME_ALIASES: dict[str, tuple[str, ...]] = {
     "merchandise_subtotal": ("Merchandise Subtotal",),
@@ -64,7 +69,11 @@ INCOME_ALIASES: dict[str, tuple[str, ...]] = {
 NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS = (
     "merchandise_subtotal",
     "product_price",
+)
+
+CONDITIONAL_TOP_LEVEL_INCOME_FIELDS = (
     "shipping_subtotal",
+    "vouchers_rebates_total",
     "fees_charges_total",
 )
 
@@ -141,7 +150,7 @@ def extract_refund_amount(text: str) -> Decimal | None:
 
 def extract_post_order_return_refund_adjustment(
     text: str,
-) -> tuple[str, str, str, Decimal] | None:
+) -> tuple[str, str, str, Decimal | None] | None:
     """Extract only the supported completed Order Adjustment source row.
 
     This is intentionally separate from the original Invoice's Refund Amount.
@@ -151,19 +160,28 @@ def extract_post_order_return_refund_adjustment(
     """
     for header in _ORDER_ADJUSTMENT_HEADER.finditer(text):
         row = _RETURN_REFUND_AFTER_COMPLETED_ROW.search(text, header.end())
-        if row is None:
-            continue
-        return (
-            RETURN_REFUND_AFTER_ORDER_COMPLETED,
-            # This literal is returned only after the exact source-visible
-            # reason was matched above; it is not reconstructed from the
-            # normalized event type downstream.
-            "Return Refund Adjustment After Order Completed",
-            normalize_whitespace(row.group("date")),
-            parse_decimal(
-                row.group("amount_after") or row.group("amount_before")
-            ).quantize(Decimal("0.01")),
+        if row is not None:
+            return (
+                RETURN_REFUND_AFTER_ORDER_COMPLETED,
+                # This literal is returned only after the exact source-visible
+                # reason was matched above; it is not reconstructed from the
+                # normalized event type downstream.
+                "Return Refund Adjustment After Order Completed",
+                normalize_whitespace(row.group("date")),
+                parse_decimal(
+                    row.group("amount_after") or row.group("amount_before")
+                ).quantize(Decimal("0.01")),
+            )
+        missing_amount_row = _RETURN_REFUND_AFTER_COMPLETED_EVIDENCE.search(
+            text, header.end()
         )
+        if missing_amount_row is not None:
+            return (
+                RETURN_REFUND_AFTER_ORDER_COMPLETED,
+                "Return Refund Adjustment After Order Completed",
+                normalize_whitespace(missing_amount_row.group("date")),
+                None,
+            )
     return None
 
 
@@ -280,13 +298,15 @@ def missing_income_detail_fields(
     for field in required_fields:
         if is_missing_financial_value(income.get(field)):
             missing.append(INCOME_ALIASES[field][0])
-    if (
-        layout == NORMAL_ORDER
-        and label_presence is not None
-        and "vouchers_rebates_total" in label_presence
-        and is_missing_financial_value(income.get("vouchers_rebates_total"))
-    ):
-        missing.append(INCOME_ALIASES["vouchers_rebates_total"][0])
+    if layout == NORMAL_ORDER:
+        for field in CONDITIONAL_TOP_LEVEL_INCOME_FIELDS:
+            visible = (
+                field in label_presence
+                if label_presence is not None
+                else not is_missing_financial_value(income.get(field))
+            )
+            if visible and is_missing_financial_value(income.get(field)):
+                missing.append(INCOME_ALIASES[field][0])
     if layout == RETURN_REFUND:
         if refund_amount is None:
             missing.append("Refund Amount")

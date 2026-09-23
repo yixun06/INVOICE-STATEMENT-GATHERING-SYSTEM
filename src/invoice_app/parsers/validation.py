@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 import re
-from typing import Any
+from typing import Any, Mapping
 
+from ..review_reason_codes import (
+    POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+)
 from ..utils.normalize import parse_quantity
-from .shopee_financial_parser import NORMAL_ORDER, RETURN_REFUND
+from .shopee_financial_parser import (
+    CONDITIONAL_TOP_LEVEL_INCOME_FIELDS,
+    NORMAL_ORDER,
+    RETURN_REFUND,
+)
 
 
 MONEY_TOLERANCE = Decimal("0.02")
@@ -205,26 +214,19 @@ def validate_shopee_financial_reconciliation(
 
     merchandise = _decimal_value(income.get("merchandise_subtotal"))
     product_price = _decimal_value(income.get("product_price"))
-    shipping = _decimal_value(income.get("shipping_subtotal"))
-    fees = _decimal_value(income.get("fees_charges_total"))
     order_income = _decimal_value(income.get("order_income"))
-    if any(
-        value is None
-        for value in (merchandise, product_price, shipping, fees, order_income)
-    ):
+    if any(value is None for value in (merchandise, product_price, order_income)):
         return None
 
-    expected_income = merchandise + shipping + fees
-    voucher_visible = (
-        "vouchers_rebates_total" in label_presence
-        if label_presence is not None
-        else not _is_missing_money(income.get("vouchers_rebates_total"))
-    )
-    if voucher_visible:
-        voucher = _decimal_value(income.get("vouchers_rebates_total"))
-        if voucher is None:
-            return "Financial Reconciliation Failed: Vouchers & Rebates is not numeric."
-        expected_income += voucher
+    expected_income = merchandise
+    for field in CONDITIONAL_TOP_LEVEL_INCOME_FIELDS:
+        if not _source_field_visible(field, income, label_presence):
+            continue
+        value = _decimal_value(income.get(field))
+        if value is None:
+            label = field.replace("_", " ").title()
+            return f"Financial Reconciliation Failed: {label} is not numeric."
+        expected_income += value
 
     if abs(expected_income - order_income) > MONEY_TOLERANCE:
         return (
@@ -235,11 +237,61 @@ def validate_shopee_financial_reconciliation(
     return None
 
 
+def validate_shopee_final_amount_adjustment(
+    income: Mapping[str, Any],
+    *,
+    label_presence: frozenset[str] | None,
+    adjustment_observed: bool,
+    adjustment_amount: Any,
+) -> tuple[str, str] | None:
+    """Validate only source-visible Final Amount and supported adjustment evidence."""
+    if not _source_field_visible("final_amount", income, label_presence):
+        return None
+    order_income = _decimal_value(income.get("order_income"))
+    final_amount = _decimal_value(income.get("final_amount"))
+    if order_income is None or final_amount is None:
+        return None
+
+    if adjustment_observed:
+        parsed_adjustment = _decimal_value(adjustment_amount)
+        if parsed_adjustment is None:
+            return (
+                "Post-order adjustment amount is visibly required by the supported source evidence but could not be extracted.",
+                POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+            )
+        if abs(order_income + parsed_adjustment - final_amount) > MONEY_TOLERANCE:
+            return (
+                "Post-order adjustment evidence conflicts: source Order Income plus the completed adjustment does not equal source Final Amount.",
+                POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+            )
+        return None
+
+    if abs(final_amount - order_income) > MONEY_TOLERANCE:
+        return (
+            "Final Amount differs from Order Income, but supported source-visible adjustment evidence is not available.",
+            POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+        )
+    return None
+
+
+def post_order_adjustment_final_amount_consistent(
+    income: Mapping[str, Any], adjustment_amount: Any
+) -> bool | None:
+    """Return consistency for parsed source values using the money tolerance."""
+    order_income = _decimal_value(income.get("order_income"))
+    final_amount = _decimal_value(income.get("final_amount"))
+    parsed_adjustment = _decimal_value(adjustment_amount)
+    if order_income is None or final_amount is None or parsed_adjustment is None:
+        return None
+    return abs(order_income + parsed_adjustment - final_amount) <= MONEY_TOLERANCE
+
+
 def financial_reconciliation_evidence_notes(
     income: dict[str, str],
     refund_amount: Any = None,
     *,
     layout: str = NORMAL_ORDER,
+    label_presence: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Describe incomplete or mismatched component evidence without blocking entry."""
     notes: list[str] = []
@@ -284,22 +336,18 @@ def financial_reconciliation_evidence_notes(
                 f"but Fees & Charges is {fees_aggregate:.2f}."
             )
 
-    applicable_fees = fees_aggregate
-    if applicable_fees is None and isinstance(fee_values, list):
-        applicable_fees = sum(fee_values, Decimal("0"))
     merchandise = _decimal_value(income.get("merchandise_subtotal"))
-    shipping = _decimal_value(income.get("shipping_subtotal"))
     order_income = _decimal_value(income.get("order_income"))
-    if merchandise is None or shipping is None or applicable_fees is None or order_income is None:
+    if merchandise is None or order_income is None:
         return tuple(notes)
-    expected_income = merchandise + shipping + applicable_fees
-    vouchers = income.get("vouchers_rebates_total")
-    if not _is_missing_money(vouchers):
-        voucher_value = _decimal_value(vouchers)
-        if voucher_value is None:
-            notes.append("Financial Reconciliation Failed: Vouchers & Rebates is not numeric.")
-        else:
-            expected_income += voucher_value
+    expected_income = merchandise
+    for field in CONDITIONAL_TOP_LEVEL_INCOME_FIELDS:
+        if not _source_field_visible(field, income, label_presence):
+            continue
+        value = _decimal_value(income.get(field))
+        if value is None:
+            return tuple(notes)
+        expected_income += value
 
     if abs(expected_income - order_income) > MONEY_TOLERANCE:
         notes.append(
@@ -351,6 +399,16 @@ def _decimal_value(value: Any) -> Decimal | None:
 
 def _is_missing_money(value: Any) -> bool:
     return value is None or str(value).strip() in ("", "N/A")
+
+
+def _source_field_visible(
+    field: str,
+    values: Mapping[str, Any],
+    label_presence: frozenset[str] | None,
+) -> bool:
+    if label_presence is not None:
+        return field in label_presence
+    return not _is_missing_money(values.get(field))
 
 
 def _has_explicit_shopee_promotion(item: dict[str, Any]) -> bool:

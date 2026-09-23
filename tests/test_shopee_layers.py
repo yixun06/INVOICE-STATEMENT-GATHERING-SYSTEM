@@ -5,6 +5,7 @@ import pytest
 
 from src.invoice_app.parsers.shopee_extractor import extract_order_date, extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import (
+    NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS,
     NORMAL_ORDER,
     RETURN_REFUND,
     UNKNOWN_OR_MIXED,
@@ -428,28 +429,98 @@ def test_shopee_normal_visible_top_level_anchor_without_value_requires_review(fi
     assert label in issue.reason
 
 
-@pytest.mark.parametrize(
-    ("source_line", "field", "label"),
-    (
-        ("Shipping Subtotal RM0.00\n", "shipping_subtotal", "Shipping Subtotal"),
-        ("Fees & Charges -RM3.00\n", "fees_charges_total", "Fees & Charges"),
-    ),
-)
-def test_shopee_normal_absent_required_top_level_anchor_requires_review(
-    source_line, field, label
-):
+def test_shopee_normal_absent_shipping_is_excluded_when_visible_amounts_reconcile():
     extracted = extract_shopee_data(
-        VALID_SHOPEE_TEXT.replace(source_line, ""),
-        f"absent-{field}.pdf",
+        VALID_SHOPEE_TEXT.replace("Shipping Subtotal RM0.00\n", ""),
+        "absent-shipping.pdf",
     )
 
     issue = find_shopee_review_issue(extracted)
 
-    assert field not in extracted.income_label_presence
-    assert extracted.income[field] == "N/A"
+    assert "shipping_subtotal" not in extracted.income_label_presence
+    assert extracted.income["shipping_subtotal"] == "N/A"
+    assert issue is None
+
+
+def test_shopee_normal_absent_fees_produces_formula_mismatch_not_missing_review():
+    extracted = extract_shopee_data(
+        VALID_SHOPEE_TEXT.replace("Fees & Charges -RM3.00\n", ""),
+        "absent-fees-mismatch.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert "fees_charges_total" not in extracted.income_label_presence
+    assert extracted.income["fees_charges_total"] == "N/A"
     assert issue is not None
-    assert issue.reason_code == INCOME_DETAILS_REQUIRED_FIELD_MISSING
-    assert label in issue.reason
+    assert issue.reason_code is None
+    assert issue.reason == (
+        "Financial Reconciliation Failed: seller components total 25.00, "
+        "but Order Income is 22.00."
+    )
+
+
+def test_shopee_normal_all_optional_components_absent_preserves_na_and_passes():
+    text = VALID_SHOPEE_TEXT
+    for source_line in (
+        "Shipping Subtotal RM0.00\n",
+        "Fees & Charges -RM3.00\n",
+    ):
+        text = text.replace(source_line, "")
+    text = text.replace("Estimated Order Income RM22.00", "Estimated Order Income RM25.00")
+    extracted = extract_shopee_data(text, "all-optional-absent.pdf")
+    order, _ = map_shopee_records(extracted, "all-optional-absent")
+
+    assert find_shopee_review_issue(extracted) is None
+    assert extracted.income["shipping_subtotal"] == "N/A"
+    assert extracted.income["vouchers_rebates_total"] == "N/A"
+    assert extracted.income["fees_charges_total"] == "N/A"
+    assert order["shipping_subtotal"] == "N/A"
+    assert order["vouchers_rebates_total"] == "N/A"
+    assert order["fees_charges_total"] == "N/A"
+
+
+def test_shopee_explicit_label_presence_excludes_stale_optional_values():
+    income = {
+        "merchandise_subtotal": "100.00",
+        "product_price": "100.00",
+        "shipping_subtotal": "999.00",
+        "vouchers_rebates_total": "-999.00",
+        "fees_charges_total": "-10.00",
+        "order_income": "90.00",
+    }
+
+    assert validate_shopee_financial_reconciliation(
+        income,
+        label_presence=frozenset(
+            {"merchandise_subtotal", "product_price", "fees_charges_total"}
+        ),
+    ) is None
+
+
+def test_shopee_normal_required_fields_are_only_merchandise_and_product_price():
+    assert NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS == (
+        "merchandise_subtotal",
+        "product_price",
+    )
+
+
+def test_product_price_is_required_evidence_but_not_an_order_income_component():
+    income = {
+        "merchandise_subtotal": "100.00",
+        "product_price": "120.00",
+        "shipping_subtotal": "N/A",
+        "vouchers_rebates_total": "N/A",
+        "fees_charges_total": "-10.00",
+        "order_income": "90.00",
+    }
+
+    assert validate_shopee_financial_reconciliation(
+        income,
+        label_presence=frozenset(
+            {"merchandise_subtotal", "product_price", "fees_charges_total"}
+        ),
+    ) is None
 
 
 def test_shopee_final_amount_visible_but_unparsed_contract_is_unchanged():

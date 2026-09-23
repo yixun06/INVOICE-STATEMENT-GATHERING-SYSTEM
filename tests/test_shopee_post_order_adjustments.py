@@ -33,6 +33,11 @@ from src.invoice_app.services.historical_invoice_intake import (
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_invoice_revalidation import revalidate_shopee_invoice
 from src.invoice_app.services.uat2_persistence_schema import INVOICE_ORDERS_HEADERS
+from src.invoice_app.review_reason_codes import (
+    POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+)
 
 
 ADJUSTMENT_ARCHIVE = Path(r"D:\download material\ADJUSTMENT EXP.zip")
@@ -156,7 +161,8 @@ def test_completed_adjustment_keeps_transient_evidence_and_normal_identity_block
 
 def test_completed_adjustment_with_inconsistent_final_amount_fails_closed():
     extracted = extract_shopee_data(
-        _order_text(final_amount="32.35"), "adjustment-conflict.pdf"
+        _order_text(order_income="50.00", final_amount="32.30"),
+        "adjustment-conflict.pdf",
     )
 
     issue = find_shopee_review_issue(extracted)
@@ -165,6 +171,113 @@ def test_completed_adjustment_with_inconsistent_final_amount_fails_closed():
     assert extracted.post_order_adjustment_final_amount_consistent is False
     assert issue is not None
     assert issue.reason_code == "POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT"
+
+
+def test_final_amount_equal_to_order_income_without_adjustment_passes():
+    extracted = extract_shopee_data(
+        _order_text(
+            order_income="50.00",
+            final_amount="50.00",
+            include_adjustment=False,
+            product_return_marker=False,
+        ),
+        "no-adjustment-equal-final.pdf",
+    )
+
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_final_amount_difference_without_adjustment_evidence_fails_closed():
+    extracted = extract_shopee_data(
+        _order_text(
+            order_income="50.00",
+            final_amount="45.00",
+            include_adjustment=False,
+            product_return_marker=False,
+        ),
+        "no-adjustment-different-final.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert issue is not None
+    assert issue.reason_code == POST_ORDER_ADJUSTMENT_SOURCE_MISSING
+    assert extracted.post_order_adjustment_amount is None
+
+
+def test_visible_supported_adjustment_with_missing_amount_is_distinct_review():
+    extracted = extract_shopee_data(
+        _order_text(
+            order_income="50.00",
+            final_amount="45.00",
+            adjustment_amount="",
+        ),
+        "adjustment-amount-missing.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.post_order_adjustment_observed is True
+    assert extracted.post_order_adjustment_amount is None
+    assert issue is not None
+    assert issue.reason_code == POST_ORDER_ADJUSTMENT_AMOUNT_MISSING
+
+
+def test_revalidation_enforces_shared_adjustment_contract():
+    accepted = extract_shopee_data(
+        _order_text(order_income="50.00", final_amount="32.33"),
+        "adjustment-revalidation.pdf",
+    )
+    order, products = map_shopee_records(accepted, "adjustment-revalidation")
+    master = _real_product_master(products)
+
+    assert revalidate_shopee_invoice(order, products, price_master=master).error is None
+
+    conflict = dict(order, post_order_adjustment_amount="-17.60")
+    result = revalidate_shopee_invoice(conflict, products, price_master=master)
+    assert result.error is not None
+    assert "does not equal source Final Amount" in result.error
+
+    amount_missing = dict(order, post_order_adjustment_amount="N/A")
+    result = revalidate_shopee_invoice(amount_missing, products, price_master=master)
+    assert result.error is not None
+    assert "could not be extracted" in result.error
+
+    source_missing = dict(order, post_order_adjustment_observed=False)
+    result = revalidate_shopee_invoice(source_missing, products, price_master=master)
+    assert result.error is not None
+    assert "adjustment evidence is not available" in result.error
+
+
+def test_revalidation_uses_the_same_optional_component_visibility_contract():
+    text = _order_text(
+        order_income="50.00",
+        final_amount="50.00",
+        include_adjustment=False,
+        product_return_marker=False,
+    ).replace("Shipping Subtotal RM0.00\n", "").replace(
+        "Fees & Charges -RM0.00\n", ""
+    )
+    extracted = extract_shopee_data(text, "optional-absent-revalidation.pdf")
+    order, products = map_shopee_records(extracted, "optional-absent-revalidation")
+    master = _real_product_master(products)
+
+    assert order["shipping_subtotal"] == "N/A"
+    assert order["vouchers_rebates_total"] == "N/A"
+    assert order["fees_charges_total"] == "N/A"
+    assert revalidate_shopee_invoice(order, products, price_master=master).error is None
+
+    visible_missing = dict(order)
+    visible_missing["_income_label_presence"] = tuple(
+        sorted({*order["_income_label_presence"], "shipping_subtotal"})
+    )
+    result = revalidate_shopee_invoice(
+        visible_missing,
+        products,
+        price_master=master,
+    )
+    assert result.error is not None
+    assert "Missing: Shipping Subtotal" in result.error
 
 
 def test_post_order_adjustment_evidence_is_not_added_to_the_canonical_invoice_schema():

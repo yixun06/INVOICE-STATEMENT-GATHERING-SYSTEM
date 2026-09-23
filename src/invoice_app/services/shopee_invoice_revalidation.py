@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from src.invoice_app.parsers.shopee_financial_parser import (
     INCOME_ALIASES,
+    CONDITIONAL_TOP_LEVEL_INCOME_FIELDS,
     NORMAL_ORDER,
     NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS,
     RETURN_REFUND,
@@ -18,6 +19,7 @@ from src.invoice_app.parsers.shopee_product_parser import resolve_promotion_grou
 from src.invoice_app.parsers.validation import (
     count_product_anchor_items,
     validate_product_items,
+    validate_shopee_final_amount_adjustment,
     validate_shopee_financial_reconciliation,
     validate_shopee_product_amounts,
     validate_shopee_promotion_evidence,
@@ -102,9 +104,17 @@ def revalidate_shopee_invoice(
         dict(order),
         order.get("refund_amount"),
         layout=layout,
-        label_presence=frozenset(order.get("_income_label_presence") or ()),
+        label_presence=_income_label_presence(order),
     ):
         return _failed(working, financial_error)
+    adjustment_issue = validate_shopee_final_amount_adjustment(
+        order,
+        label_presence=_income_label_presence(order),
+        adjustment_observed=order.get("post_order_adjustment_observed") is True,
+        adjustment_amount=order.get("post_order_adjustment_amount"),
+    )
+    if adjustment_issue is not None:
+        return _failed(working, adjustment_issue[0])
 
     enrichment: list[dict[str, Any]] = []
     for product in working:
@@ -171,13 +181,16 @@ def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -
         for field in required
         if is_missing_financial_value(order.get(field))
     ]
-    visible = set(order.get("_income_label_presence") or ())
-    if (
-        layout == NORMAL_ORDER
-        and "vouchers_rebates_total" in visible
-        and is_missing_financial_value(order.get("vouchers_rebates_total"))
-    ):
-        missing.append(INCOME_ALIASES["vouchers_rebates_total"][0])
+    label_presence = _income_label_presence(order)
+    if layout == NORMAL_ORDER:
+        for field in CONDITIONAL_TOP_LEVEL_INCOME_FIELDS:
+            visible = (
+                field in label_presence
+                if label_presence is not None
+                else not is_missing_financial_value(order.get(field))
+            )
+            if visible and is_missing_financial_value(order.get(field)):
+                missing.append(INCOME_ALIASES[field][0])
     if layout == RETURN_REFUND:
         if is_missing_financial_value(order.get("refund_amount")):
             missing.append("Refund Amount")
@@ -189,11 +202,21 @@ def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -
     elif is_missing_financial_value(order.get("order_income")):
         missing.append("Estimated Order Income or Order Income")
 
-    if "final_amount" in visible and is_missing_financial_value(order.get("final_amount")):
+    if (
+        label_presence is not None
+        and "final_amount" in label_presence
+        and is_missing_financial_value(order.get("final_amount"))
+    ):
         missing.append(INCOME_ALIASES["final_amount"][0])
     if missing:
         return "Income Details require source review before validation. Missing: " + ", ".join(missing) + "."
     return None
+
+
+def _income_label_presence(order: Mapping[str, Any]) -> frozenset[str] | None:
+    if "_income_label_presence" not in order:
+        return None
+    return frozenset(order.get("_income_label_presence") or ())
 
 
 def _failed(
