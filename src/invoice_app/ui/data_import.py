@@ -103,6 +103,7 @@ from ..services.shopee_monthly_statement_import import (
 )
 from ..domain.statement_reconciliation_v2 import IdentityScope, SettlementBasis
 from ..services.manual_review_resolution import (
+    ADJUSTMENT_CORRECTION,
     MISSING_INCOME,
     FINAL_AMOUNT,
     FINANCIAL_CORRECTION,
@@ -129,7 +130,11 @@ from ..services.manual_review_resolution import (
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
 )
-from ..review_reason_codes import INCOME_DETAILS_REQUIRED_FIELD_MISSING
+from ..review_reason_codes import (
+    POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+)
 
 
 
@@ -1399,7 +1404,7 @@ def _render_issue_details(issue: ValidationIssue) -> None:
     details = {
         key: value
         for key, value in issue.evidence.items()
-        if key in {"source_pdf", "filename", "platform", "order_id", "status", "reason", "message", "error", "code"}
+        if key in {"source_pdf", "filename", "platform", "order_id", "status", "reason", "reason_code", "message", "error", "code"}
         and isinstance(value, (str, int, float, bool, type(None)))
     }
     if details:
@@ -1728,7 +1733,7 @@ def _render_manual_review_resolution() -> None:
                     _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
 
             for review in unfixable_reviews:
-                presentation = _source_absent_financial_presentation(review)
+                presentation = _unfixable_financial_presentation(review)
                 if presentation is None:
                     continue
                 with st.container(border=True):
@@ -1830,12 +1835,20 @@ def _render_manual_review_resolution() -> None:
                         _render_combined_resolution_form(plan.key, review)
                     elif plan.issue_type == FINAL_AMOUNT:
                         _render_final_amount_form(plan.key, review)
-                    elif plan.issue_type == FINANCIAL_CORRECTION:
+                    elif plan.issue_type in {FINANCIAL_CORRECTION, ADJUSTMENT_CORRECTION}:
                         _render_financial_correction_form(plan.key, review)
                     else:
                         _render_income_form(plan.key, review)
-                    if plan.issue_type != FINANCIAL_CORRECTION:
+                    if plan.issue_type not in {FINANCIAL_CORRECTION, ADJUSTMENT_CORRECTION}:
                         _render_financial_enrichment_draft(plan.key, review)
+                    if plan.issue_type == ADJUSTMENT_CORRECTION:
+                        with st.expander("Technical Details", expanded=False):
+                            st.json(
+                                {
+                                    "reason_code": review.get("reason_code"),
+                                    "reason": review.get("reason"),
+                                }
+                            )
 
 
 def _synchronize_manual_review_focus(
@@ -2027,6 +2040,12 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
         calculated_column.metric("Calculated", calculated)
         invoice_column.metric("Invoice", invoice)
         difference_column.metric("Difference", difference)
+    if summary := presentation.get("adjustment_summary"):
+        expected, invoice, difference = summary
+        expected_column, invoice_column, difference_column = st.columns(3)
+        expected_column.metric("Expected Final Amount", expected)
+        invoice_column.metric("Invoice Final Amount", invoice)
+        difference_column.metric("Difference", difference)
     st.caption(presentation["action"])
     with st.form(f"financial_correction_{key}", border=False):
         values: dict[str, str] = {}
@@ -2039,8 +2058,10 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
                 key=f"mr_financial_correction_{key}_{field}",
             )
 
-        if presentation["kind"] == "formula_mismatch":
-            input_columns = st.columns(2)
+        if presentation["kind"] in {"formula_mismatch", "adjustment_conflict"}:
+            input_columns = st.columns(
+                3 if presentation["kind"] == "adjustment_conflict" else 2
+            )
             for index, (field, label) in enumerate(fields):
                 with input_columns[index % len(input_columns)]:
                     render_field(field, label)
@@ -2064,6 +2085,22 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
 def _financial_review_presentation(
     review: Mapping[str, Any], fields: tuple[tuple[str, str], ...]
 ) -> dict[str, Any]:
+    code = str(review.get("reason_code") or "")
+    if code == POST_ORDER_ADJUSTMENT_AMOUNT_MISSING:
+        return {
+            "kind": "adjustment_missing",
+            "title": "Missing adjustment amount",
+            "reason": "The adjustment amount could not be read from the invoice.",
+            "action": "Enter the adjustment amount exactly as shown on the invoice.",
+        }
+    if code == POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT:
+        return {
+            "kind": "adjustment_conflict",
+            "title": "Check adjustment amounts",
+            "reason": "Final Amount does not match Order Income plus the adjustment.",
+            "action": "Check the amounts below and correct any value that was read incorrectly.",
+            "adjustment_summary": _adjustment_conflict_summary(review),
+        }
     summary = _formula_mismatch_summary(str(review.get("reason") or ""))
     if summary is not None:
         return {
@@ -2099,42 +2136,47 @@ def _formula_mismatch_summary(reason: str) -> tuple[str, str, str] | None:
     )
 
 
+def _adjustment_conflict_summary(
+    review: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    payload = review.get("order_payload") or {}
+    try:
+        order_income = Decimal(str(payload.get("order_income")).replace(",", ""))
+        adjustment = Decimal(
+            str(payload.get("post_order_adjustment_amount")).replace(",", "")
+        )
+        final_amount = Decimal(str(payload.get("final_amount")).replace(",", ""))
+    except (ArithmeticError, ValueError):
+        return None
+    expected = order_income + adjustment
+    return (
+        _format_rm(expected),
+        _format_rm(final_amount),
+        _format_rm(abs(final_amount - expected)),
+    )
+
+
 def _format_rm(value: Decimal) -> str:
     return f"RM{value.quantize(Decimal('0.01'))}"
 
 
-def _source_absent_financial_presentation(
+def _unfixable_financial_presentation(
     review: Mapping[str, Any],
 ) -> dict[str, str] | None:
-    if str(review.get("reason_code") or "") != INCOME_DETAILS_REQUIRED_FIELD_MISSING:
-        return None
-    if financial_enrichment_fields(review):
-        return None
-    label = _missing_financial_label(str(review.get("reason") or ""))
-    if not label:
+    if str(review.get("reason_code") or "") != POST_ORDER_ADJUSTMENT_SOURCE_MISSING:
         return None
     return {
-        "title": "Incomplete invoice",
-        "reason": f"{label} is missing from this invoice.",
-        "action": "Upload a complete invoice to continue.",
+        "title": "Adjustment evidence missing",
+        "reason": "Final Amount differs from Order Income, but no adjustment is shown in the source.",
+        "action": "Upload an invoice or source that shows the adjustment to continue.",
     }
 
 
 def _manual_review_primary_reason(review: Mapping[str, Any]) -> str:
-    presentation = _source_absent_financial_presentation(review)
+    presentation = _unfixable_financial_presentation(review)
     return presentation["reason"] if presentation is not None else str(
         review.get("reason") or "Manual Review required"
     )
-
-
-def _missing_financial_label(reason: str) -> str | None:
-    match = re.search(r"\bMissing:\s*([^.]*)", reason, flags=re.IGNORECASE)
-    if match is None:
-        return None
-    labels = [label.strip() for label in match.group(1).split(",") if label.strip()]
-    return labels[0] if len(labels) == 1 else None
-
-
 def _render_missing_product_draft(key: str, review: dict[str, Any]) -> None:
     summary = draft_summary(st.session_state, review)
     st.caption(

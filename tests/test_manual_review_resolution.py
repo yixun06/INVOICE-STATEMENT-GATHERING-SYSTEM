@@ -1,6 +1,7 @@
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.manual_review_resolution import (
+    ADJUSTMENT_CORRECTION,
     CORRECTION_DRAFTS_KEY,
     FINANCIAL_CORRECTION,
     MISSING_INCOME,
@@ -26,10 +27,14 @@ from src.invoice_app.services.manual_review_resolution import (
 from src.invoice_app.review_reason_codes import SKU_RESOLUTION_REQUIRED
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.review_reason_codes import (
+    FINAL_AMOUNT_EXTRACTION_MISSING,
     INCOME_COMPLETION_ANCHOR_MISSING,
     INCOME_DETAILS_REQUIRED_FIELD_MISSING,
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
+    POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
 )
 
 
@@ -210,6 +215,46 @@ def _missing_financial_anchor_review(field, *, visible=True):
     return review
 
 
+def _adjustment_review(reason_code):
+    review = _financial_review(final_visible=True)
+    review["source_pdf"] = "adjustment.pdf"
+    review["order_id"] = "SHP-ADJUSTMENT"
+    review["reason_code"] = reason_code
+    review["order_payload"].update(
+        {
+            "source_pdf": "adjustment.pdf",
+            "order_id": "SHP-ADJUSTMENT",
+            "order_income": "11.00",
+            "estimated_order_income": "11.00",
+            "final_amount": "9.00",
+            "post_order_adjustment_observed": reason_code
+            != POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+            "post_order_adjustment_type": "RETURN_REFUND_AFTER_ORDER_COMPLETED",
+            "post_order_adjustment_reason": "Return Refund Adjustment After Order Completed",
+            "post_order_adjustment_date": "01/08/2026",
+        }
+    )
+    if reason_code == POST_ORDER_ADJUSTMENT_AMOUNT_MISSING:
+        review["reason"] = (
+            "Post-order adjustment amount is visibly required by the supported "
+            "source evidence but could not be extracted."
+        )
+        review["order_payload"]["post_order_adjustment_amount"] = None
+    elif reason_code == POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT:
+        review["reason"] = (
+            "Post-order adjustment evidence conflicts: source Order Income plus "
+            "the completed adjustment does not equal source Final Amount."
+        )
+        review["order_payload"]["post_order_adjustment_amount"] = "-1.00"
+    else:
+        review["reason"] = (
+            "Final Amount differs from Order Income, but supported source-visible "
+            "adjustment evidence is not available."
+        )
+        review["order_payload"]["post_order_adjustment_amount"] = None
+    return review
+
+
 def test_formula_mismatch_exposes_only_source_visible_top_level_financial_fields_with_product_price():
     review = _financial_review(voucher_visible=True, final_visible=True)
 
@@ -264,6 +309,158 @@ def test_source_absent_required_shipping_or_fees_anchor_has_no_numeric_resolutio
 
         assert financial_enrichment_fields(review) == ()
         assert resolution_plan(review) is None
+
+
+def test_optional_source_absence_has_no_obsolete_incomplete_invoice_presentation():
+    from src.invoice_app.ui.data_import import _unfixable_financial_presentation
+
+    review = _missing_financial_anchor_review("shipping_subtotal", visible=False)
+
+    assert _unfixable_financial_presentation(review) is None
+
+
+def test_adjustment_amount_missing_exposes_only_the_source_adjustment_field():
+    review = _adjustment_review(POST_ORDER_ADJUSTMENT_AMOUNT_MISSING)
+
+    plan = resolution_plan(review)
+
+    assert plan is not None and plan.issue_type == ADJUSTMENT_CORRECTION
+    assert financial_enrichment_fields(review) == (
+        ("post_order_adjustment_amount", "Adjustment Amount"),
+    )
+
+
+def test_adjustment_conflict_exposes_exactly_the_three_source_amounts():
+    review = _adjustment_review(POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT)
+
+    plan = resolution_plan(review)
+
+    assert plan is not None and plan.issue_type == ADJUSTMENT_CORRECTION
+    assert financial_enrichment_fields(review) == (
+        ("order_income", "Order Income"),
+        ("post_order_adjustment_amount", "Adjustment Amount"),
+        ("final_amount", "Final Amount"),
+    )
+
+
+def test_adjustment_source_missing_has_no_online_resolution():
+    review = _adjustment_review(POST_ORDER_ADJUSTMENT_SOURCE_MISSING)
+
+    assert resolution_plan(review) is None
+
+
+def test_adjustment_correction_requires_confirmation_and_full_revalidation():
+    review = _adjustment_review(POST_ORDER_ADJUSTMENT_AMOUNT_MISSING)
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    unconfirmed = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": False,
+            "financial_enrichment": {"post_order_adjustment_amount": "-2.00"},
+        },
+        price_master=_master(),
+    )
+    assert unconfirmed.resolved is False
+    assert state["reviews"] == [review]
+
+    inconsistent = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {"post_order_adjustment_amount": "-1.00"},
+        },
+        price_master=_master(),
+    )
+    assert inconsistent.resolved is False
+    assert "adjustment evidence conflicts" in inconsistent.reason.lower()
+    assert state["reviews"] == [review]
+
+    resolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {"post_order_adjustment_amount": "-2.00"},
+        },
+        price_master=_master(),
+    )
+    assert resolved.resolved is True
+    assert state["reviews"] == []
+    assert state["orders"][0]["post_order_adjustment_amount"] == "-2.00"
+    assert state["orders"][0]["post_order_adjustment_observed"] is True
+    assert state["orders"][0]["post_order_adjustment_type"] == "RETURN_REFUND_AFTER_ORDER_COMPLETED"
+    assert state["orders"][0]["post_order_adjustment_reason"] == "Return Refund Adjustment After Order Completed"
+    assert state["orders"][0]["post_order_adjustment_date"] == "01/08/2026"
+
+
+def test_adjustment_conflict_accepts_only_submitted_source_values_without_inference():
+    review = _adjustment_review(POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT)
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    still_conflicted = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {
+                "order_income": "11.00",
+                "post_order_adjustment_amount": "-1.00",
+                "final_amount": "9.00",
+            },
+        },
+        price_master=_master(),
+    )
+    assert still_conflicted.resolved is False
+    assert state["reviews"] == [review]
+
+    resolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {
+                "order_income": "11.00",
+                "post_order_adjustment_amount": "-1.00",
+                "final_amount": "10.00",
+            },
+        },
+        price_master=_master(),
+    )
+
+    assert resolved.resolved is True
+    assert state["orders"][0]["order_income"] == "11.00"
+    assert state["orders"][0]["post_order_adjustment_amount"] == "-1.00"
+    assert state["orders"][0]["final_amount"] == "10.00"
+
+
+def test_existing_final_amount_extraction_correction_still_revalidates():
+    review = _financial_review(final_visible=True)
+    review["reason_code"] = FINAL_AMOUNT_EXTRACTION_MISSING
+    review["reason"] = "Final Amount is visible but could not be extracted."
+    review["order_payload"].update(
+        {
+            "order_income": "11.00",
+            "estimated_order_income": "11.00",
+            "final_amount": "N/A",
+        }
+    )
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    resolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={"source_confirmed": True, "final_amount": "11.00"},
+        price_master=_master(),
+    )
+
+    assert resolved.resolved is True
+    assert state["orders"][0]["final_amount"] == "11.00"
 
 
 def test_financial_correction_requires_confirmation_and_full_revalidation():
@@ -1015,16 +1212,61 @@ def _financial_manual_review_routing_app():
         "reason": "Income Details require source review before validation. Missing: Fees & Charges.",
     })
     visible_missing["order_payload"]["fees_charges_total"] = "N/A"
-    source_absent = deepcopy(visible_missing)
-    source_absent.update({"source_pdf": "source-absent.pdf", "order_id": "SOURCE-ABSENT"})
-    source_absent["order_payload"]["_income_label_presence"] = tuple(
-        field for field in source_absent["order_payload"]["_income_label_presence"]
-        if field != "fees_charges_total"
-    )
+    adjustment_missing = deepcopy(formula)
+    adjustment_missing.update({
+        "source_pdf": "adjustment-missing.pdf",
+        "order_id": "ADJUSTMENT-MISSING",
+        "reason_code": "POST_ORDER_ADJUSTMENT_AMOUNT_MISSING",
+        "reason": (
+            "Post-order adjustment amount is visibly required by the supported "
+            "source evidence but could not be extracted."
+        ),
+    })
+    adjustment_missing["order_payload"].update({
+        "order_income": "11.00",
+        "estimated_order_income": "11.00",
+        "final_amount": "9.00",
+        "post_order_adjustment_observed": True,
+        "post_order_adjustment_amount": None,
+    })
+    adjustment_conflict = deepcopy(adjustment_missing)
+    adjustment_conflict.update({
+        "source_pdf": "adjustment-conflict.pdf",
+        "order_id": "ADJUSTMENT-CONFLICT",
+        "reason_code": "POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT",
+        "reason": (
+            "Post-order adjustment evidence conflicts: source Order Income plus "
+            "the completed adjustment does not equal source Final Amount."
+        ),
+    })
+    adjustment_conflict["order_payload"]["post_order_adjustment_amount"] = "-1.00"
+    adjustment_source_missing = deepcopy(adjustment_missing)
+    adjustment_source_missing.update({
+        "source_pdf": "adjustment-source-missing.pdf",
+        "order_id": "ADJUSTMENT-SOURCE-MISSING",
+        "reason_code": "POST_ORDER_ADJUSTMENT_SOURCE_MISSING",
+        "reason": (
+            "Final Amount differs from Order Income, but supported source-visible "
+            "adjustment evidence is not available."
+        ),
+    })
+    adjustment_source_missing["order_payload"].update({
+        "post_order_adjustment_observed": False,
+        "post_order_adjustment_amount": None,
+    })
     st.session_state.setdefault("batch_id", "batch")
     st.session_state.setdefault("orders", [])
     st.session_state.setdefault("products", [])
-    st.session_state.setdefault("reviews", [formula, visible_missing, source_absent])
+    st.session_state.setdefault(
+        "reviews",
+        [
+            formula,
+            visible_missing,
+            adjustment_missing,
+            adjustment_conflict,
+            adjustment_source_missing,
+        ],
+    )
     data_import._render_manual_review_resolution()
 
 
@@ -1035,37 +1277,72 @@ def test_financial_manual_review_ui_prefills_formula_fields_and_focuses_visible_
 
     assert app.exception == []
     assert any(tab.label.endswith("Requires Re-upload (1)") for tab in app.tabs)
-    assert any(tab.label.endswith("Online Resolution (2)") for tab in app.tabs)
+    assert any(tab.label.endswith("Online Resolution (4)") for tab in app.tabs)
     label_values = [(field.label, field.value) for field in app.text_input]
     assert ("Merchandise Subtotal", "10.00") in label_values
     assert ("Product Price", "10.00") in label_values
     assert ("Order Income", "12.00") in label_values
     assert ("Fees & Charges", "") in label_values
     assert not any(label == "Vouchers & Rebates" for label, _ in label_values)
-    assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 2
+    assert ("Adjustment Amount", "") in label_values
+    assert ("Adjustment Amount", "-1.00") in label_values
+    assert len([label for label, _ in label_values if label == "Adjustment Amount"]) == 2
+    assert ("Final Amount", "9.00") in label_values
+    assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 4
     assert [metric.label for metric in app.metric] == [
         "Calculated",
         "Invoice",
         "Difference",
+        "Expected Final Amount",
+        "Invoice Final Amount",
+        "Difference",
     ]
-    assert [metric.value for metric in app.metric] == ["RM11.00", "RM12.00", "RM1.00"]
+    assert [metric.value for metric in app.metric] == [
+        "RM11.00",
+        "RM12.00",
+        "RM1.00",
+        "RM10.00",
+        "RM9.00",
+        "RM1.00",
+    ]
     markdown = {item.value for item in app.markdown}
     captions = {item.value for item in app.caption}
     assert "**Check invoice amounts**" in markdown
     assert "Order Income does not match the other invoice amounts." in markdown
     assert "**Missing amount**" in markdown
     assert "Fees & Charges could not be read from the invoice." in markdown
-    assert "**Incomplete invoice**" in markdown
-    assert "Fees & Charges is missing from this invoice." in markdown
+    assert "**Missing adjustment amount**" in markdown
+    assert "The adjustment amount could not be read from the invoice." in markdown
+    assert "**Check adjustment amounts**" in markdown
+    assert "Final Amount does not match Order Income plus the adjustment." in markdown
+    assert "**Adjustment evidence missing**" in markdown
+    assert "Final Amount differs from Order Income, but no adjustment is shown in the source." in markdown
+    assert "**Incomplete invoice**" not in markdown
     assert "Check the amounts below and correct any value that was read incorrectly." in captions
     assert "Enter the amount exactly as shown on the invoice." in captions
-    assert "Upload a complete invoice to continue." in captions
+    assert "Enter the adjustment amount exactly as shown on the invoice." in captions
+    assert "Upload an invoice or source that shows the adjustment to continue." in captions
     assert {
         checkbox.label for checkbox in app.checkbox
     } == {"Confirmed with the original Shopee Invoice"}
     assert app.info[0].value == (
         "The following invoices need your review. Check the details below and "
         "correct the information where possible."
+    )
+    technical_details = [item.value for item in app.json]
+    assert any("POST_ORDER_ADJUSTMENT_AMOUNT_MISSING" in item for item in technical_details)
+    assert any("POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT" in item for item in technical_details)
+
+    next(button for button in app.button if button.label == "View Details").click()
+    app.run(timeout=20)
+
+    assert app.exception == []
+    technical_details = [item.value for item in app.json]
+    assert any("POST_ORDER_ADJUSTMENT_SOURCE_MISSING" in item for item in technical_details)
+    assert any(
+        "Final Amount differs from Order Income, but supported source-visible "
+        "adjustment evidence is not available." in item
+        for item in technical_details
     )
 
 

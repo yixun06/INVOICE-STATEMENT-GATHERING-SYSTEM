@@ -17,7 +17,16 @@ from ..parsers.validation import (
     financial_reconciliation_evidence_notes,
     validate_product_items,
 )
-from ..review_reason_codes import FINAL_AMOUNT_EXTRACTION_MISSING, INCOME_COMPLETION_ANCHOR_MISSING, INCOME_DETAILS_REQUIRED_FIELD_MISSING, INCOME_EXTRACTION_MISSING, INCOMPLETE_PROMOTION_EVIDENCE, SKU_RESOLUTION_REQUIRED
+from ..review_reason_codes import (
+    FINAL_AMOUNT_EXTRACTION_MISSING,
+    INCOME_COMPLETION_ANCHOR_MISSING,
+    INCOME_DETAILS_REQUIRED_FIELD_MISSING,
+    INCOME_EXTRACTION_MISSING,
+    INCOMPLETE_PROMOTION_EVIDENCE,
+    POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    SKU_RESOLUTION_REQUIRED,
+)
 
 PRODUCT_COUNT_MISMATCH = "PRODUCT_COUNT_MISMATCH"
 MISSING_INCOME = "MISSING_INCOME_INFORMATION"
@@ -25,6 +34,7 @@ FINAL_AMOUNT = "FINAL_AMOUNT_EXTRACTION"
 PROMOTION_SUBTOTAL = "PROMOTION_SUBTOTAL"
 SKU_RESOLUTION = "SKU_RESOLUTION"
 FINANCIAL_CORRECTION = "FINANCIAL_CORRECTION"
+ADJUSTMENT_CORRECTION = "ADJUSTMENT_CORRECTION"
 CORRECTION_DRAFTS_KEY = "manual_review_correction_drafts"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
 _FINANCIAL_RECONCILIATION_PREFIX = "Financial Reconciliation Failed:"
@@ -109,6 +119,11 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         return ResolutionPlan(review_key(review), MISSING_INCOME)
     if code == FINAL_AMOUNT_EXTRACTION_MISSING:
         return ResolutionPlan(review_key(review), FINAL_AMOUNT)
+    if code in {
+        POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+        POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    }:
+        return ResolutionPlan(review_key(review), ADJUSTMENT_CORRECTION)
     if _is_financial_formula_review(review):
         if _financial_correction_fields(review):
             return ResolutionPlan(review_key(review), FINANCIAL_CORRECTION)
@@ -184,6 +199,14 @@ def financial_enrichment_fields(
     review: Mapping[str, Any],
 ) -> tuple[tuple[str, str], ...]:
     """Return source-safe monetary fields for the current review type."""
+    if str(review.get("reason_code") or "") == POST_ORDER_ADJUSTMENT_AMOUNT_MISSING:
+        return (("post_order_adjustment_amount", "Adjustment Amount"),)
+    if str(review.get("reason_code") or "") == POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT:
+        return (
+            ("order_income", "Order Income"),
+            ("post_order_adjustment_amount", "Adjustment Amount"),
+            ("final_amount", "Final Amount"),
+        )
     if _is_top_level_financial_review(review):
         return _financial_correction_fields(review)
     order = review.get("order_payload") or {}
@@ -420,7 +443,12 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if error:
             return ResolutionOutcome(False, error)
         products.append(added)
-    elif plan.issue_type in {SKU_RESOLUTION, PROMOTION_SUBTOTAL, FINANCIAL_CORRECTION}:
+    elif plan.issue_type in {
+        SKU_RESOLUTION,
+        PROMOTION_SUBTOTAL,
+        FINANCIAL_CORRECTION,
+        ADJUSTMENT_CORRECTION,
+    }:
         pass
     elif plan.issue_type == FINAL_AMOUNT:
         if values.get("source_confirmed") is not True:
@@ -448,7 +476,7 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         order["net_income"] = final_amount or income
         order["net_amount"] = order["net_income"]
     direct_enrichment = values.get("financial_enrichment")
-    if plan.issue_type == FINANCIAL_CORRECTION and direct_enrichment is None:
+    if plan.issue_type in {FINANCIAL_CORRECTION, ADJUSTMENT_CORRECTION} and direct_enrichment is None:
         return ResolutionOutcome(False, "Provide the source-visible financial values to revalidate.")
     if direct_enrichment is not None:
         saved = set_financial_enrichment(
@@ -769,14 +797,15 @@ def _normalize_financial_enrichment(
 ) -> tuple[dict[str, str], str | None]:
     if not isinstance(values, Mapping):
         return {}, "Financial details must be entered as source-visible monetary values."
-    available = {field for field, _ in financial_enrichment_fields(review)}
+    available_fields = dict(financial_enrichment_fields(review))
+    available = set(available_fields)
     normalized: dict[str, str] = {}
     for field, raw in values.items():
         if field not in available:
             return {}, "Only source-visible financial fields offered for this review may be corrected."
         amount = _source_money(raw, optional=True)
         if amount is None:
-            return {}, f"{INCOME_ALIASES[field][0]} must be a source-visible numeric amount."
+            return {}, f"{available_fields[field]} must be a source-visible numeric amount."
         if amount != "":
             normalized[field] = amount
     return normalized, None
