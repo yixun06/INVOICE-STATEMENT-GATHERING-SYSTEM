@@ -692,6 +692,9 @@ def _parse_positioned_items_without_sku(
             columns,
         )
         trailing_rows = rows[metric_index + 1 : next_metric]
+        # The source subtotal shares the metric row; later rows may carry a
+        # struck original price or a subtotal printed beside the SKU.
+        owned_metric_rows = [row, *trailing_rows]
         seller_sku = next(
             (
                 value
@@ -714,7 +717,7 @@ def _parse_positioned_items_without_sku(
             "sku_missing_in_source": not bool(seller_sku),
             "metric_top": row.top,
             "_promotion_subtotal_candidates": _promotion_subtotal_candidates(
-                trailing_rows,
+                owned_metric_rows,
                 columns,
                 horizontal_rules,
             ),

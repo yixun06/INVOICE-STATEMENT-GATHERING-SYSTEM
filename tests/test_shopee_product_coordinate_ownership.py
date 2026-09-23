@@ -287,6 +287,38 @@ def test_promotion_metric_regions_include_middle_product_without_sku():
     assert {item["source_group_total"] for item in items} == {Decimal("37.80")}
 
 
+def test_promotion_metric_region_retains_actual_subtotal_before_struck_original_price():
+    page = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Any 4 at RM176.40", 100, 220, 65),
+            _word("Haskap Berry Elixir", 140, 260, 75),
+            _word("52.20", 340, 370, 85), _word("4", 405, 410, 85),
+            _word("176.40", 455, 485, 85),
+            _word("208.80", 455, 485, 95),
+            _word("Variation: 500ml", 140, 220, 105),
+            _word("SKU:", 140, 162, 115), _word("9555208013969-New", 165, 250, 115),
+            _word("Merchandise", 110, 190, 140), _word("Subtotal", 195, 245, 140),
+        ),
+        horizontal_rules=(PdfHorizontalRule(455, 485, 98, 98.5),),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 1 product", pages=(page,)))
+    resolve_promotion_group_totals(items, Decimal("176.40"))
+
+    assert len(items) == 1
+    assert items[0]["promotion_label"] == "Any 4 at RM176.40"
+    assert items[0]["source_group_total"] == Decimal("176.40")
+    assert items[0]["source_line_subtotal"] is None
+    assert items[0]["_promotion_subtotal_source_status"] == "resolved"
+
+
 def test_page_break_sku_continuation_is_not_a_second_product_row():
     page_one = PdfPage(
         number=1,
