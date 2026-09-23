@@ -319,6 +319,67 @@ def test_promotion_metric_region_retains_actual_subtotal_before_struck_original_
     assert items[0]["_promotion_subtotal_source_status"] == "resolved"
 
 
+def test_promotion_metric_region_retains_subtotal_printed_before_metric_row():
+    page = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Any 4 at RM15.00", 100, 220, 65),
+            _word("15.00", 455, 485, 75),
+            _word("Dried Sweet Potato Stick", 140, 280, 80),
+            _word("4.41", 340, 370, 90), _word("4", 405, 410, 90),
+            _word("17.64", 455, 485, 90),
+            _word("Variation: 50g", 140, 220, 100),
+            _word("SKU:", 140, 162, 110), _word("SKU-PROMO", 165, 240, 110),
+            _word("Merchandise", 110, 190, 135), _word("Subtotal", 195, 245, 135),
+        ),
+        horizontal_rules=(PdfHorizontalRule(455, 485, 93, 93.5),),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 1 product", pages=(page,)))
+    resolve_promotion_group_totals(items, Decimal("15.00"))
+
+    assert len(items) == 1
+    assert items[0]["promotion_label"] == "Any 4 at RM15.00"
+    assert items[0]["source_group_total"] == Decimal("15.00")
+    assert items[0]["_promotion_subtotal_source_status"] == "resolved"
+
+
+def test_promotion_group_deduplicates_one_physical_subtotal_seen_by_adjacent_members():
+    page = PdfPage(
+        number=1,
+        width=600,
+        height=800,
+        text="",
+        words=(
+            _word("No.", 100, 115, 50), _word("Product(s)", 130, 190, 50),
+            _word("Unit", 330, 350, 50), _word("Price", 352, 375, 50),
+            _word("Quantity", 395, 440, 50), _word("Subtotal", 450, 500, 50),
+            _word("Any 3 at RM37.80", 100, 220, 65),
+            _word("Longjing Tea", 140, 250, 75), _word("16.87", 340, 370, 85),
+            _word("1", 405, 410, 85), _word("SKU:", 140, 162, 95),
+            _word("SKU-LONGJING", 165, 240, 95),
+            _word("Jasmine Tea", 140, 250, 105), _word("37.80", 455, 485, 110),
+            _word("18.90", 340, 370, 115), _word("1", 405, 410, 115),
+            _word("Rose Tea", 140, 250, 135), _word("16.87", 340, 370, 145),
+            _word("1", 405, 410, 145), _word("SKU:", 140, 162, 155),
+            _word("SKU-ROSE", 165, 225, 155),
+            _word("Merchandise", 110, 190, 180), _word("Subtotal", 195, 245, 180),
+        ),
+    )
+
+    items = parse_positioned_products(PdfDocument(text="Total 3 products", pages=(page,)))
+    resolve_promotion_group_totals(items, Decimal("37.80"))
+
+    assert {item["source_group_total"] for item in items} == {Decimal("37.80")}
+    assert all(item["_promotion_subtotal_source_status"] == "resolved" for item in items)
+
+
 def test_page_break_sku_continuation_is_not_a_second_product_row():
     page_one = PdfPage(
         number=1,

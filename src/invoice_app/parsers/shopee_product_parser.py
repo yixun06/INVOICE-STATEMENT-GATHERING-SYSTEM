@@ -693,8 +693,10 @@ def _parse_positioned_items_without_sku(
         )
         trailing_rows = rows[metric_index + 1 : next_metric]
         # The source subtotal shares the metric row; later rows may carry a
-        # struck original price or a subtotal printed beside the SKU.
-        owned_metric_rows = [row, *trailing_rows]
+        # struck original price or a subtotal printed beside the SKU. Some
+        # Shopee layouts print the promotion subtotal immediately before the
+        # metric row, so retain the complete metric-owned region as well.
+        owned_metric_rows = rows[previous_metric + 1 : next_metric]
         seller_sku = next(
             (
                 value
@@ -1005,7 +1007,7 @@ def resolve_promotion_group_totals(
         for member in members:
             for candidate in _promotion_candidates_for_item(member):
                 amount = _candidate_amount(candidate)
-                candidate_id = str(candidate.get("id") or "")
+                candidate_id = _promotion_candidate_identity(candidate)
                 if amount is None or candidate.get("struck_through") or candidate_id in seen_candidate_ids:
                     continue
                 seen_candidate_ids.add(candidate_id)
@@ -1066,6 +1068,17 @@ def _candidate_amount(candidate: dict[str, Any]) -> Decimal | None:
     if isinstance(value, Decimal):
         return value.quantize(Decimal("0.01"))
     return _decimal_value(value)
+
+
+def _promotion_candidate_identity(candidate: Mapping[str, Any]) -> str:
+    """Deduplicate one physical PDF amount seen through adjacent member regions."""
+    coordinates = tuple(
+        candidate.get(field)
+        for field in ("x0", "x1", "top", "bottom")
+    )
+    if all(value is not None for value in coordinates):
+        return "coordinate:" + ":".join(f"{float(value):.2f}" for value in coordinates)
+    return "id:" + str(candidate.get("id") or "")
 
 
 def _decimal_value(value: Any) -> Decimal | None:
