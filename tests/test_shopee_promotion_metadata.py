@@ -187,6 +187,43 @@ def test_equally_reconciling_candidates_remain_incomplete():
     assert "source_group_total" not in first
 
 
+def test_coordinate_proven_same_price_containers_do_not_become_ambiguous():
+    """Repeated visible Any-2-at-RM25 containers retain one real RM25 each."""
+    items = []
+    for group_index in range(3):
+        first = _item(f"A{group_index}", 1, None, "Any 2 at RM25.00")
+        first["_promotion_subtotal_candidates"] = [
+            {
+                "id": f"group-{group_index}-own",
+                "amount": Decimal("25.00"),
+                "struck_through": False,
+                "x0": 455,
+                "x1": 475,
+                "top": 100 + group_index * 100,
+                "bottom": 107 + group_index * 100,
+            },
+            # The next container can be visible through the overlapping
+            # coordinate ownership region.  It is a separate real PDF word,
+            # but it proves the same amount and cannot change this group total.
+            *([] if group_index == 2 else [{
+                "id": f"group-{group_index}-next",
+                "amount": Decimal("25.00"),
+                "struck_through": False,
+                "x0": 455,
+                "x1": 475,
+                "top": 200 + group_index * 100,
+                "bottom": 207 + group_index * 100,
+            }]),
+        ]
+        items.extend([first, _item(f"B{group_index}", 1, None)])
+
+    _apply_group_promotion(items, promotion_group_id="p1")
+    resolve_promotion_group_totals(items, Decimal("75.00"))
+
+    assert {item["source_group_total"] for item in items} == {Decimal("25.00")}
+    assert validate_shopee_promotion_evidence(items) is None
+
+
 def test_multiple_promotion_groups_require_one_unique_combination():
     first = _item("A", 1, None, "Any 2 at RM15.00")
     first["_promotion_subtotal_candidates"] = [

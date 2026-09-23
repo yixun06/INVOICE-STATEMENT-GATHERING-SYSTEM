@@ -1018,7 +1018,10 @@ def resolve_promotion_group_totals(
                 "Promotion container has no non-struck subtotal candidate inside its source ownership boundary.",
             )
             return items
-        candidate_sets.append(candidates)
+        candidate_sets.append(_coalesce_equivalent_visible_promotion_candidates(
+            members,
+            candidates,
+        ))
 
     normal_total = Decimal("0")
     normal_subtotal_missing = False
@@ -1079,6 +1082,57 @@ def _promotion_candidate_identity(candidate: Mapping[str, Any]) -> str:
     if all(value is not None for value in coordinates):
         return "coordinate:" + ":".join(f"{float(value):.2f}" for value in coordinates)
     return "id:" + str(candidate.get("id") or "")
+
+
+def _coalesce_equivalent_visible_promotion_candidates(
+    members: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse only coordinate-proven duplicate values that cannot change a group total.
+
+    Adjacent Shopee promotion containers can expose the same real subtotal in
+    overlapping coordinate ownership regions.  The PDF still proves the amount:
+    every non-struck candidate agrees with the container's ``Any N at RM...``
+    amount.  Keeping each physical occurrence as an independent alternative
+    would create several mathematically identical combinations and incorrectly
+    route a complete source to Manual Review.
+
+    This deliberately does *not* use the promotion label as a subtotal, and it
+    does not relax ambiguity for percentage promotions, candidate values that
+    differ, or synthetic/unlocated candidates.  Those remain fail-closed.
+    """
+    advertised_amounts = {
+        _decimal_value(member.get("promotion_advertised_amount"))
+        for member in members
+    }
+    advertised_amounts.discard(None)
+    if len(advertised_amounts) != 1:
+        return candidates
+
+    advertised_amount = next(iter(advertised_amounts))
+    if any(candidate["amount"] != advertised_amount for candidate in candidates):
+        return candidates
+
+    if any(
+        not all(candidate.get(field) is not None for field in ("x0", "x1", "top", "bottom"))
+        for candidate in candidates
+    ):
+        return candidates
+
+    # A representative is sufficient because every retained original source
+    # word proves the same money fact.  Keep the earliest one for stable logs.
+    representative = min(
+        candidates,
+        key=lambda candidate: (
+            float(candidate["top"]),
+            float(candidate["x0"]),
+            _promotion_candidate_identity(candidate),
+        ),
+    )
+    return [{
+        **representative,
+        "id": "equivalent-visible:" + _promotion_candidate_identity(representative),
+    }]
 
 
 def _decimal_value(value: Any) -> Decimal | None:
