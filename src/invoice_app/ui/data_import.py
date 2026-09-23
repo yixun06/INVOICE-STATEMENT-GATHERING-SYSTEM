@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import replace
+from decimal import Decimal
 from hashlib import sha256
 import io
 from typing import Any, Callable, Mapping, MutableMapping
@@ -90,6 +91,15 @@ from ..services.shopee_statement_persistence import (
     StatementCommitBlocked,
     StatementWriteIntegrityError,
 )
+from ..services.shopee_monthly_statement_service import (
+    StagedShopeeMonthlyStatement,
+)
+from ..services.shopee_monthly_statement_import import (
+    MonthlyStatementReview,
+    commit_monthly_statement_review,
+    refresh_monthly_statement_review,
+    review_monthly_statement_upload,
+)
 from ..domain.statement_reconciliation_v2 import IdentityScope, SettlementBasis
 from ..services.manual_review_resolution import (
     MISSING_INCOME,
@@ -123,12 +133,19 @@ from ..services.manual_review_resolution import (
 DATA_IMPORT_PAGE = "Data Import"
 PLATFORM_ORDERS = "Platform Orders"
 SHOPEE_WEEKLY_STATEMENT = "Shopee Weekly Statement"
+SHOPEE_MONTHLY_STATEMENT = "Shopee Monthly Statement"
 
 WIZARD_STEPS = (
     "Select Source",
     "Upload",
     "Validate",
     "Reconcile",
+    "Review & Commit",
+)
+MONTHLY_WIZARD_STEPS = (
+    "Select Source",
+    "Upload",
+    "Validate",
     "Review & Commit",
 )
 _WORKFLOW_KEYS = (
@@ -144,6 +161,9 @@ _WORKFLOW_KEYS = (
     "invoice_commit_completed_count",
     "weekly_statement_uploader_version",
     "weekly_statement_selected_source",
+    "monthly_statement_review",
+    "monthly_statement_commit_result",
+    "monthly_statement_uploader_version",
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
@@ -186,6 +206,7 @@ def initialize_data_import_state() -> None:
     st.session_state.setdefault("data_import_step", 1)
     st.session_state.setdefault("import_source_type", None)
     st.session_state.setdefault("weekly_statement_uploader_version", 0)
+    st.session_state.setdefault("monthly_statement_uploader_version", 0)
 
 
 def reset_data_import_state() -> None:
@@ -193,7 +214,10 @@ def reset_data_import_state() -> None:
     for key in _WORKFLOW_KEYS:
         st.session_state.pop(key, None)
     for key in tuple(st.session_state):
-        if isinstance(key, str) and key.startswith("weekly_statement_uploader_"):
+        if isinstance(key, str) and (
+            key.startswith("weekly_statement_uploader_")
+            or key.startswith("monthly_statement_uploader_")
+        ):
             st.session_state.pop(key, None)
 
 
@@ -292,6 +316,10 @@ def render_data_import(
             render_platform_orders_validation_data,
         )
     elif step == 4:
+        if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
+            _set_step(5)
+            st.rerun()
+            return
         _render_reconciliation_step()
     else:
         _render_review_and_commit_step()
@@ -316,6 +344,10 @@ def _set_step(step: int) -> None:
 
 
 def _render_wizard_progress(current_step: int) -> None:
+    if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
+        monthly_step = 4 if current_step == 5 else current_step
+        render_workflow_stepper(MONTHLY_WIZARD_STEPS, monthly_step)
+        return
     render_workflow_stepper(WIZARD_STEPS, current_step)
 
 
@@ -338,19 +370,27 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
         st.subheader("Select source")
         source_label = st.segmented_control(
             "Import workflow",
-            ("Invoice Import", "Statement Import"),
+            (
+                "Invoice Import",
+                SHOPEE_WEEKLY_STATEMENT,
+                SHOPEE_MONTHLY_STATEMENT,
+            ),
             key="weekly_statement_selected_source",
             default="Invoice Import",
         )
-        source_type = (
-            PLATFORM_ORDERS
-            if source_label == "Invoice Import"
-            else SHOPEE_WEEKLY_STATEMENT
-        )
+        source_type = {
+            "Invoice Import": PLATFORM_ORDERS,
+            SHOPEE_WEEKLY_STATEMENT: SHOPEE_WEEKLY_STATEMENT,
+            SHOPEE_MONTHLY_STATEMENT: SHOPEE_MONTHLY_STATEMENT,
+        }[source_label]
         st.caption(
             "PDF or ZIP order documents for Shopee, Lazada, and ZENXIN."
             if source_type == PLATFORM_ORDERS
-            else "Native Shopee Weekly Statement settlement export (.xlsx)."
+            else (
+                "Native Shopee Weekly Statement settlement export (.xlsx)."
+                if source_type == SHOPEE_WEEKLY_STATEMENT
+                else "Native Shopee full-calendar-month Statement export (.xlsx)."
+            )
         )
         if st.button("Continue to upload", type="primary", icon=":material/arrow_forward:"):
             st.session_state.import_source_type = source_type
@@ -380,6 +420,9 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
         return
     if source_type == SHOPEE_WEEKLY_STATEMENT:
         _render_weekly_statement_upload()
+        return
+    if source_type == SHOPEE_MONTHLY_STATEMENT:
+        _render_monthly_statement_upload()
         return
     _set_step(1)
     st.rerun()
@@ -456,12 +499,88 @@ def _render_weekly_statement_upload() -> None:
         st.rerun()
 
 
+def _render_monthly_statement_upload() -> None:
+    st.subheader("Upload Shopee Monthly Statement")
+    st.caption("Upload one native full-calendar-month Shopee Statement workbook (.xlsx).")
+    review = _monthly_review()
+    if review is not None:
+        st.info(
+            f"Staged Monthly Statement: {review.stage.source_filename}. Return to validation to continue.",
+            icon=":material/info:",
+        )
+        with st.container(horizontal=True):
+            if st.button(
+                "Continue to validate",
+                type="primary",
+                icon=":material/arrow_forward:",
+                key="monthly_statement_resume_validation",
+            ):
+                _set_step(3)
+                st.rerun()
+            if st.button(
+                "Back", icon=":material/arrow_back:", key="monthly_statement_resume_back"
+            ):
+                _set_step(1)
+                st.rerun()
+        return
+    version = int(st.session_state.get("monthly_statement_uploader_version", 0))
+    uploaded_file = st.file_uploader(
+        "Shopee Monthly Statement (.xlsx)",
+        type=["xlsx"],
+        key=f"monthly_statement_uploader_{version}",
+    )
+    with st.container(horizontal=True):
+        check_clicked = st.button(
+            "Check monthly statement",
+            type="primary" if uploaded_file is not None else "secondary",
+            icon=":material/upload_file:",
+            disabled=uploaded_file is None,
+            key="monthly_statement_check",
+        )
+        clear_clicked = st.button(
+            "Clear selected file",
+            icon=":material/close:",
+            disabled=uploaded_file is None,
+            key="monthly_statement_clear",
+        )
+    if clear_clicked:
+        st.session_state.monthly_statement_uploader_version = version + 1
+        st.rerun()
+    if check_clicked and uploaded_file is not None:
+        st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
+        begin_workflow_activity(st.session_state, "Validating")
+        try:
+            writer = configured_uat2_data_settings().create_monthly_statement_writer()
+            writer.ensure_schema()
+            review = review_monthly_statement_upload(
+                uploaded_file,
+                source_filename=uploaded_file.name,
+                batch_id=st.session_state.batch_id,
+                uploaded_by=str(st.session_state.get("authenticated_username") or "Admin"),
+                writer=writer,
+            )
+            st.session_state.monthly_statement_review = review
+        except (HistoricalInvoiceStorageError, StatementCommitBlocked, StatementWriteIntegrityError) as error:
+            st.error(f"Monthly Statement validation is unavailable: {error}")
+        finally:
+            end_workflow_activity(st.session_state)
+        if _monthly_review() is not None:
+            _set_step(3)
+            st.rerun()
+    if st.button("Back", icon=":material/arrow_back:", key="monthly_statement_upload_back"):
+        _set_step(1)
+        st.rerun()
+
+
 def _render_validation_step(
     render_platform_orders_outcomes: Callable[[], Any],
     render_platform_orders_summary: Callable[[], Any],
     render_platform_orders_validation_data: Callable[[], Any],
 ) -> None:
     st.subheader("Validate")
+    if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
+        _render_monthly_statement_validation()
+        return
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         presentation_state = invoice_upload_presentation_state(st.session_state)
         if presentation_state != _INVOICE_UPLOAD_RESOLVED:
@@ -518,6 +637,90 @@ def _render_validation_step(
         _render_contract_validation(result)
         _render_source_summary(result)
         _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
+
+
+def _render_monthly_statement_validation() -> None:
+    review = _monthly_review()
+    if review is None:
+        st.warning("Upload and check a Shopee Monthly Statement first.")
+        _render_back_button(2, key="monthly_validation_missing_back")
+        return
+    stage = review.stage
+    statement = stage.statement
+    if stage.source_error is not None:
+        st.error(stage.source_error.technical_message, icon=":material/error:")
+        _render_back_button(2, key="monthly_validation_source_error_back")
+        return
+    if statement is None:
+        st.error("Monthly Statement source could not be read.", icon=":material/error:")
+        _render_back_button(2, key="monthly_validation_unreadable_back")
+        return
+    _render_monthly_metrics(statement)
+    if stage.already_imported:
+        st.success("Monthly Statement already imported", icon=":material/check_circle:")
+        st.caption("No additional data was written.")
+        _render_monthly_upload_another_action("monthly_duplicate_upload_another")
+        return
+    if stage.duplicate_status == "POSSIBLE_REVISION":
+        st.warning(stage.review_reasons[0], icon=":material/warning:")
+        st.caption("The committed Monthly Statement was not overwritten. No data was written.")
+        _render_monthly_upload_another_action("monthly_revision_upload_another")
+        return
+    if stage.validation_issues:
+        st.error("Monthly Statement source validation failed.", icon=":material/error:")
+        for issue in stage.validation_issues:
+            st.write(f"- {issue.message}")
+        _render_back_button(2, key="monthly_validation_failed_back")
+        return
+    render_authoritative_status(
+        title="Ready to Commit",
+        message="Monthly source and internal controls passed.",
+        state="ready",
+    )
+    with st.container(horizontal=True):
+        if st.button(
+            "Continue to review",
+            type="primary",
+            icon=":material/arrow_forward:",
+            key="monthly_validation_continue",
+        ):
+            _set_step(5)
+            st.rerun()
+        if st.button(
+            "Back", icon=":material/arrow_back:", key="monthly_validation_back"
+        ):
+            _set_step(2)
+            st.rerun()
+
+
+def _render_monthly_metrics(statement: Any) -> None:
+    adjustment_total = sum(
+        (
+            row.adjustment_amount or Decimal("0.00")
+            for row in statement.adjustments
+        ),
+        Decimal("0.00"),
+    )
+    st.write(
+        f"**Statement Period:** {statement.statement_period_from:%d/%m/%Y} – "
+        f"{statement.statement_period_to:%d/%m/%Y}"
+    )
+    with st.container(horizontal=True):
+        st.metric("Order rows", len(statement.order_rows))
+        st.metric("SKU rows", len(statement.sku_rows))
+        st.metric("Total released", f"RM {statement.summary_total_released:,.2f}")
+        st.metric(
+            "Adjustments",
+            len(statement.adjustments),
+            help=f"Source total: RM {adjustment_total:,.2f}",
+        )
+
+
+def _render_monthly_upload_another_action(key: str) -> None:
+    if st.button("Upload another Monthly Statement", icon=":material/upload_file:", key=key):
+        _reset_monthly_statement_workflow()
+        _set_step(2)
+        st.rerun()
 
 
 def _render_validation_status(result: ImportResult) -> None:
@@ -2254,8 +2457,83 @@ def _render_representative_contract_exceptions(exceptions: tuple[ReconciliationE
     st.caption("Representative exceptions")
     st.dataframe(representative, hide_index=True, height="auto")
 
+def _render_monthly_statement_review_and_commit() -> None:
+    review = _monthly_review()
+    if review is None or review.stage.statement is None:
+        st.warning("Upload and validate a Shopee Monthly Statement first.")
+        _render_back_button(3, key="monthly_review_missing_back")
+        return
+    statement = review.stage.statement
+    result = st.session_state.get("monthly_statement_commit_result")
+    if result is not None:
+        st.success("Monthly Statement imported", icon=":material/check_circle:")
+        _render_monthly_metrics(statement)
+        st.write(f"**Adjustment rows:** {len(statement.adjustments)}")
+        st.caption(
+            "Stored for historical reporting only. Weekly reconciliation, weekly records, "
+            "Invoices, and Order Adjustments were not changed."
+        )
+        _render_monthly_upload_another_action("monthly_success_upload_another")
+        return
+    if not review.commit_ready:
+        st.warning("Monthly Statement is not ready to commit.", icon=":material/warning:")
+        _render_back_button(3, key="monthly_review_blocked_back")
+        return
+    st.write("**Shopee Monthly Statement**")
+    _render_monthly_metrics(statement)
+    render_authoritative_status(
+        title="Ready to Commit",
+        message="All Monthly source and internal validation controls passed.",
+        state="ready",
+    )
+    st.caption(
+        "This Monthly Statement is stored for historical reporting only. It does not "
+        "change Weekly reconciliation or weekly records."
+    )
+    with st.container(horizontal=True):
+        commit_clicked = st.button(
+            "Commit Monthly Statement",
+            type="primary",
+            icon=":material/upload:",
+            key="monthly_statement_commit",
+        )
+        back_clicked = st.button(
+            "Back", icon=":material/arrow_back:", key="monthly_statement_commit_back"
+        )
+    if back_clicked:
+        _set_step(3)
+        st.rerun()
+    if not commit_clicked:
+        return
+    try:
+        writer = configured_uat2_data_settings().create_monthly_statement_writer()
+        refreshed = refresh_monthly_statement_review(review, writer=writer)
+        st.session_state.monthly_statement_review = refreshed
+        if not refreshed.commit_ready:
+            st.warning(
+                "Monthly Statement state changed before commit. Refresh validation before trying again."
+            )
+            _set_step(3)
+            st.rerun()
+        commit_result = commit_monthly_statement_review(refreshed, writer=writer)
+    except ApplicationCommitInProgress as error:
+        st.warning(str(error))
+        return
+    except StatementWriteIntegrityError as error:
+        st.error(f"Monthly Statement write requires manual integrity recovery: {error}")
+        return
+    except (HistoricalInvoiceStorageError, StatementCommitBlocked) as error:
+        st.error(f"Monthly Statement commit failed before a safe write was confirmed: {error}")
+        return
+    st.session_state.monthly_statement_commit_result = commit_result
+    st.rerun()
+
+
 def _render_review_and_commit_step() -> None:
     st.subheader("Review & Commit")
+    if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
+        _render_monthly_statement_review_and_commit()
+        return
     if _has_pending_recovery():
         _render_recovery_confirmation()
     result = _current_import_result()
@@ -2708,6 +2986,19 @@ def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
 def _weekly_review() -> StatementImportReview | None:
     review = st.session_state.get("weekly_statement_review")
     return review if isinstance(review, StatementImportReview) else None
+
+
+def _monthly_review() -> MonthlyStatementReview | None:
+    review = st.session_state.get("monthly_statement_review")
+    return review if isinstance(review, MonthlyStatementReview) else None
+
+
+def _reset_monthly_statement_workflow() -> None:
+    version = int(st.session_state.get("monthly_statement_uploader_version", 0))
+    st.session_state.pop("monthly_statement_review", None)
+    st.session_state.pop("monthly_statement_commit_result", None)
+    st.session_state.pop("batch_id", None)
+    st.session_state.monthly_statement_uploader_version = version + 1
 
 
 def _render_statement_already_imported() -> bool:

@@ -919,6 +919,26 @@ def _serialize_statement_row(values: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(_serialize(values.get(header)) for header in STATEMENT_DATA_HEADERS)
 
 
+def serialize_statement_values(
+    values: Mapping[str, object], headers: Sequence[str]
+) -> tuple[str, ...]:
+    """Serialize shared Weekly/Monthly source facts with one exact contract."""
+
+    return tuple(_serialize(values.get(header)) for header in headers)
+
+
+def build_statement_summary_rows(
+    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+) -> tuple[tuple[str, ...], ...]:
+    return _summary_rows(statement, audit)
+
+
+def build_statement_financial_component_rows(
+    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+) -> tuple[tuple[str, ...], ...]:
+    return _financial_component_rows(statement, audit)
+
+
 _SUMMARY_LINE_TYPES = {
     "TOTAL", "SUBTOTAL", "DETAIL", "REFERENCE", "SECTION_HEADER",
 }

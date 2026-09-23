@@ -9,6 +9,9 @@ STATEMENT_DATA_TAB = "Statement_Data"
 STATEMENT_FINANCIAL_COMPONENTS_TAB = "Statement_Financial_Components"
 STATEMENT_SUMMARY_TAB = "Statement_Summary"
 ORDER_ADJUSTMENTS_TAB = "Order_Adjustments"
+MONTHLY_STATEMENT_DATA_TAB = "Monthly_Statement_Data"
+MONTHLY_STATEMENT_FINANCIAL_COMPONENTS_TAB = "Monthly_Statement_Financial_Components"
+MONTHLY_STATEMENT_SUMMARY_TAB = "Monthly_Statement_Summary"
 
 # This is retained only for the one-time, explicitly approved schema migration.
 LEGACY_INVOICE_ORDERS_HEADERS = (
@@ -70,6 +73,12 @@ STATEMENT_SUMMARY_HEADERS = (
     "commit_status",
 )
 
+# Monthly retains the exact source-fact prefix of Statement_Data.  The six
+# Weekly reconciliation/enrichment fields are deliberately absent.
+MONTHLY_STATEMENT_DATA_HEADERS = STATEMENT_DATA_HEADERS[:34]
+MONTHLY_STATEMENT_FINANCIAL_COMPONENT_HEADERS = STATEMENT_FINANCIAL_COMPONENT_HEADERS
+MONTHLY_STATEMENT_SUMMARY_HEADERS = STATEMENT_SUMMARY_HEADERS
+
 # Statement-driven, post-payment adjustment events.  These columns are a
 # separate immutable source ledger: they are deliberately not Invoice fields.
 ORDER_ADJUSTMENTS_HEADERS = (
@@ -94,4 +103,7 @@ assert len(INVOICE_ITEMS_HEADERS) == 23
 assert len(STATEMENT_DATA_HEADERS) == 40
 assert len(STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
 assert len(STATEMENT_SUMMARY_HEADERS) == 14
+assert len(MONTHLY_STATEMENT_DATA_HEADERS) == 34
+assert len(MONTHLY_STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
+assert len(MONTHLY_STATEMENT_SUMMARY_HEADERS) == 14
 assert len(ORDER_ADJUSTMENTS_HEADERS) == 21

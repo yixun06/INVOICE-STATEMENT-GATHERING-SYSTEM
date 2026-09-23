@@ -172,7 +172,7 @@ class StatementSummaryLine:
 
 
 @dataclass(frozen=True)
-class ParsedShopeeWeeklyStatement:
+class ParsedShopeeStatement:
     source_filename: str
     file_hash: str
     statement_period_from: date
@@ -197,7 +197,7 @@ class ParsedShopeeWeeklyStatement:
         return tuple(row for row in self.income_rows if row.view_by == "Sku")
 
 
-class WeeklyStatementParseError(ValueError):
+class ShopeeStatementParseError(ValueError):
     def __init__(
         self,
         message: str,
@@ -217,16 +217,17 @@ class WeeklyStatementParseError(ValueError):
         self.source_filename = source_filename
         self.file_hash = file_hash
 
-def parse_shopee_weekly_statement(
+def parse_shopee_statement(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
     source_filename: str | None = None,
-) -> ParsedShopeeWeeklyStatement:
+    source_label: str = "Shopee Statement",
+) -> ParsedShopeeStatement:
     workbook_bytes, filename = _read_source(source, source_filename)
     file_hash = sha256(workbook_bytes).hexdigest()
     if filename and Path(filename).suffix.casefold() != ".xlsx":
-        raise WeeklyStatementParseError(
-            "Shopee Weekly Statement must be an .xlsx workbook.",
+        raise ShopeeStatementParseError(
+            f"{source_label} must be an .xlsx workbook.",
             code=INVALID_WORKBOOK,
             source_filename=filename, file_hash=file_hash,
         )
@@ -239,8 +240,8 @@ def parse_shopee_weekly_statement(
                 BytesIO(workbook_bytes), read_only=True, data_only=True, keep_links=False
             )
     except (BadZipFile, OSError, ValueError, KeyError) as exc:
-        raise WeeklyStatementParseError(
-            f"Unreadable or corrupt Weekly Statement workbook: {exc}",
+        raise ShopeeStatementParseError(
+            f"Unreadable or corrupt {source_label} workbook: {exc}",
             code=INVALID_WORKBOOK,
             source_filename=filename, file_hash=file_hash,
         ) from exc
@@ -248,7 +249,7 @@ def parse_shopee_weekly_statement(
     try:
         missing = [name for name in REQUIRED_SHEETS if name not in workbook.sheetnames]
         if missing:
-            raise WeeklyStatementParseError(
+            raise ShopeeStatementParseError(
                 "Missing required sheet(s): " + ", ".join(missing),
                 code=MISSING_REQUIRED_WORKSHEET,
                 sheet_name=missing[0] if len(missing) == 1 else None,
@@ -305,7 +306,7 @@ def parse_shopee_weekly_statement(
             if adjustment_rows is not None
             else []
         )
-    except WeeklyStatementParseError as exc:
+    except ShopeeStatementParseError as exc:
         if not exc.source_filename:
             exc.source_filename = filename
         if not exc.file_hash:
@@ -316,7 +317,7 @@ def parse_shopee_weekly_statement(
     finally:
         workbook.close()
 
-    return ParsedShopeeWeeklyStatement(
+    return ParsedShopeeStatement(
         source_filename=filename,
         file_hash=file_hash,
         statement_period_from=period_from,
@@ -331,6 +332,24 @@ def parse_shopee_weekly_statement(
         source_value_issues=tuple(issues),
         dimension_fallback_sheets=tuple(fallback_sheets),
         summary_lines=tuple(summary_lines),
+    )
+
+
+# Weekly names remain stable for every existing caller and test.  Monthly uses
+# the generic entry point above so both workflows share one parser contract.
+ParsedShopeeWeeklyStatement = ParsedShopeeStatement
+WeeklyStatementParseError = ShopeeStatementParseError
+
+
+def parse_shopee_weekly_statement(
+    source: str | Path | bytes | bytearray | BinaryIO,
+    *,
+    source_filename: str | None = None,
+) -> ParsedShopeeWeeklyStatement:
+    return parse_shopee_statement(
+        source,
+        source_filename=source_filename,
+        source_label="Shopee Weekly Statement",
     )
 
 
@@ -687,12 +706,26 @@ def _parse_income_rows(
     header_index, positions = _require_header(rows, INCOME_REQUIRED_COLUMNS, "Income")
     headers = rows[header_index]
     parsed: list[SettlementIncomeRow] = []
-    for row_number, row in enumerate(rows[header_index + 1:], start=header_index + 2):
+    for row_number, row in enumerate(rows, start=1):
+        if row_number == header_index + 1:
+            continue
         if not any(value not in (None, "") for value in row):
             continue
         row_value = lambda header: row[positions[header]] if positions[header] < len(row) else None
         view_by = _text(row_value("View By"))
         order_id = _text(row_value("Order ID"))
+        # Some native monthly exports place a visual group-heading row first,
+        # all data rows next, and the actual field header near the end.  The
+        # header still defines the column positions for every row.  Preserve
+        # all Order/Sku rows on both sides of it while ignoring only that
+        # known non-record heading row.
+        if (
+            row_number < header_index + 1
+            and not view_by
+            and not order_id
+            and _is_income_group_heading(row)
+        ):
+            continue
         order_created = _parse_date(row_value("Order Creation Date"))
         payout_completed = _parse_date(row_value("Payout Completed Date"))
         total_released = _parse_decimal(row_value("Total Released Amount (RM)"))
@@ -733,6 +766,25 @@ def _parse_income_rows(
             source_row_number=row_number,
         ))
     return parsed
+
+
+def _is_income_group_heading(row: tuple[Any, ...]) -> bool:
+    values = {_normalize_header(value) for value in row if _text(value)}
+    return bool(values) and values <= {
+        "order info",
+        "released amount details",
+        "buyer info",
+        "reference info",
+        "order income",
+        "merchandise subtotal",
+        "shipping subtotal",
+        "vouchers and rebates",
+        "fees and charges",
+        "shipping",
+        "promotion",
+        "compensation",
+        "refund amount breakdown",
+    }
 
 
 def _parse_service_fee_rows(

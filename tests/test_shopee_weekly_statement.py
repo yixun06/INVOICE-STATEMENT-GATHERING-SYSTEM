@@ -81,6 +81,67 @@ def test_native_shopee_export_dimension_fallback_and_contract(parsed_sample):
     assert parsed_sample.file_hash == sha256(SAMPLE.read_bytes()).hexdigest()
 
 
+def test_income_rows_before_late_native_header_are_preserved_with_source_numbers():
+    header = tuple(INCOME_REQUIRED_COLUMNS)
+    values = {name: Decimal("0.00") for name in INCOME_COMPONENT_COLUMNS}
+    values.update(
+        {
+            "Sequence No.": "1",
+            "View By": "Order",
+            "Order ID": "ORDER-BEFORE-HEADER",
+            "Product ID": "",
+            "Product Name": "",
+            "Order Creation Date": date(2026, 8, 1),
+            "Payout Completed Date": date(2026, 8, 31),
+            "Release Channel": "Seller Wallet",
+            "Order Type": "Normal Order",
+            "Total Released Amount (RM)": Decimal("10.00"),
+            "Product Price": Decimal("10.00"),
+        }
+    )
+    source_row = tuple(values.get(name) for name in header)
+    group_heading = [None] * len(header)
+    group_heading[0] = "Order Info"
+    group_heading[11] = "Released Amount Details"
+    issues = []
+
+    parsed = _parse_income_rows(
+        [
+            tuple(group_heading),
+            source_row,
+            header,
+            replace_tuple(source_row, 0, "2"),
+        ],
+        issues,
+    )
+
+    assert [row.source_row_number for row in parsed] == [2, 4]
+    assert [row.order_id for row in parsed] == [
+        "ORDER-BEFORE-HEADER",
+        "ORDER-BEFORE-HEADER",
+    ]
+    assert issues == []
+
+
+def test_malformed_income_row_before_late_header_is_not_silently_discarded():
+    header = tuple(INCOME_REQUIRED_COLUMNS)
+    malformed = [None] * len(header)
+    malformed[header.index("Product Name")] = "Unexpected source row"
+    issues = []
+
+    parsed = _parse_income_rows([tuple(malformed), header], issues)
+
+    assert len(parsed) == 1
+    assert parsed[0].source_row_number == 1
+    assert [issue.code for issue in issues] == ["unrecognized_income_row"]
+
+
+def replace_tuple(values, index, value):
+    result = list(values)
+    result[index] = value
+    return tuple(result)
+
+
 def test_native_summary_preserves_approved_lines_hierarchy_currency_and_money(parsed_sample):
     lines = {line.native_label: line for line in parsed_sample.summary_lines}
 

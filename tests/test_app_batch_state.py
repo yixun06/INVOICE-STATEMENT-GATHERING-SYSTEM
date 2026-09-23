@@ -981,8 +981,12 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
         for control in app.get("button_group")
         if control.label == "Import workflow"
     )
-    assert source_type.options == ["Invoice Import", "Statement Import"]
-    source_type.set_value("Statement Import").run(timeout=20)
+    assert source_type.options == [
+        "Invoice Import",
+        "Shopee Weekly Statement",
+        "Shopee Monthly Statement",
+    ]
+    source_type.set_value("Shopee Weekly Statement").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
 
     assert app.exception == []
@@ -992,6 +996,32 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
     assert {"Shipment Confirmation", "Historical Import"}.isdisjoint(
         {element.value for element in app.subheader}
     )
+
+
+def test_data_import_exposes_distinct_monthly_statement_workflow(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["navigation"] = "Data Import"
+
+    app.run(timeout=20)
+    source_type = next(
+        control
+        for control in app.get("button_group")
+        if control.label == "Import workflow"
+    )
+    source_type.set_value("Shopee Monthly Statement").run(timeout=20)
+    next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["import_source_type"] == "Shopee Monthly Statement"
+    assert any(
+        element.label == "Shopee Monthly Statement (.xlsx)"
+        for element in app.file_uploader
+    )
+    stepper = {element.value for element in app.markdown if "badge[" in element.value}
+    assert len(stepper) == 4
+    assert not any("Reconcile" in item for item in stepper)
 
 
 def test_data_import_prevents_second_source_for_an_active_batch(tmp_path, monkeypatch):
