@@ -104,6 +104,7 @@ from ..domain.statement_reconciliation_v2 import IdentityScope, SettlementBasis
 from ..services.manual_review_resolution import (
     MISSING_INCOME,
     FINAL_AMOUNT,
+    FINANCIAL_CORRECTION,
     PRODUCT_COUNT_MISMATCH,
     SKU_RESOLUTION,
     PROMOTION_SUBTOTAL,
@@ -1688,7 +1689,8 @@ def _render_manual_review_resolution() -> None:
             st.success("No sources require re-upload in the current batch.", icon=":material/check_circle:")
         else:
             st.warning(
-                "The following invoices have missing product anchors or invalid document structure and cannot be resolved online. "
+                "The following invoices have missing required source evidence, missing product anchors, "
+                "or invalid document structure and cannot be resolved online. "
                 "Download this listing to request replacement files, and remove them from the current batch to proceed."
             )
             with st.container(horizontal=True):
@@ -1813,9 +1815,12 @@ def _render_manual_review_resolution() -> None:
                         _render_combined_resolution_form(plan.key, review)
                     elif plan.issue_type == FINAL_AMOUNT:
                         _render_final_amount_form(plan.key, review)
+                    elif plan.issue_type == FINANCIAL_CORRECTION:
+                        _render_financial_correction_form(plan.key, review)
                     else:
                         _render_income_form(plan.key, review)
-                    _render_financial_enrichment_draft(plan.key, review)
+                    if plan.issue_type != FINANCIAL_CORRECTION:
+                        _render_financial_enrichment_draft(plan.key, review)
 
 
 def _synchronize_manual_review_focus(
@@ -1992,6 +1997,48 @@ def _render_financial_enrichment_draft(key: str, review: dict[str, Any]) -> None
                     else f"Still needs review â€” {outcome.reason}"
                 )
                 st.rerun()
+
+
+def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
+    fields = financial_enrichment_fields(review)
+    payload = review.get("order_payload") or {}
+    saved = draft_financial_enrichment(st.session_state, review)
+    formula_mismatch = str(review.get("reason") or "").startswith(
+        "Financial Reconciliation Failed:"
+    )
+    st.write("**Financial information requires review**")
+    if formula_mismatch:
+        st.caption(
+            "The extracted financial amounts do not reconcile. Verify the values "
+            "against the original Shopee Invoice."
+        )
+    else:
+        st.caption(
+            "Enter only the missing amount shown beside the source-visible label "
+            "in the original Shopee Invoice."
+        )
+    with st.form(f"financial_correction_{key}", border=False):
+        values: dict[str, str] = {}
+        for field, label in fields:
+            current = payload.get(field)
+            prefilled = "" if current in (None, "", "N/A") else str(current)
+            values[field] = st.text_input(
+                label,
+                value=saved.get(field, prefilled),
+                key=f"mr_financial_correction_{key}_{field}",
+            )
+        source_confirmed = st.checkbox(
+            "I confirmed these values from the original Shopee Invoice.",
+            key=f"mr_financial_correction_confirm_{key}",
+        )
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(
+                key,
+                {
+                    "source_confirmed": source_confirmed,
+                    "financial_enrichment": values,
+                },
+            )
 
 
 def _render_missing_product_draft(key: str, review: dict[str, Any]) -> None:

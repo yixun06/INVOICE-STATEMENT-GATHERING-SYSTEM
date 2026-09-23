@@ -2,6 +2,7 @@ from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.manual_review_resolution import (
     CORRECTION_DRAFTS_KEY,
+    FINANCIAL_CORRECTION,
     MISSING_INCOME,
     PRODUCT_COUNT_MISMATCH,
     PROMOTION_SUBTOTAL,
@@ -12,6 +13,7 @@ from src.invoice_app.services.manual_review_resolution import (
     draft_products,
     draft_summary,
     edit_draft_product,
+    financial_enrichment_fields,
     promotion_group_options,
     promotion_subtotal_resolution_eligibility,
     promotion_subtotal_groups,
@@ -25,6 +27,7 @@ from src.invoice_app.review_reason_codes import SKU_RESOLUTION_REQUIRED
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.review_reason_codes import (
     INCOME_COMPLETION_ANCHOR_MISSING,
+    INCOME_DETAILS_REQUIRED_FIELD_MISSING,
     INCOME_EXTRACTION_MISSING,
     INCOME_SOURCE_INCOMPLETE,
 )
@@ -133,6 +136,202 @@ def _income_review():
             }
         ],
     }
+
+
+def _financial_review(*, voucher_visible=False, final_visible=False):
+    visible = {
+        "merchandise_subtotal",
+        "product_price",
+        "shipping_subtotal",
+        "fees_charges_total",
+        "estimated_order_income",
+    }
+    if voucher_visible:
+        visible.add("vouchers_rebates_total")
+    if final_visible:
+        visible.add("final_amount")
+    return {
+        "batch_id": "batch",
+        "source_pdf": "financial.pdf",
+        "platform": "Shopee",
+        "order_id": "SHP-FINANCIAL",
+        "status": "Manual Review",
+        "reason": (
+            "Financial Reconciliation Failed: seller components total 11.00, "
+            "but Order Income is 12.00."
+        ),
+        "reason_code": None,
+        "order_payload": {
+            "batch_id": "batch",
+            "source_pdf": "financial.pdf",
+            "source_hash": "financial-source-hash",
+            "platform": "Shopee",
+            "order_id": "SHP-FINANCIAL",
+            "invoice_financial_layout": "NORMAL_ORDER",
+            "_income_details_present": True,
+            "_income_label_presence": tuple(sorted(visible)),
+            "merchandise_subtotal": "10.00",
+            "product_price": "10.00",
+            "shipping_subtotal": "2.00",
+            "vouchers_rebates_total": "-1.00" if voucher_visible else "N/A",
+            "fees_charges_total": "-1.00",
+            "order_income": "12.00",
+            "estimated_order_income": "12.00",
+            "income_type": "Estimated",
+            "final_amount": "12.00" if final_visible else "N/A",
+        },
+        "product_payloads": [{
+            "batch_id": "batch",
+            "source_pdf": "financial.pdf",
+            "platform": "Shopee",
+            "order_id": "SHP-FINANCIAL",
+            "seller_sku": "SKU-1",
+            "product_name": "First",
+            "quantity": 1,
+            "unit_price": "10.00",
+            "line_total": "10.00",
+            "line_subtotal": "10.00",
+            "source_line_subtotal": "10.00",
+        }],
+    }
+
+
+def _missing_financial_anchor_review(field, *, visible=True):
+    review = _financial_review()
+    review["reason_code"] = INCOME_DETAILS_REQUIRED_FIELD_MISSING
+    review["reason"] = f"Income Details require source review before validation. Missing: {field}."
+    review["order_payload"][field] = "N/A"
+    labels = set(review["order_payload"]["_income_label_presence"])
+    if visible:
+        labels.add(field)
+    else:
+        labels.discard(field)
+    review["order_payload"]["_income_label_presence"] = tuple(sorted(labels))
+    return review
+
+
+def test_formula_mismatch_exposes_only_source_visible_top_level_financial_fields_with_product_price():
+    review = _financial_review(voucher_visible=True, final_visible=True)
+
+    plan = resolution_plan(review)
+
+    assert plan is not None and plan.issue_type == FINANCIAL_CORRECTION
+    assert financial_enrichment_fields(review) == (
+        ("merchandise_subtotal", "Merchandise Subtotal"),
+        ("product_price", "Product Price"),
+        ("shipping_subtotal", "Shipping Subtotal"),
+        ("vouchers_rebates_total", "Vouchers & Rebates"),
+        ("fees_charges_total", "Fees & Charges"),
+        ("order_income", "Order Income"),
+        ("final_amount", "Final Amount"),
+    )
+
+
+def test_formula_mismatch_does_not_offer_source_absent_voucher_or_final_amount():
+    review = _financial_review()
+
+    fields = dict(financial_enrichment_fields(review))
+
+    assert set(fields) == {
+        "merchandise_subtotal",
+        "product_price",
+        "shipping_subtotal",
+        "fees_charges_total",
+        "order_income",
+    }
+    assert "vouchers_rebates_total" not in fields
+    assert "final_amount" not in fields
+
+
+def test_visible_missing_top_level_anchor_is_resolvable_one_field_at_a_time():
+    cases = (
+        ("fees_charges_total", "Fees & Charges"),
+        ("shipping_subtotal", "Shipping Subtotal"),
+        ("vouchers_rebates_total", "Vouchers & Rebates"),
+    )
+    for field, label in cases:
+        review = _missing_financial_anchor_review(field)
+
+        plan = resolution_plan(review)
+
+        assert plan is not None and plan.issue_type == FINANCIAL_CORRECTION
+        assert financial_enrichment_fields(review) == ((field, label),)
+
+
+def test_source_absent_required_shipping_or_fees_anchor_has_no_numeric_resolution():
+    for field in ("shipping_subtotal", "fees_charges_total"):
+        review = _missing_financial_anchor_review(field, visible=False)
+
+        assert financial_enrichment_fields(review) == ()
+        assert resolution_plan(review) is None
+
+
+def test_financial_correction_requires_confirmation_and_full_revalidation():
+    review = _financial_review()
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    unconfirmed = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": False,
+            "financial_enrichment": {"order_income": "11.00"},
+        },
+        price_master=_master(),
+    )
+    assert unconfirmed.resolved is False
+    assert state["reviews"] == [review]
+
+    still_mismatched = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {"order_income": "12.00"},
+        },
+        price_master=_master(),
+    )
+    assert still_mismatched.resolved is False
+    assert still_mismatched.reason.startswith("Financial Reconciliation Failed:")
+    assert state["reviews"] == [review]
+
+    resolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {"order_income": "11.00"},
+        },
+        price_master=_master(),
+    )
+    assert resolved.resolved is True
+    assert state["reviews"] == []
+    assert state["orders"][0]["order_income"] == "11.00"
+    assert state["orders"][0]["vouchers_rebates_total"] == "N/A"
+
+
+def test_financial_formula_fix_cannot_bypass_product_amount_reconciliation():
+    review = _financial_review()
+    plan = resolution_plan(review)
+    state = {"orders": [], "products": [], "reviews": [review]}
+
+    outcome = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "financial_enrichment": {
+                "order_income": "11.00",
+                "product_price": "9.00",
+            },
+        },
+        price_master=_master(),
+    )
+
+    assert outcome.resolved is False
+    assert "Product Price" in outcome.reason
+    assert state["reviews"] == [review]
 
 
 def test_product_count_resolution_adds_only_the_missing_staged_product_and_preserves_source_fields():
@@ -783,6 +982,67 @@ def test_future_order_with_same_structured_evidence_is_not_id_hardcoded():
 
     assert plan is not None
     assert plan.issue_type == PROMOTION_SUBTOTAL
+
+
+def _financial_manual_review_routing_app():
+    from copy import deepcopy
+
+    import streamlit as st
+
+    from src.invoice_app.ui import data_import
+
+    formula = {
+        "batch_id": "batch", "source_pdf": "formula.pdf", "platform": "Shopee",
+        "order_id": "FORMULA", "status": "Manual Review", "reason_code": None,
+        "reason": "Financial Reconciliation Failed: seller components total 11.00, but Order Income is 12.00.",
+        "order_payload": {
+            "order_id": "FORMULA", "invoice_financial_layout": "NORMAL_ORDER",
+            "_income_label_presence": (
+                "estimated_order_income", "fees_charges_total", "merchandise_subtotal",
+                "product_price", "shipping_subtotal",
+            ),
+            "merchandise_subtotal": "10.00", "product_price": "10.00",
+            "shipping_subtotal": "2.00", "vouchers_rebates_total": "N/A",
+            "fees_charges_total": "-1.00", "order_income": "12.00",
+            "final_amount": "N/A",
+        },
+        "product_payloads": [],
+    }
+    visible_missing = deepcopy(formula)
+    visible_missing.update({
+        "source_pdf": "visible-missing.pdf", "order_id": "VISIBLE-MISSING",
+        "reason_code": "INCOME_DETAILS_REQUIRED_FIELD_MISSING",
+        "reason": "Income Details require source review before validation. Missing: Fees & Charges.",
+    })
+    visible_missing["order_payload"]["fees_charges_total"] = "N/A"
+    source_absent = deepcopy(visible_missing)
+    source_absent.update({"source_pdf": "source-absent.pdf", "order_id": "SOURCE-ABSENT"})
+    source_absent["order_payload"]["_income_label_presence"] = tuple(
+        field for field in source_absent["order_payload"]["_income_label_presence"]
+        if field != "fees_charges_total"
+    )
+    st.session_state.setdefault("batch_id", "batch")
+    st.session_state.setdefault("orders", [])
+    st.session_state.setdefault("products", [])
+    st.session_state.setdefault("reviews", [formula, visible_missing, source_absent])
+    data_import._render_manual_review_resolution()
+
+
+def test_financial_manual_review_ui_prefills_formula_fields_and_focuses_visible_missing_anchor():
+    app = AppTest.from_function(_financial_manual_review_routing_app)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any(tab.label.endswith("Requires Re-upload (1)") for tab in app.tabs)
+    assert any(tab.label.endswith("Online Resolution (2)") for tab in app.tabs)
+    label_values = [(field.label, field.value) for field in app.text_input]
+    assert ("Merchandise Subtotal", "10.00") in label_values
+    assert ("Product Price", "10.00") in label_values
+    assert ("Order Income", "12.00") in label_values
+    assert ("Fees & Charges", "") in label_values
+    assert not any(label == "Vouchers & Rebates" for label, _ in label_values)
+    assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 2
 
 
 def _promotion_manual_review_routing_app():
