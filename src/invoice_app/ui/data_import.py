@@ -12,6 +12,7 @@ from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
 import io
+import re
 from typing import Any, Callable, Mapping, MutableMapping
 
 import streamlit as st
@@ -128,6 +129,7 @@ from ..services.manual_review_resolution import (
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
 )
+from ..review_reason_codes import INCOME_DETAILS_REQUIRED_FIELD_MISSING
 
 
 
@@ -202,6 +204,11 @@ _MANUAL_REVIEW_REUPLOAD = "requires_reupload"
 _MANUAL_REVIEW_ACTIVE_SECTION = "manual_review_active_section"
 _MANUAL_REVIEW_ACTIVE_KEY = "manual_review_active_key"
 _MANUAL_REVIEW_TAB_WIDGET = "manual_review_tab_widget"
+_FINANCIAL_FORMULA_MISMATCH = re.compile(
+    r"seller components total\s+(?P<calculated>-?[\d,]+(?:\.\d{1,2})?),\s*"
+    r"but Order Income is\s+(?P<invoice>-?[\d,]+(?:\.\d{1,2})?)",
+    flags=re.IGNORECASE,
+)
 def initialize_data_import_state() -> None:
     """Initialize presentation-only state once per Streamlit session."""
     st.session_state.setdefault("data_import_step", 1)
@@ -1689,8 +1696,7 @@ def _render_manual_review_resolution() -> None:
             st.success("No sources require re-upload in the current batch.", icon=":material/check_circle:")
         else:
             st.warning(
-                "The following invoices have missing required source evidence, missing product anchors, "
-                "or invalid document structure and cannot be resolved online. "
+                "The following invoices need a replacement file before they can continue. "
                 "Download this listing to request replacement files, and remove them from the current batch to proceed."
             )
             with st.container(horizontal=True):
@@ -1721,12 +1727,21 @@ def _render_manual_review_resolution() -> None:
                 ):
                     _queue_bulk_recovery(review_sources, label="Remove all Manual Review sources")
 
+            for review in unfixable_reviews:
+                presentation = _source_absent_financial_presentation(review)
+                if presentation is None:
+                    continue
+                with st.container(border=True):
+                    st.write(f"**{presentation['title']}**")
+                    st.write(presentation["reason"])
+                    st.caption(presentation["action"])
+
             st.dataframe(
                 [
                     {
                         "Order ID": item.get("order_id"),
                         "Source PDF": item.get("source_pdf"),
-                        "Reason": item.get("reason"),
+                        "Reason": _manual_review_primary_reason(item),
                     }
                     for item in unfixable_reviews
                 ],
@@ -1772,7 +1787,7 @@ def _render_manual_review_resolution() -> None:
         if not fixable_reviews:
             st.success("No sources require online form resolution in the current batch.", icon=":material/check_circle:")
         else:
-            st.info("The following invoices have missing fields or extracted product count discrepancies. Fill in the forms below to apply corrections.")
+            st.info("The following invoices need your review. Check the details below and correct the information where possible.")
             if not unfixable_reviews:
                 if st.button(
                     "Remove all Manual Review sources from current batch",
@@ -2003,23 +2018,19 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
     fields = financial_enrichment_fields(review)
     payload = review.get("order_payload") or {}
     saved = draft_financial_enrichment(st.session_state, review)
-    formula_mismatch = str(review.get("reason") or "").startswith(
-        "Financial Reconciliation Failed:"
-    )
-    st.write("**Financial information requires review**")
-    if formula_mismatch:
-        st.caption(
-            "The extracted financial amounts do not reconcile. Verify the values "
-            "against the original Shopee Invoice."
-        )
-    else:
-        st.caption(
-            "Enter only the missing amount shown beside the source-visible label "
-            "in the original Shopee Invoice."
-        )
+    presentation = _financial_review_presentation(review, fields)
+    st.write(f"**{presentation['title']}**")
+    st.write(presentation["reason"])
+    if summary := presentation.get("summary"):
+        calculated, invoice, difference = summary
+        calculated_column, invoice_column, difference_column = st.columns(3)
+        calculated_column.metric("Calculated", calculated)
+        invoice_column.metric("Invoice", invoice)
+        difference_column.metric("Difference", difference)
+    st.caption(presentation["action"])
     with st.form(f"financial_correction_{key}", border=False):
         values: dict[str, str] = {}
-        for field, label in fields:
+        def render_field(field: str, label: str) -> None:
             current = payload.get(field)
             prefilled = "" if current in (None, "", "N/A") else str(current)
             values[field] = st.text_input(
@@ -2027,8 +2038,17 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
                 value=saved.get(field, prefilled),
                 key=f"mr_financial_correction_{key}_{field}",
             )
+
+        if presentation["kind"] == "formula_mismatch":
+            input_columns = st.columns(2)
+            for index, (field, label) in enumerate(fields):
+                with input_columns[index % len(input_columns)]:
+                    render_field(field, label)
+        else:
+            for field, label in fields:
+                render_field(field, label)
         source_confirmed = st.checkbox(
-            "I confirmed these values from the original Shopee Invoice.",
+            "Confirmed with the original Shopee Invoice",
             key=f"mr_financial_correction_confirm_{key}",
         )
         if st.form_submit_button("Apply & Revalidate", type="primary"):
@@ -2039,6 +2059,80 @@ def _render_financial_correction_form(key: str, review: dict[str, Any]) -> None:
                     "financial_enrichment": values,
                 },
             )
+
+
+def _financial_review_presentation(
+    review: Mapping[str, Any], fields: tuple[tuple[str, str], ...]
+) -> dict[str, Any]:
+    summary = _formula_mismatch_summary(str(review.get("reason") or ""))
+    if summary is not None:
+        return {
+            "kind": "formula_mismatch",
+            "title": "Check invoice amounts",
+            "reason": "Order Income does not match the other invoice amounts.",
+            "action": "Check the amounts below and correct any value that was read incorrectly.",
+            "summary": summary,
+        }
+    labels = [label for _, label in fields]
+    amount = labels[0] if len(labels) == 1 else "Some amounts"
+    return {
+        "kind": "missing_amount",
+        "title": "Missing amount",
+        "reason": f"{amount} could not be read from the invoice.",
+        "action": "Enter the amount exactly as shown on the invoice.",
+    }
+
+
+def _formula_mismatch_summary(reason: str) -> tuple[str, str, str] | None:
+    match = _FINANCIAL_FORMULA_MISMATCH.search(reason)
+    if match is None:
+        return None
+    try:
+        calculated = Decimal(match.group("calculated").replace(",", ""))
+        invoice = Decimal(match.group("invoice").replace(",", ""))
+    except ArithmeticError:
+        return None
+    return (
+        _format_rm(calculated),
+        _format_rm(invoice),
+        _format_rm(abs(invoice - calculated)),
+    )
+
+
+def _format_rm(value: Decimal) -> str:
+    return f"RM{value.quantize(Decimal('0.01'))}"
+
+
+def _source_absent_financial_presentation(
+    review: Mapping[str, Any],
+) -> dict[str, str] | None:
+    if str(review.get("reason_code") or "") != INCOME_DETAILS_REQUIRED_FIELD_MISSING:
+        return None
+    if financial_enrichment_fields(review):
+        return None
+    label = _missing_financial_label(str(review.get("reason") or ""))
+    if not label:
+        return None
+    return {
+        "title": "Incomplete invoice",
+        "reason": f"{label} is missing from this invoice.",
+        "action": "Upload a complete invoice to continue.",
+    }
+
+
+def _manual_review_primary_reason(review: Mapping[str, Any]) -> str:
+    presentation = _source_absent_financial_presentation(review)
+    return presentation["reason"] if presentation is not None else str(
+        review.get("reason") or "Manual Review required"
+    )
+
+
+def _missing_financial_label(reason: str) -> str | None:
+    match = re.search(r"\bMissing:\s*([^.]*)", reason, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    labels = [label.strip() for label in match.group(1).split(",") if label.strip()]
+    return labels[0] if len(labels) == 1 else None
 
 
 def _render_missing_product_draft(key: str, review: dict[str, Any]) -> None:

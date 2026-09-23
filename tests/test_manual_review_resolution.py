@@ -1043,6 +1043,30 @@ def test_financial_manual_review_ui_prefills_formula_fields_and_focuses_visible_
     assert ("Fees & Charges", "") in label_values
     assert not any(label == "Vouchers & Rebates" for label, _ in label_values)
     assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 2
+    assert [metric.label for metric in app.metric] == [
+        "Calculated",
+        "Invoice",
+        "Difference",
+    ]
+    assert [metric.value for metric in app.metric] == ["RM11.00", "RM12.00", "RM1.00"]
+    markdown = {item.value for item in app.markdown}
+    captions = {item.value for item in app.caption}
+    assert "**Check invoice amounts**" in markdown
+    assert "Order Income does not match the other invoice amounts." in markdown
+    assert "**Missing amount**" in markdown
+    assert "Fees & Charges could not be read from the invoice." in markdown
+    assert "**Incomplete invoice**" in markdown
+    assert "Fees & Charges is missing from this invoice." in markdown
+    assert "Check the amounts below and correct any value that was read incorrectly." in captions
+    assert "Enter the amount exactly as shown on the invoice." in captions
+    assert "Upload a complete invoice to continue." in captions
+    assert {
+        checkbox.label for checkbox in app.checkbox
+    } == {"Confirmed with the original Shopee Invoice"}
+    assert app.info[0].value == (
+        "The following invoices need your review. Check the details below and "
+        "correct the information where possible."
+    )
 
 
 def _promotion_manual_review_routing_app():
