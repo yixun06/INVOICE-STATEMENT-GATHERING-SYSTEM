@@ -99,7 +99,10 @@ def revalidate_shopee_invoice(
     ):
         return _failed(working, product_error)
     if financial_error := validate_shopee_financial_reconciliation(
-        dict(order), order.get("refund_amount"), layout=layout
+        dict(order),
+        order.get("refund_amount"),
+        layout=layout,
+        label_presence=frozenset(order.get("_income_label_presence") or ()),
     ):
         return _failed(working, financial_error)
 
@@ -168,6 +171,13 @@ def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -
         for field in required
         if is_missing_financial_value(order.get(field))
     ]
+    visible = set(order.get("_income_label_presence") or ())
+    if (
+        layout == NORMAL_ORDER
+        and "vouchers_rebates_total" in visible
+        and is_missing_financial_value(order.get("vouchers_rebates_total"))
+    ):
+        missing.append(INCOME_ALIASES["vouchers_rebates_total"][0])
     if layout == RETURN_REFUND:
         if is_missing_financial_value(order.get("refund_amount")):
             missing.append("Refund Amount")
@@ -179,7 +189,6 @@ def _validate_required_financial_source(order: Mapping[str, Any], layout: str) -
     elif is_missing_financial_value(order.get("order_income")):
         missing.append("Estimated Order Income or Order Income")
 
-    visible = set(order.get("_income_label_presence") or ())
     if "final_amount" in visible and is_missing_financial_value(order.get("final_amount")):
         missing.append(INCOME_ALIASES["final_amount"][0])
     if missing:

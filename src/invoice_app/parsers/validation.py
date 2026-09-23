@@ -190,14 +190,48 @@ def validate_shopee_financial_reconciliation(
     refund_amount: Any = None,
     *,
     layout: str = NORMAL_ORDER,
+    label_presence: frozenset[str] | None = None,
 ) -> str | None:
-    """Return only authoritative financial blockers; component gaps are evidence notes."""
+    """Return authoritative top-level financial blockers for supported layouts."""
     required_fields = ["merchandise_subtotal", "product_price", "order_income"]
     for field in required_fields:
         value = income.get(field)
         if not _is_missing_money(value) and _decimal_value(value) is None:
             label = field.replace("_", " ").title()
             return f"Financial Reconciliation Failed: {label} is not numeric."
+
+    if layout != NORMAL_ORDER:
+        return None
+
+    merchandise = _decimal_value(income.get("merchandise_subtotal"))
+    product_price = _decimal_value(income.get("product_price"))
+    shipping = _decimal_value(income.get("shipping_subtotal"))
+    fees = _decimal_value(income.get("fees_charges_total"))
+    order_income = _decimal_value(income.get("order_income"))
+    if any(
+        value is None
+        for value in (merchandise, product_price, shipping, fees, order_income)
+    ):
+        return None
+
+    expected_income = merchandise + shipping + fees
+    voucher_visible = (
+        "vouchers_rebates_total" in label_presence
+        if label_presence is not None
+        else not _is_missing_money(income.get("vouchers_rebates_total"))
+    )
+    if voucher_visible:
+        voucher = _decimal_value(income.get("vouchers_rebates_total"))
+        if voucher is None:
+            return "Financial Reconciliation Failed: Vouchers & Rebates is not numeric."
+        expected_income += voucher
+
+    if abs(expected_income - order_income) > MONEY_TOLERANCE:
+        return (
+            "Financial Reconciliation Failed: "
+            f"seller components total {expected_income:.2f}, "
+            f"but Order Income is {order_income:.2f}."
+        )
     return None
 
 

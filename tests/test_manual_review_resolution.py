@@ -245,7 +245,7 @@ def test_income_resolution_requires_source_confirmation_and_keeps_the_review():
     assert state["reviews"] == [review]
 
 
-def test_income_resolution_preserves_final_income_type_and_keeps_component_difference_as_note():
+def test_income_resolution_rejects_top_level_financial_difference():
     review = _income_review()
     plan = resolution_plan(review)
     assert plan is not None
@@ -263,11 +263,13 @@ def test_income_resolution_preserves_final_income_type_and_keeps_component_diffe
         price_master=_master(),
     )
 
-    assert differing.resolved is True
-    assert differing_state["reviews"] == []
-    assert differing_state["orders"][0]["_financial_evidence_notes"] == (
-        "Financial Reconciliation Failed: seller components total 22.00, but Order Income is 23.00.",
+    assert differing.resolved is False
+    assert differing.reason == (
+        "Financial Reconciliation Failed: seller components total 22.00, "
+        "but Order Income is 23.00."
     )
+    assert differing_state["orders"] == []
+    assert differing_state["reviews"] == [review]
 
     state = {"orders": [], "products": [], "reviews": [_income_review()]}
     resolved = apply_resolution(
@@ -914,13 +916,15 @@ def test_case_one_source_visible_subtotal_reruns_full_revalidation():
     assert state["products"][0]["nav"] == "NAV-1"
 
 
-def test_case_one_subtotal_keeps_financial_difference_as_non_blocking_note():
+def test_case_one_subtotal_still_blocks_on_top_level_financial_difference():
     review = _promotion_review()
     plan = resolution_plan(review)
     review["order_payload"]["order_income"] = "19.00"
     state = {"orders": [], "products": [], "reviews": [review]}
     outcome = apply_resolution(state, key=plan.key, values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "20.00"}, price_master=_promotion_master())
-    assert outcome.resolved is True
-    assert state["orders"][0]["_financial_evidence_notes"] == (
-        "Financial Reconciliation Failed: seller components total 20.00, but Order Income is 19.00.",
+    assert outcome.resolved is False
+    assert outcome.reason == (
+        "Financial Reconciliation Failed: seller components total 20.00, "
+        "but Order Income is 19.00."
     )
+    assert state["orders"] == []

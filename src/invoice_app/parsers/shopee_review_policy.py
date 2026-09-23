@@ -212,6 +212,7 @@ def find_shopee_review_issue(
         data.income,
         data.refund_amount,
         layout=data.invoice_financial_layout,
+        label_presence=data.income_label_presence,
     )
     if financial_error:
         return ShopeeReviewIssue(order_id=data.order_id, reason=financial_error)

@@ -269,6 +269,7 @@ def test_shopee_refund_is_not_double_subtracted_in_financial_reconciliation():
     assert validate_shopee_financial_reconciliation(
         extracted.income,
         extracted.refund_amount,
+        layout=RETURN_REFUND,
     ) is None
 
     assert financial_reconciliation_evidence_notes(
@@ -285,6 +286,7 @@ def test_shopee_refund_financial_reconciliation_reports_wrong_totals_without_blo
     assert validate_shopee_financial_reconciliation(
         extracted.income,
         extracted.refund_amount,
+        layout=RETURN_REFUND,
     ) is None
 
     assert financial_reconciliation_evidence_notes(
@@ -348,7 +350,7 @@ def test_shopee_product_subtotal_mismatch_requires_manual_review():
     assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
 
 
-def test_shopee_financial_component_reconciliation_difference_is_non_blocking_evidence():
+def test_shopee_normal_top_level_financial_identity_uses_existing_tolerance():
     extracted = extract_shopee_data(VALID_SHOPEE_TEXT, "financial-tolerance.pdf")
     within_tolerance = replace(
         extracted,
@@ -360,10 +362,124 @@ def test_shopee_financial_component_reconciliation_difference_is_non_blocking_ev
     )
 
     assert find_shopee_review_issue(within_tolerance) is None
-    assert find_shopee_review_issue(outside_tolerance) is None
-    assert financial_reconciliation_evidence_notes(outside_tolerance.income) == (
-        "Financial Reconciliation Failed: seller components total 22.00, but Order Income is 22.03.",
+    issue = find_shopee_review_issue(outside_tolerance)
+    assert issue is not None
+    assert issue.reason == (
+        "Financial Reconciliation Failed: seller components total 22.00, "
+        "but Order Income is 22.03."
     )
+
+
+def test_shopee_normal_visible_voucher_participates_in_signed_identity():
+    text = VALID_SHOPEE_TEXT.replace(
+        "Fees & Charges -RM3.00",
+        "Vouchers & Rebates -RM1.00\nFees & Charges -RM3.00",
+    ).replace("Estimated Order Income RM22.00", "Estimated Order Income RM21.00")
+    extracted = extract_shopee_data(text, "visible-voucher.pdf")
+
+    assert extracted.income["vouchers_rebates_total"] == "-1.00"
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_normal_absent_voucher_is_not_synthesized_when_visible_terms_reconcile():
+    extracted = extract_shopee_data(VALID_SHOPEE_TEXT, "absent-voucher.pdf")
+    order, _ = map_shopee_records(extracted, "batch-absent-voucher")
+
+    assert "vouchers_rebates_total" not in extracted.income_label_presence
+    assert extracted.income["vouchers_rebates_total"] == "N/A"
+    assert order["vouchers_rebates_total"] == "N/A"
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_shopee_normal_absent_voucher_does_not_hide_identity_failure():
+    extracted = extract_shopee_data(
+        VALID_SHOPEE_TEXT.replace("Estimated Order Income RM22.00", "Estimated Order Income RM21.97"),
+        "absent-voucher-mismatch.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.income["vouchers_rebates_total"] == "N/A"
+    assert issue is not None
+    assert issue.reason.startswith("Financial Reconciliation Failed:")
+
+
+@pytest.mark.parametrize(
+    ("field", "label"),
+    (
+        ("vouchers_rebates_total", "Vouchers & Rebates"),
+        ("shipping_subtotal", "Shipping Subtotal"),
+        ("fees_charges_total", "Fees & Charges"),
+    ),
+)
+def test_shopee_normal_visible_top_level_anchor_without_value_requires_review(field, label):
+    extracted = extract_shopee_data(VALID_SHOPEE_TEXT, f"visible-missing-{field}.pdf")
+    extracted = replace(extracted, income=dict(extracted.income, **{field: "N/A"}))
+    if field == "vouchers_rebates_total":
+        extracted = replace(
+            extracted,
+            income_label_presence=extracted.income_label_presence | {field},
+        )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert issue is not None
+    assert issue.reason_code == INCOME_DETAILS_REQUIRED_FIELD_MISSING
+    assert label in issue.reason
+
+
+@pytest.mark.parametrize(
+    ("source_line", "field", "label"),
+    (
+        ("Shipping Subtotal RM0.00\n", "shipping_subtotal", "Shipping Subtotal"),
+        ("Fees & Charges -RM3.00\n", "fees_charges_total", "Fees & Charges"),
+    ),
+)
+def test_shopee_normal_absent_required_top_level_anchor_requires_review(
+    source_line, field, label
+):
+    extracted = extract_shopee_data(
+        VALID_SHOPEE_TEXT.replace(source_line, ""),
+        f"absent-{field}.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert field not in extracted.income_label_presence
+    assert extracted.income[field] == "N/A"
+    assert issue is not None
+    assert issue.reason_code == INCOME_DETAILS_REQUIRED_FIELD_MISSING
+    assert label in issue.reason
+
+
+def test_shopee_final_amount_visible_but_unparsed_contract_is_unchanged():
+    extracted = extract_shopee_data(
+        f"{VALID_SHOPEE_TEXT}\nFinal Amount",
+        "unparsed-final-amount.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.final_amount_source_state == "unparsed"
+    assert issue is not None
+    assert issue.reason_code == "FINAL_AMOUNT_EXTRACTION_MISSING"
+
+
+def test_shopee_non_normal_layout_financial_validation_behavior_is_unchanged():
+    refund = refund_order_data(Decimal("-27.67"), order_income="249.87")
+
+    assert validate_shopee_financial_reconciliation(
+        refund.income,
+        refund.refund_amount,
+        layout=RETURN_REFUND,
+        label_presence=refund.income_label_presence,
+    ) is None
+    assert validate_shopee_financial_reconciliation(
+        dict(refund.income, order_income="0.00"),
+        refund.refund_amount,
+        layout=UNKNOWN_OR_MIXED,
+        label_presence=refund.income_label_presence,
+    ) is None
 
 
 def test_shopee_product_amount_tolerance_accepts_two_cents():

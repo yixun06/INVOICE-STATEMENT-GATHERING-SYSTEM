@@ -128,7 +128,7 @@ Final Amount RM{final_amount}
 """
 
 
-def test_completed_return_refund_adjustment_is_transient_evidence_not_original_refund():
+def test_completed_adjustment_keeps_transient_evidence_and_normal_identity_blocker():
     extracted = extract_shopee_data(_order_text(), "post-order-adjustment.pdf")
     order, _ = map_shopee_records(extracted, "adjustment-test")
 
@@ -140,7 +140,12 @@ def test_completed_return_refund_adjustment_is_transient_evidence_not_original_r
     assert extracted.post_order_adjustment_date == "01/08/2026"
     assert extracted.post_order_adjustment_amount == Decimal("-17.67")
     assert extracted.post_order_adjustment_final_amount_consistent is True
-    assert find_shopee_review_issue(extracted) is None
+    issue = find_shopee_review_issue(extracted)
+    assert issue is not None
+    assert issue.reason == (
+        "Financial Reconciliation Failed: seller components total 50.00, "
+        "but Order Income is 50.03."
+    )
     assert order["order_income"] == "50.03"
     assert order["final_amount"] == "32.36"
     assert order["refund_amount"] == "N/A"
@@ -209,7 +214,7 @@ def test_non_completed_return_refund_adjustment_rows_do_not_trigger_detection(te
     assert extracted.post_order_adjustment_amount is None
 
 
-def test_empty_adjustment_section_does_not_block_an_otherwise_normal_invoice():
+def test_empty_adjustment_section_does_not_bypass_normal_financial_validation():
     extracted = extract_shopee_data(
         _order_text(
             adjustment_reason="No adjustment has been made to this order yet",
@@ -221,7 +226,12 @@ def test_empty_adjustment_section_does_not_block_an_otherwise_normal_invoice():
 
     assert extracted.invoice_financial_layout == NORMAL_ORDER
     assert extracted.post_order_adjustment_observed is False
-    assert find_shopee_review_issue(extracted) is None
+    issue = find_shopee_review_issue(extracted)
+    assert issue is not None
+    assert issue.reason == (
+        "Financial Reconciliation Failed: seller components total 50.00, "
+        "but Order Income is 50.03."
+    )
 
 
 @pytest.mark.skipif(

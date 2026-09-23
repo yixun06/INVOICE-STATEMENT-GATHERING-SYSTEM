@@ -64,6 +64,8 @@ INCOME_ALIASES: dict[str, tuple[str, ...]] = {
 NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS = (
     "merchandise_subtotal",
     "product_price",
+    "shipping_subtotal",
+    "fees_charges_total",
 )
 
 RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS = (
@@ -278,6 +280,13 @@ def missing_income_detail_fields(
     for field in required_fields:
         if is_missing_financial_value(income.get(field)):
             missing.append(INCOME_ALIASES[field][0])
+    if (
+        layout == NORMAL_ORDER
+        and label_presence is not None
+        and "vouchers_rebates_total" in label_presence
+        and is_missing_financial_value(income.get("vouchers_rebates_total"))
+    ):
+        missing.append(INCOME_ALIASES["vouchers_rebates_total"][0])
     if layout == RETURN_REFUND:
         if refund_amount is None:
             missing.append("Refund Amount")
