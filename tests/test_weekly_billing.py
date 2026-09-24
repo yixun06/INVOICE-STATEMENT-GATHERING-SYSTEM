@@ -67,6 +67,7 @@ def _item(
     *,
     nav: str = "5000001",
     sku: str = "SKU-1",
+    resolved_sku: str | None = None,
     name: str = "Product One",
     variation: str | None = None,
     price: str = "10.00",
@@ -81,6 +82,7 @@ def _item(
         item_index=item_index,
         nav=nav,
         seller_sku=sku,
+        resolved_seller_sku=resolved_sku,
         product_name=name,
         variation=variation,
         unit_price=Decimal(price),
@@ -231,12 +233,13 @@ def test_normal_items_with_different_seller_skus_remain_separate():
     assert sum(row.quantity for row in summary.product_rows) == 5
     assert sum(row.amount for row in summary.product_rows) == Decimal("37.00")
     assert sum(row.discount_amount for row in summary.product_rows) == Decimal("13.00")
-    assert all(row.uom is None for row in summary.product_rows)
+    assert all(row.uom == "EA" for row in summary.product_rows)
+    assert {row.sku_code for row in summary.product_rows} == {"SKU-A", "SKU-B"}
     assert all(row.discount_percent is None for row in summary.product_rows)
     assert summary.source_items[0].actual_selling_amount_basis is ActualSellingAmountBasis.DIRECT
 
 
-def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
+def test_placeholder_nav_uses_the_same_nav_sku_and_price_identity():
     summary = build_weekly_billing_summary(
         _dataset(
             _item("ORDER-1", 0, nav="5000000", sku="SKU-A", variation="Original", price="10.00"),
@@ -247,7 +250,7 @@ def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
         PERIOD,
     )
 
-    assert len(summary.product_rows) == 4
+    assert len(summary.product_rows) == 3
     assert {row.nav for row in summary.product_rows} == {"5000000"}
     assert {row.unit_price for row in summary.product_rows} == {
         Decimal("10.00"),
@@ -259,11 +262,11 @@ def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
     ("case", "first", "second", "expected_rows", "description"),
     (
         (
-            "L-01 keeps conflicting tea titles separate",
+            "L-01 joins conflicting tea titles",
             _item("ORDER-1", 0, nav="5004322", sku="9555208108580", name="Rose Tea", variation=None, price="18.90"),
             _item("ORDER-2", 0, nav="5004322", sku="9555208108580", name="Jasmine Tea Rose Tea", variation=None, price="18.90"),
-            2,
-            None,
+            1,
+            "Rose Tea | Jasmine Tea Rose Tea",
         ),
         (
             "L-02 merges approved honey variations",
@@ -273,25 +276,25 @@ def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
             "Simply Natural Fresh Raw Honey Malaysia [Madu Asli Segar] | 1KG",
         ),
         (
-            "L-03 keeps Coconut Sugar and Normal separate",
+            "L-03 joins Coconut Sugar and Normal descriptions",
             _item("ORDER-1", 0, nav="5003317", sku="9555208104926", variation="Coconut Sugar", price="13.90"),
             _item("ORDER-2", 0, nav="5003317", sku="9555208104926", variation="Normal", price="13.90"),
-            2,
-            None,
+            1,
+            "Product One | Coconut Sugar | Product One | Normal",
         ),
         (
-            "L-04 keeps Baby Noodles ambiguity separate",
+            "L-04 joins Baby Noodles descriptions",
             _item("ORDER-1", 0, nav="4007457", sku="9555208017721", name="Baby Thin Noodle", variation="Rainbow Baby Noodles", price="12.90"),
             _item("ORDER-2", 0, nav="4007457", sku="9555208017721", name="Rainbow Noodles", variation=None, price="12.90"),
-            2,
-            None,
+            1,
+            "Baby Thin Noodle | Rainbow Baby Noodles | Rainbow Noodles",
         ),
         (
-            "L-05 keeps Good Fibre variants separate",
+            "L-05 joins Good Fibre descriptions",
             _item("ORDER-1", 0, nav="5003397", sku="9555208105169", name="Good Fibre", variation="1 Box", price="79.90"),
             _item("ORDER-2", 0, nav="5003397", sku="9555208105169", name="Good Fibre Plus+ Zero Sugar", variation="1box (Normal sugar)", price="79.90"),
-            2,
-            None,
+            1,
+            "Good Fibre | 1 Box | Good Fibre Plus+ Zero Sugar | 1box (Normal sugar)",
         ),
         (
             "L-06 merges approved Sweet Potato Mee Sua variations",
@@ -308,11 +311,11 @@ def test_placeholder_nav_keeps_sku_variation_and_historical_price_distinct():
             None,
         ),
         (
-            "L-08 keeps Buy 5 free 1 and Bundle Set separate",
+            "L-08 joins Buy 5 free 1 and Bundle Set descriptions",
             _item("ORDER-1", 0, nav="3000573", sku="9555208106944-6", variation="Buy 5 free 1", price="36.00"),
             _item("ORDER-2", 0, nav="3000573", sku="9555208106944-6", variation="Bundle Set", price="36.00"),
-            2,
-            None,
+            1,
+            "Product One | Buy 5 free 1 | Product One | Bundle Set",
         ),
     ),
     ids=lambda value: value if isinstance(value, str) else None,
@@ -355,16 +358,8 @@ def test_approved_technical_title_noise_merges(
 
 
 def test_same_identity_with_different_historical_price_remains_two_rows():
-    first = replace(
-        _item("ORDER-1", 0, price="10.00", subtotal="8.00"),
-        seller_sku=None,
-        sku_missing_in_source=True,
-    )
-    second = replace(
-        _item("ORDER-2", 0, price="12.00", subtotal="9.00"),
-        seller_sku=None,
-        sku_missing_in_source=True,
-    )
+    first = _item("ORDER-1", 0, price="10.00", subtotal="8.00")
+    second = _item("ORDER-2", 0, price="12.00", subtotal="9.00")
     summary = build_weekly_billing_summary(
         _dataset(first, second),
         PERIOD,
@@ -373,6 +368,21 @@ def test_same_identity_with_different_historical_price_remains_two_rows():
     assert [row.unit_price for row in summary.product_rows] == [
         Decimal("10.00"),
         Decimal("12.00"),
+    ]
+
+
+def test_same_sku_and_price_with_different_nav_remains_two_rows():
+    summary = build_weekly_billing_summary(
+        _dataset(
+            _item("ORDER-1", 0, nav="NAV-A", sku="SKU-1"),
+            _item("ORDER-2", 0, nav="NAV-B", sku="SKU-1"),
+        ),
+        PERIOD,
+    )
+
+    assert [(row.nav, row.sku_code) for row in summary.product_rows] == [
+        ("NAV-A", "SKU-1"),
+        ("NAV-B", "SKU-1"),
     ]
 
 
@@ -400,7 +410,7 @@ def test_missing_normal_line_subtotal_fails_loudly():
         )
 
 
-def test_source_missing_seller_sku_is_preserved_and_does_not_block_billing():
+def test_resolved_seller_sku_is_canonical_billing_sku_without_rewriting_source():
     item = replace(
         _item(
             "260901TSAE91UF",
@@ -411,8 +421,9 @@ def test_source_missing_seller_sku_is_preserved_and_does_not_block_billing():
             quantity=2,
             subtotal="41.80",
         ),
-        seller_sku=None,
-        sku_missing_in_source=True,
+        seller_sku="RAW-SKU",
+        sku_missing_in_source=False,
+        resolved_seller_sku="RESOLVED-SKU",
     )
 
     peer = _item(
@@ -427,12 +438,66 @@ def test_source_missing_seller_sku_is_preserved_and_does_not_block_billing():
     )
     summary = build_weekly_billing_summary(_dataset(item, peer), PERIOD)
 
-    assert any(source.seller_sku is None for source in summary.source_items)
+    assert summary.source_items[0].seller_sku == "RAW-SKU"
+    assert summary.source_items[0].sku_code == "RESOLVED-SKU"
     assert len(summary.product_rows) == 2
     assert {row.nav for row in summary.product_rows} == {"5004722"}
     assert sum(row.quantity for row in summary.product_rows) == 3
     assert sum(row.amount for row in summary.product_rows) == Decimal("62.70")
     assert sum(row.discount_amount for row in summary.product_rows) == Decimal("0.00")
+
+
+def test_blank_resolved_sku_falls_back_to_stripped_raw_seller_sku():
+    item = _item("ORDER-1", 0, sku="  Raw-SKU  ", resolved_sku="   ")
+
+    summary = build_weekly_billing_summary(_dataset(item), PERIOD)
+
+    assert summary.source_items[0].seller_sku == "Raw-SKU"
+    assert summary.source_items[0].sku_code == "Raw-SKU"
+    assert summary.product_rows[0].sku_code == "Raw-SKU"
+
+
+def test_missing_raw_and_resolved_sku_fails_closed():
+    item = replace(
+        _item("ORDER-1", 0),
+        seller_sku=None,
+        resolved_seller_sku=None,
+        sku_missing_in_source=True,
+    )
+
+    with pytest.raises(
+        WeeklyBillingError,
+        match="BUSINESS DECISION REQUIRED — WEEKLY BILLING SKU MISSING",
+    ):
+        build_weekly_billing_summary(_dataset(item), PERIOD)
+
+
+def test_same_nav_sku_price_different_descriptions_consolidate_and_join():
+    summary = build_weekly_billing_summary(
+        _dataset(
+            _item(
+                "ORDER-1", 0, name="First description", variation="Small",
+                quantity=2, subtotal="16.00",
+            ),
+            _item(
+                "ORDER-2", 0, name="Second description", variation="Large",
+                quantity=3, subtotal="21.00",
+            ),
+        ),
+        PERIOD,
+    )
+
+    assert len(summary.product_rows) == 1
+    row = summary.product_rows[0]
+    assert row.product_name == (
+        "First description | Small | Second description | Large"
+    )
+    assert (row.quantity, row.discount_amount, row.amount, row.uom) == (
+        5,
+        Decimal("13.00"),
+        Decimal("37.00"),
+        "EA",
+    )
 
 
 def test_negative_discount_is_preserved_not_clamped():
@@ -673,18 +738,18 @@ def test_excel_uses_exact_summary_rows_numeric_money_and_deterministic_order():
     values = list(sheet.iter_rows(values_only=True))
 
     assert values[0] == PRODUCT_SUMMARY_HEADERS
-    assert [row[:4] for row in values[1:]] == [
-        (1, "NAV-A", "Alpha", 1),
-        (2, "NAV-B", "Beta", 1),
+    assert [row[:5] for row in values[1:]] == [
+        (1, "SKU-A", "NAV-A", "Alpha", 1),
+        (2, "SKU-B", "NAV-B", "Beta", 1),
     ]
-    assert all(sheet.cell(row=row, column=6).data_type == "n" for row in (2, 3))
-    assert all(sheet.cell(row=row, column=8).data_type == "n" for row in (2, 3))
+    assert all(sheet.cell(row=row, column=7).data_type == "n" for row in (2, 3))
     assert all(sheet.cell(row=row, column=9).data_type == "n" for row in (2, 3))
-    assert all(row[4] is None and row[6] is None for row in values[1:])
+    assert all(sheet.cell(row=row, column=10).data_type == "n" for row in (2, 3))
+    assert all(row[5] == "EA" and row[7] is None for row in values[1:])
     assert values[1:] == [
-        (1, "NAV-A", "Alpha", 1, None, 10, None, 2, 8),
-        (2, "NAV-B", "Beta", 1, None, 10, None, 2, 8),
+        (1, "SKU-A", "NAV-A", "Alpha", 1, "EA", 10, None, 2, 8),
+        (2, "SKU-B", "NAV-B", "Beta", 1, "EA", 10, None, 2, 8),
     ]
-    assert sum(row[3] for row in values[1:]) == summary.total_quantity
-    assert Decimal(str(sum(row[7] for row in values[1:]))) == summary.total_discount_amount
-    assert Decimal(str(sum(row[8] for row in values[1:]))) == summary.total_amount
+    assert sum(row[4] for row in values[1:]) == summary.total_quantity
+    assert Decimal(str(sum(row[8] for row in values[1:]))) == summary.total_discount_amount
+    assert Decimal(str(sum(row[9] for row in values[1:]))) == summary.total_amount

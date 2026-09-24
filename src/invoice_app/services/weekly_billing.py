@@ -682,6 +682,12 @@ def _largest_remainder_allocations(
 
 
 def _required_item_facts(item: CanonicalInvoiceItem) -> dict[str, Any]:
+    sku_code = _text(item.resolved_seller_sku) or _text(item.seller_sku)
+    if not sku_code:
+        raise WeeklyBillingError(
+            "BUSINESS DECISION REQUIRED — WEEKLY BILLING SKU MISSING: "
+            f"{item.order_id}/{item.item_index}."
+        )
     required_text = {
         "nav": item.nav,
         "product_name": item.product_name,
@@ -704,9 +710,10 @@ def _required_item_facts(item: CanonicalInvoiceItem) -> dict[str, Any]:
         "item_index": item.item_index,
         "nav": _text(item.nav),
         "seller_sku": _text(item.seller_sku) or None,
+        "sku_code": sku_code,
         "product_name": _text(item.product_name),
         "variation": _text(item.variation),
-        "uom": None,
+        "uom": "EA",
         "historical_pm_unit_price": _cent_money(
             item.unit_price, item.order_id, item.item_index, "historical PM Unit Price"
         ),
@@ -717,34 +724,32 @@ def _required_item_facts(item: CanonicalInvoiceItem) -> dict[str, Any]:
 def _aggregate_source_items(
     source_items: Sequence[BillingSourceItem],
 ) -> tuple[ProductSummaryRow, ...]:
-    groups: dict[
-        tuple[str, str | None, str, Decimal, str], list[BillingSourceItem]
-    ] = defaultdict(list)
-    descriptions: dict[tuple[str, str | None, str, Decimal, str], str] = {}
+    groups: dict[tuple[str, str, Decimal], list[BillingSourceItem]] = defaultdict(list)
+    descriptions: dict[tuple[str, str, Decimal], list[str]] = defaultdict(list)
     for item in source_items:
         identity = resolve_product_summary_identity(
             nav=item.nav,
-            seller_sku=item.seller_sku,
+            seller_sku=item.sku_code,
             product_name=item.product_name,
             variation=item.variation,
             historical_pm_unit_price=item.historical_pm_unit_price,
         )
         key = (
             identity.nav,
-            identity.seller_sku,
-            identity.variation_key,
+            item.sku_code,
             identity.historical_pm_unit_price,
-            identity.title_key,
         )
         groups[key].append(item)
-        descriptions[key] = identity.display_description
+        if identity.display_description not in descriptions[key]:
+            descriptions[key].append(identity.display_description)
     unsorted_rows = tuple(
         ProductSummaryRow(
             number=0,
+            sku_code=key[1],
             nav=key[0],
-            product_name=descriptions[key],
-            uom=None,
-            unit_price=key[3],
+            product_name=" | ".join(descriptions[key]),
+            uom="EA",
+            unit_price=key[2],
             quantity=sum(item.quantity for item in members),
             discount_percent=None,
             discount_amount=sum(
@@ -761,6 +766,7 @@ def _aggregate_source_items(
     return tuple(
         ProductSummaryRow(
             number=number,
+            sku_code=row.sku_code,
             nav=row.nav,
             product_name=row.product_name,
             uom=row.uom,
@@ -896,17 +902,19 @@ def _text(value: Any) -> str:
 def _source_item_sort_key(item: BillingSourceItem) -> tuple[Any, ...]:
     return (
         item.nav.casefold(),
-        item.product_name.casefold(),
+        item.sku_code,
         item.historical_pm_unit_price,
-        (item.seller_sku or "").casefold(),
         item.order_id,
         item.item_index,
+        item.product_name.casefold(),
+        item.variation,
     )
 
 
 def _summary_row_sort_key(row: ProductSummaryRow) -> tuple[Any, ...]:
     return (
         row.nav.casefold(),
-        row.product_name.casefold(),
+        row.sku_code,
         row.unit_price,
+        row.product_name.casefold(),
     )

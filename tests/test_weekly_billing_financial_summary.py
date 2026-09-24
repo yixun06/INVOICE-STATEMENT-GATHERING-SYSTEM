@@ -253,7 +253,7 @@ def test_unified_workbook_has_exact_three_sheets_and_numeric_financial_amounts()
         data_only=True,
     )
     assert workbook.sheetnames == ["Product Summary", "Staging Data", "Financial Summary"]
-    assert workbook["Product Summary"].max_column == 9
+    assert workbook["Product Summary"].max_column == 10
     finance = workbook["Financial Summary"]
     assert finance.cell(1, 1).value == "Description"
     assert finance.cell(1, 2).value == "Amount"

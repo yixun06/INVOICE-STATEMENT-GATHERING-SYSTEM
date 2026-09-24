@@ -37,6 +37,7 @@ class BillingSourceItem:
     item_index: int
     nav: str
     seller_sku: str | None
+    sku_code: str
     product_name: str
     uom: str | None
     historical_pm_unit_price: Decimal
@@ -59,6 +60,7 @@ class BillingSourceItem:
 @dataclass(frozen=True)
 class ProductSummaryRow:
     number: int
+    sku_code: str
     nav: str
     product_name: str
     uom: str | None

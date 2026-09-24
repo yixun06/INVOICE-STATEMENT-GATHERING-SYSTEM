@@ -23,6 +23,7 @@ from src.invoice_app.services.weekly_billing_export import (
 from src.invoice_app.services.weekly_billing_staging import (
     STAGING_DATA_HEADERS,
     StagingDataError,
+    _StagingCandidate,
     _aggregate_staging_rows,
     build_staging_data_rows,
 )
@@ -87,9 +88,10 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
     rows = [
         ProductSummaryRow(
             number=1,
+            sku_code="SKU-PLACEHOLDER",
             nav="5000000",
             product_name="Oil | 1000ml",
-            uom=None,
+            uom="EA",
             unit_price=Decimal("42.90"),
             quantity=539,
             discount_percent=None,
@@ -99,9 +101,10 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
         ),
         ProductSummaryRow(
             number=2,
+            sku_code="SKU-PLACEHOLDER",
             nav="5000000",
             product_name="Oil | 1000ml",
-            uom=None,
+            uom="EA",
             unit_price=Decimal("43.90"),
             quantity=1,
             discount_percent=None,
@@ -111,9 +114,10 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
         ),
         ProductSummaryRow(
             number=3,
+            sku_code="SKU-000123",
             nav="000123",
             product_name="Identity fallback row | Original",
-            uom=None,
+            uom="EA",
             unit_price=Decimal("10.00"),
             quantity=1,
             discount_percent=None,
@@ -125,9 +129,10 @@ def _product_rows() -> tuple[ProductSummaryRow, ...]:
     rows.extend(
         ProductSummaryRow(
             number=number,
+            sku_code=f"SKU-{number}",
             nav=str(5000000 + number),
             product_name=f"Product {number}",
-            uom=None,
+            uom="EA",
             unit_price=Decimal("1.00"),
             quantity=1,
             discount_percent=None,
@@ -254,7 +259,7 @@ def test_staging_keeps_same_nav_in_distinct_exact_price_buckets():
     ]
 
 
-def test_staging_does_not_merge_different_nav_or_unproven_placeholder_rows():
+def test_staging_keeps_different_nav_and_consolidates_placeholder_by_full_identity():
     source = _summary().product_rows[2]
     product_rows = (
         replace(source, number=1, nav="NAV-A", unit_price=Decimal("12.90"), quantity=2),
@@ -267,7 +272,29 @@ def test_staging_does_not_merge_different_nav_or_unproven_placeholder_rows():
     rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
 
     assert [(row.nav, row.quantity) for row in rows] == [
-        ("NAV-A", 2), ("NAV-B", 3), ("5000000", 4), ("5000000", 5)
+        ("NAV-A", 2), ("NAV-B", 3), ("5000000", 9)
+    ]
+
+
+def test_staging_keeps_same_nav_and_price_separate_when_sku_differs():
+    source = _summary().product_rows[2]
+    product_rows = (
+        replace(
+            source, number=1, nav="NAV-A", sku_code="SKU-A",
+            unit_price=Decimal("10.00"), quantity=2,
+        ),
+        replace(
+            source, number=2, nav="NAV-A", sku_code="SKU-B",
+            unit_price=Decimal("10.00"), quantity=3,
+        ),
+    )
+    summary = replace(_summary(), product_rows=product_rows, total_quantity=5)
+
+    rows = build_staging_data_rows(summary, generation_date=GENERATION_DATE)
+
+    assert [(row.nav, row.unit_price_rsp_excl_gst, row.quantity) for row in rows] == [
+        ("NAV-A", Decimal("10.00"), 2),
+        ("NAV-A", Decimal("10.00"), 3),
     ]
 
 
@@ -279,7 +306,12 @@ def test_staging_aggregation_rejects_conflicting_generated_metadata():
     )
 
     with pytest.raises(StagingDataError, match="NAV 000123.*customer"):
-        _aggregate_staging_rows((rows[0], replace(rows[0], customer="CONFLICT")))
+        _aggregate_staging_rows((
+            _StagingCandidate("SKU-000123", rows[0]),
+            _StagingCandidate(
+                "SKU-000123", replace(rows[0], customer="CONFLICT")
+            ),
+        ))
 
 
 def test_export_aggregates_only_staging_and_preserves_product_and_financial_sheets():
@@ -301,8 +333,8 @@ def test_export_aggregates_only_staging_and_preserves_product_and_financial_shee
     )
 
     assert [tuple(cell.value for cell in row) for row in workbook["Product Summary"].iter_rows(min_row=2)] == [
-        (1, "4007457", "Identity fallback row | Original", 9, None, 12.9, None, 0, 10),
-        (2, "4007457", "Identity fallback row | Original", 2, None, 12.9, None, 0, 10),
+        (1, "SKU-000123", "4007457", "Identity fallback row | Original", 9, "EA", 12.9, None, 0, 10),
+        (2, "SKU-000123", "4007457", "Identity fallback row | Original", 2, "EA", 12.9, None, 0, 10),
     ]
     assert workbook["Staging Data"].max_row == 2
     assert workbook["Staging Data"].cell(2, 6).value == "4007457"
@@ -528,6 +560,8 @@ def test_unified_workbook_writes_exact_staging_contract_and_types():
     assert staging.cell(2, 5).alignment.horizontal == "left"
     assert staging.cell(2, 5).alignment.vertical == "top"
     assert sum(staging.cell(row, 8).value for row in range(2, 179)) == 715
-    assert product.cell(2, 2).value == "5000000"
-    assert product.cell(2, 6).value == 42.9
+    assert product.cell(2, 2).value == "SKU-PLACEHOLDER"
+    assert product.cell(2, 3).value == "5000000"
+    assert product.cell(2, 6).value == "EA"
+    assert product.cell(2, 7).value == 42.9
     assert financial.cell(2, 2).value == 14767.32

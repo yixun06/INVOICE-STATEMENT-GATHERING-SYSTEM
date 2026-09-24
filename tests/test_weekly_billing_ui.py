@@ -75,7 +75,7 @@ dataset = WeeklyBillingDataset(
 product = WeeklyBillingSummary(
     period=period, order_count=1, invoice_item_count=1, source_items=(),
     product_rows=(ProductSummaryRow(
-        number=1, nav="5000001", product_name="Product One", uom=None,
+        number=1, sku_code="SKU-1", nav="5000001", product_name="Product One", uom="EA",
         unit_price=Decimal("10.00"), quantity=2, discount_percent=None,
         discount_amount=Decimal("4.00"), amount=Decimal("16.00"),
         source_item_count=1,
@@ -108,7 +108,8 @@ render_weekly_billing(dataset)
     assert app.selectbox[0].label == "Statement Period"
     assert tuple(app.dataframe[0].value.columns) == (
         "No.",
-        "Item/Barcode",
+        "SKU Code",
+        "NAV",
         "Description",
         "Qty",
         "UOM",

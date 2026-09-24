@@ -34,7 +34,8 @@ from src.invoice_app.services.weekly_billing_staging import StagingDataError
 WEEKLY_BILLING_PAGE = "Weekly Billing"
 PRODUCT_SUMMARY_COLUMNS = (
     "No.",
-    "Item/Barcode",
+    "SKU Code",
+    "NAV",
     "Description",
     "Qty",
     "UOM",
@@ -89,7 +90,8 @@ def render_weekly_billing(
         key="weekly_billing_product_summary",
         column_config={
             "No.": st.column_config.NumberColumn("No.", format="%d"),
-            "Item/Barcode": st.column_config.TextColumn("Item/Barcode"),
+            "SKU Code": st.column_config.TextColumn("SKU Code"),
+            "NAV": st.column_config.TextColumn("NAV"),
             "Description": st.column_config.TextColumn("Description"),
             "Qty": st.column_config.NumberColumn("Qty", format="%d"),
             "UOM": st.column_config.TextColumn("UOM"),
@@ -157,7 +159,8 @@ def _summary_frame(summary: WeeklyBillingSummary) -> pd.DataFrame:
         (
             {
                 "No.": row.number,
-                "Item/Barcode": row.nav,
+                "SKU Code": row.sku_code,
+                "NAV": row.nav,
                 "Description": row.product_name,
                 "Qty": row.quantity,
                 "UOM": row.uom,
