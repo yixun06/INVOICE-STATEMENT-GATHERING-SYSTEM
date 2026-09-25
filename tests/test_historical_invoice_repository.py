@@ -15,7 +15,10 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     CLOSED_TRANSACTION_SOURCE_CHANGE,
     ImportStatus,
     InMemoryHistoricalInvoiceRepository,
+    classify_invoice_against_existing,
     source_fact_fingerprint,
+    source_fingerprint_v2,
+    source_fingerprint_v2_from_values,
 )
 
 
@@ -32,6 +35,14 @@ def _bundle(*, imported_at: datetime | None = None) -> InvoiceBundle:
         actual_selling_unit_price=Decimal("190.23"), line_subtotal=Decimal("380.46"), source_pdf="upload-a.pdf", source_hash="bytes-a",
     )
     return InvoiceBundle(order=order, items=(item,))
+
+
+def _with_source_hash(bundle: InvoiceBundle, source_hash: str) -> InvoiceBundle:
+    return replace(
+        bundle,
+        order=replace(bundle.order, source_hash=source_hash),
+        items=tuple(replace(item, source_hash=source_hash) for item in bundle.items),
+    )
 
 
 def test_canonical_models_preserve_text_ids_and_decimal_money():
@@ -56,6 +67,49 @@ def test_fingerprint_ignores_filename_source_hash_and_import_timestamp_only():
         items=(replace(original.items[0], source_pdf="C:/temp/renamed.pdf", source_hash="different-bytes", nav="NAV-CHANGED", unit_price=Decimal("999")),),
     )
     assert source_fact_fingerprint(original) == source_fact_fingerprint(changed_meta)
+
+
+def test_v2_fingerprint_is_deterministic_and_explicitly_versions_canonical_source_identity():
+    original = _bundle()
+
+    assert source_fingerprint_v2(original) == source_fingerprint_v2(original)
+    assert source_fingerprint_v2(original).startswith("v2:")
+    assert len(source_fingerprint_v2(original)) == 67
+    assert source_fingerprint_v2(original) != source_fingerprint_v2(
+        replace(original, order=replace(original.order, platform="Lazada"), items=(replace(original.items[0], platform="Lazada"),))
+    )
+    assert source_fingerprint_v2(original) != source_fingerprint_v2(
+        replace(original, order=replace(original.order, order_id="DIFFERENT"), items=(replace(original.items[0], order_id="DIFFERENT"),))
+    )
+    assert source_fingerprint_v2(original) != source_fingerprint_v2(_with_source_hash(original, "bytes-b"))
+    assert source_fingerprint_v2_from_values("A", "BC", "D") != source_fingerprint_v2_from_values("AB", "C", "D")
+
+
+def test_v2_fingerprint_ignores_mutable_canonical_source_and_enrichment_fields():
+    original = _bundle()
+    changed = replace(
+        original,
+        order=replace(
+            original.order,
+            order_created_date=date(2026, 8, 9),
+            order_income=Decimal("1.00"),
+            first_imported_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+            payment_status="RELEASED",
+            payout_completed_date=date(2026, 8, 10),
+        ),
+        items=(replace(
+            original.items[0],
+            seller_sku="CHANGED-SKU",
+            product_name="Changed name",
+            variation="Changed variation",
+            quantity=99,
+            nav="CHANGED-NAV",
+            unit_price=Decimal("999.00"),
+            statement_product_price=Decimal("3.00"),
+        ),),
+    )
+
+    assert source_fingerprint_v2(original) == source_fingerprint_v2(changed)
 
 
 def test_material_refund_income_quantity_and_sku_changes_change_fingerprint():
@@ -86,7 +140,10 @@ def test_resolved_seller_sku_is_persisted_but_not_a_source_fact():
 def test_repository_import_statuses_no_duplicate_and_no_conflict_overwrite():
     repository = InMemoryHistoricalInvoiceRepository()
     original = _bundle()
-    changed = replace(original, order=replace(original.order, refund_amount=Decimal("-20.00")))
+    changed = _with_source_hash(
+        replace(original, order=replace(original.order, refund_amount=Decimal("-20.00"))),
+        "bytes-b",
+    )
     assert repository.import_invoice(original).status is ImportStatus.NEW
     assert repository.import_invoice(original).status is ImportStatus.ALREADY_IMPORTED
     assert repository.import_invoice(changed).status is ImportStatus.SOURCE_CONFLICT
@@ -105,7 +162,7 @@ def test_closed_invoice_changed_refund_final_amount_and_items_stay_immutable():
             refund_amount=Decimal("0.00"),
         ),
     )
-    later = replace(
+    later = _with_source_hash(replace(
         original,
         order=replace(
             original.order,
@@ -119,7 +176,7 @@ def test_closed_invoice_changed_refund_final_amount_and_items_stay_immutable():
                 quantity=1,
             ),
         ),
-    )
+    ), "bytes-b")
 
     assert repository.import_invoice(original).status is ImportStatus.NEW
     identical = repository.import_invoice(original)
@@ -133,7 +190,7 @@ def test_closed_invoice_changed_refund_final_amount_and_items_stay_immutable():
         "Shopee", [original.order.order_id]
     )[original.order.order_id]
     assert persisted == original.with_source_fingerprint(
-        source_fact_fingerprint(original)
+        source_fingerprint_v2(original)
     ).order
     assert persisted_items == original.items
 
@@ -157,6 +214,38 @@ def test_closed_invoice_same_source_facts_ignore_statement_enrichment():
     assert result.reason_code is None
 
 
+def test_v2_same_source_hash_stays_already_imported_after_authorized_canonical_edits():
+    original = _bundle()
+    stored = original.with_source_fingerprint(source_fingerprint_v2(original))
+    corrected = replace(
+        stored,
+        order=replace(stored.order, order_income=Decimal("1.00")),
+        items=(replace(stored.items[0], nav="CORRECTED-NAV", quantity=9),),
+    )
+
+    result = classify_invoice_against_existing(original, corrected)
+
+    assert result.status is ImportStatus.ALREADY_IMPORTED
+    assert result.source_fingerprint == source_fingerprint_v2(original)
+
+
+def test_legacy_rows_keep_the_legacy_source_fact_comparison():
+    original = _bundle()
+    legacy = original.with_source_fingerprint(source_fact_fingerprint(original))
+    changed = replace(original, order=replace(original.order, refund_amount=Decimal("-20.00")))
+
+    assert classify_invoice_against_existing(original, legacy).status is ImportStatus.ALREADY_IMPORTED
+    assert classify_invoice_against_existing(changed, legacy).status is ImportStatus.SOURCE_CONFLICT
+
+
+def test_new_writes_store_v2_source_fingerprints():
+    repository = InMemoryHistoricalInvoiceRepository()
+    original = _bundle()
+
+    assert repository.import_invoice(original).status is ImportStatus.NEW
+    assert repository.get_order("Shopee", original.order.order_id).source_fingerprint == source_fingerprint_v2(original)
+
+
 def test_unknown_closure_keeps_generic_source_conflict_without_revision():
     repository = InMemoryHistoricalInvoiceRepository()
     original = replace(
@@ -167,10 +256,10 @@ def test_unknown_closure_keeps_generic_source_conflict_without_revision():
             payment_status=None,
         ),
     )
-    changed = replace(
+    changed = _with_source_hash(replace(
         original,
         order=replace(original.order, order_income=Decimal("9.00")),
-    )
+    ), "bytes-b")
 
     repository.import_invoice(original)
     result = repository.import_invoice(changed)

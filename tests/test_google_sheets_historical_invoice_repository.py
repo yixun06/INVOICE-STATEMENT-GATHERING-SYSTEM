@@ -28,7 +28,10 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     HistoricalInvoiceBulkImportError,
     ImportStatus,
 )
-from src.invoice_app.repositories.historical_invoice_repository import source_fact_fingerprint
+from src.invoice_app.repositories.historical_invoice_repository import (
+    source_fact_fingerprint,
+    source_fingerprint_v2,
+)
 from src.invoice_app.services.product_master_source import GOOGLE_SHEETS_READONLY_SCOPE
 from src.invoice_app.services.application_commit_lock import (
     ApplicationCommitInProgress,
@@ -79,6 +82,14 @@ def _bundle(*, order_id="000123456789", imported_at=None, items=1):
             source_pdf="source.pdf", source_hash="source-hash",
         ) for index in range(items)
     ))
+
+
+def _with_source_hash(bundle, source_hash):
+    return replace(
+        bundle,
+        order=replace(bundle.order, source_hash=source_hash),
+        items=tuple(replace(item, source_hash=source_hash) for item in bundle.items),
+    )
 
 
 def _repository(gateway, *, ttl=45, commit_lock=None):
@@ -146,7 +157,10 @@ def test_repeated_identical_import_does_not_append_again_and_conflict_keeps_orig
     gateway = FakeGateway()
     repository = _repository(gateway)
     original = _bundle()
-    changed = replace(original, order=replace(original.order, refund_amount=Decimal("-1.00")))
+    changed = _with_source_hash(
+        replace(original, order=replace(original.order, refund_amount=Decimal("-1.00"))),
+        "changed-source-hash",
+    )
 
     assert repository.import_invoice(original).status is ImportStatus.NEW
     assert repository.import_invoice(original).status is ImportStatus.ALREADY_IMPORTED
@@ -166,7 +180,7 @@ def test_closed_conflict_is_specific_and_never_appends_or_overwrites():
             final_amount=Decimal("12.50"),
         ),
     )
-    changed = replace(
+    changed = _with_source_hash(replace(
         original,
         order=replace(
             original.order,
@@ -174,7 +188,7 @@ def test_closed_conflict_is_specific_and_never_appends_or_overwrites():
             final_amount=Decimal("10.00"),
         ),
         items=(replace(original.items[0], product_name="Later PDF product"),),
-    )
+    ), "changed-source-hash")
 
     assert repository.import_invoice(original).status is ImportStatus.NEW
     result = repository.import_invoice(changed)
@@ -223,6 +237,45 @@ def _append_external_bundle(gateway, bundle):
     gateway.tabs[INVOICE_ITEMS_TAB].extend(
         list(_serialize_item(item)) for item in stored.items
     )
+
+
+def test_valid_legacy_fingerprint_still_loads_with_legacy_validation():
+    gateway = FakeGateway()
+    bundle = _bundle(order_id="LEGACY")
+    _append_external_bundle(gateway, bundle)
+
+    restored = _repository(gateway).get_order("Shopee", "LEGACY")
+
+    assert restored.source_fingerprint == source_fact_fingerprint(bundle)
+
+
+def test_valid_v2_fingerprint_loads_after_authorized_canonical_edits():
+    gateway = FakeGateway()
+    original = _bundle(order_id="V2-CORRECTED")
+    stored = original.with_source_fingerprint(source_fingerprint_v2(original))
+    corrected = replace(
+        stored,
+        order=replace(stored.order, order_income=Decimal("1.00")),
+        items=(replace(stored.items[0], product_name="Corrected product", nav="CORRECTED-NAV"),),
+    )
+    gateway.tabs[INVOICE_ORDERS_TAB].append(list(_serialize_order(corrected.order)))
+    gateway.tabs[INVOICE_ITEMS_TAB].extend(list(_serialize_item(item)) for item in corrected.items)
+
+    restored = _repository(gateway).get_order("Shopee", "V2-CORRECTED")
+
+    assert restored.source_fingerprint == source_fingerprint_v2(original)
+
+
+@pytest.mark.parametrize("fingerprint", ("0" * 64, "v2:" + "0" * 64))
+def test_invalid_legacy_and_v2_fingerprints_fail_closed(fingerprint):
+    gateway = FakeGateway()
+    bundle = _bundle(order_id="INVALID")
+    stored = bundle.with_source_fingerprint(fingerprint)
+    gateway.tabs[INVOICE_ORDERS_TAB].append(list(_serialize_order(stored.order)))
+    gateway.tabs[INVOICE_ITEMS_TAB].extend(list(_serialize_item(item)) for item in stored.items)
+
+    with pytest.raises(HistoricalInvoiceStorageError, match="source_fingerprint does not match stored facts"):
+        _repository(gateway).get_order("Shopee", "INVALID")
 
 
 def test_bulk_precommit_already_imported_plus_new_is_zero_write():

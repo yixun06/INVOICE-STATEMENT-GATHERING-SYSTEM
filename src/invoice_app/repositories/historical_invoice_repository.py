@@ -22,6 +22,7 @@ from src.invoice_app.domain.transaction_closure import (
 
 
 CLOSED_TRANSACTION_SOURCE_CHANGE = "CLOSED_TRANSACTION_SOURCE_CHANGE"
+SOURCE_FINGERPRINT_V2_PREFIX = "v2:"
 
 
 class ImportStatus(str, Enum):
@@ -124,6 +125,52 @@ def source_fact_fingerprint(bundle: InvoiceBundle) -> str:
     }
     serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def source_fingerprint_v2(bundle: InvoiceBundle) -> str:
+    """Return the V2 source-version identity for newly persisted invoices.
+
+    V2 deliberately identifies the exact uploaded source version only.  It is
+    not an immutability hash for mutable canonical/enrichment fields.
+    """
+
+    return source_fingerprint_v2_from_values(
+        bundle.order.platform,
+        bundle.order.order_id,
+        bundle.order.source_hash,
+    )
+
+
+def source_fingerprint_v2_from_values(
+    platform: object,
+    order_id: object,
+    source_hash: object,
+) -> str:
+    """Return the V2 fingerprint from the three source-version inputs only."""
+
+    platform, order_id = _identity(platform, order_id)
+    source_hash = _text(source_hash)
+    if not source_hash:
+        raise ValueError("source_hash is required to create a V2 source_fingerprint.")
+    payload = {
+        "version": 2,
+        "platform": platform,
+        "order_id": order_id,
+        "source_hash": source_hash,
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return SOURCE_FINGERPRINT_V2_PREFIX + sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def is_source_fingerprint_v2(value: object) -> bool:
+    """Return whether a persisted fingerprint explicitly opts into V2."""
+
+    return _text(value).startswith(SOURCE_FINGERPRINT_V2_PREFIX)
 
 
 class InMemoryHistoricalInvoiceRepository:
@@ -231,16 +278,24 @@ def classify_invoice_against_existing(
 ) -> ImportResult:
     """Apply the existing source identity contract plus the closed-order guard."""
 
-    fingerprint = source_fact_fingerprint(candidate)
     platform, order_id = _identity(
         candidate.order.platform, candidate.order.order_id
     )
     if existing is None:
+        fingerprint = source_fingerprint_v2(candidate)
         return ImportResult(ImportStatus.NEW, platform, order_id, fingerprint)
-    if source_fact_fingerprint(existing) == fingerprint:
-        return ImportResult(
-            ImportStatus.ALREADY_IMPORTED, platform, order_id, fingerprint
-        )
+    if is_source_fingerprint_v2(existing.order.source_fingerprint):
+        fingerprint = source_fingerprint_v2(candidate)
+        if existing.order.source_fingerprint == source_fingerprint_v2(existing) == fingerprint:
+            return ImportResult(
+                ImportStatus.ALREADY_IMPORTED, platform, order_id, fingerprint
+            )
+    else:
+        fingerprint = source_fact_fingerprint(candidate)
+        if source_fact_fingerprint(existing) == fingerprint:
+            return ImportResult(
+                ImportStatus.ALREADY_IMPORTED, platform, order_id, fingerprint
+            )
     closure = decide_transaction_closure(existing.order)
     reason_code = (
         CLOSED_TRANSACTION_SOURCE_CHANGE

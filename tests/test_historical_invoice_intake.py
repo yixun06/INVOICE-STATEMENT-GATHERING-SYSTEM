@@ -39,14 +39,25 @@ def _entry(bundle: InvoiceBundle, status=IntakeStatus.NEW) -> InvoiceIntakeEntry
     )
 
 
+def _with_source_hash(bundle: InvoiceBundle, source_hash: str) -> InvoiceBundle:
+    return replace(
+        bundle,
+        order=replace(bundle.order, source_hash=source_hash),
+        items=tuple(replace(item, source_hash=source_hash) for item in bundle.items),
+    )
+
+
 def test_preview_is_no_write_and_classifies_new_duplicate_and_conflict_independently():
     repository = InMemoryHistoricalInvoiceRepository()
     original = _bundle("EXACT")
     repository.import_invoice(original)
     preview = classify_staging((_entry(_bundle("NEW")), _entry(original)), repository)
-    conflict = classify_staging(
-        (_entry(replace(original, order=replace(original.order, refund_amount=Decimal("-1.00")))),), repository
-    )
+    conflict = classify_staging((
+        _entry(_with_source_hash(
+            replace(original, order=replace(original.order, refund_amount=Decimal("-1.00"))),
+            "changed-source",
+        )),
+    ), repository)
 
     assert [entry.status for entry in preview] == [IntakeStatus.NEW, IntakeStatus.ALREADY_IMPORTED]
     assert conflict[0].status is IntakeStatus.SOURCE_CONFLICT
@@ -137,9 +148,12 @@ def test_import_reclassifies_a_changed_repository_result_without_silent_overwrit
     repository.import_invoice(original)
 
     already_imported = import_new_staging((_entry(original),), repository)
-    conflicting = import_new_staging(
-        (_entry(replace(original, order=replace(original.order, refund_amount=Decimal("-1.00")))),), repository
-    )
+    conflicting = import_new_staging((
+        _entry(_with_source_hash(
+            replace(original, order=replace(original.order, refund_amount=Decimal("-1.00"))),
+            "changed-source",
+        )),
+    ), repository)
 
     assert already_imported.entries[0].status is IntakeStatus.ALREADY_IMPORTED
     assert conflicting.entries[0].status is IntakeStatus.SOURCE_CONFLICT
@@ -182,14 +196,14 @@ def test_closed_source_change_has_operational_reason_and_blocks_mixed_batch():
         ),
     )
     repository.import_invoice(closed)
-    later = replace(
+    later = _with_source_hash(replace(
         closed,
         order=replace(
             closed.order,
             refund_amount=Decimal("-2.00"),
             final_amount=Decimal("8.00"),
         ),
-    )
+    ), "changed-source")
     preview = classify_staging(
         (_entry(later), _entry(_bundle("NEW"))), repository
     )

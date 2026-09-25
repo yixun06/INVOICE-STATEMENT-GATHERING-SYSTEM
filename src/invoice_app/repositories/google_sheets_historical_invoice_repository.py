@@ -28,9 +28,11 @@ from src.invoice_app.repositories.historical_invoice_repository import (
     ImportStatus,
     _chunks,
     classify_invoice_against_existing,
+    is_source_fingerprint_v2,
     _unique_bundles,
     _validate_chunk_size,
     source_fact_fingerprint,
+    source_fingerprint_v2,
 )
 from src.invoice_app.services.application_commit_lock import (
     APPLICATION_COMMIT_LOCK,
@@ -49,7 +51,8 @@ from src.invoice_app.services.uat2_statement_schema_migration import (
 
 
 GOOGLE_SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
+_LEGACY_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
+_V2_FINGERPRINT = re.compile(r"^v2:[0-9a-f]{64}$")
 
 
 class HistoricalInvoiceStorageError(RuntimeError):
@@ -512,9 +515,22 @@ def _deserialize_snapshot(tabs: Mapping[str, Sequence[Sequence[Any]]], loaded_at
             bundle = InvoiceBundle(order=order, items=tuple(sorted(items.get(identity, ()), key=lambda item: item.item_index)))
         except ValueError as error:
             raise HistoricalInvoiceStorageError(f"Persisted bundle {identity!r} is malformed: {error}") from error
-        if not order.source_fingerprint or not _FINGERPRINT.fullmatch(order.source_fingerprint):
+        if not order.source_fingerprint:
             raise HistoricalInvoiceStorageError(f"Invoice_Orders identity {identity!r} has a malformed source_fingerprint.")
-        if source_fact_fingerprint(bundle) != order.source_fingerprint:
+        if is_source_fingerprint_v2(order.source_fingerprint):
+            try:
+                is_valid = (
+                    _V2_FINGERPRINT.fullmatch(order.source_fingerprint) is not None
+                    and source_fingerprint_v2(bundle) == order.source_fingerprint
+                )
+            except ValueError:
+                is_valid = False
+        else:
+            is_valid = (
+                _LEGACY_FINGERPRINT.fullmatch(order.source_fingerprint) is not None
+                and source_fact_fingerprint(bundle) == order.source_fingerprint
+            )
+        if not is_valid:
             raise HistoricalInvoiceStorageError(f"Invoice_Orders identity {identity!r} source_fingerprint does not match stored facts.")
         bundles[identity] = bundle
     return _Snapshot(bundles=bundles, loaded_at=loaded_at)
