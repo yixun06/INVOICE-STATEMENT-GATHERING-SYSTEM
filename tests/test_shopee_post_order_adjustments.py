@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +13,9 @@ from src.invoice_app.domain.historical_invoice import map_accepted_shopee_invoic
 from src.invoice_app.parsers.shopee_extractor import extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import (
     NORMAL_ORDER,
-    RETURN_REFUND_AFTER_ORDER_COMPLETED,
+    ORDER_ADJUSTMENT,
+    RETURN_REFUND,
+    extract_invoice_adjustment_evidence,
 )
 from src.invoice_app.parsers.shopee_mapper import map_shopee_records
 from src.invoice_app.parsers.shopee_parser import ShopeeParser
@@ -41,6 +44,19 @@ from src.invoice_app.review_reason_codes import (
 
 
 ADJUSTMENT_ARCHIVE = Path(r"D:\download material\ADJUSTMENT EXP.zip")
+REAL_COMPENSATION_PDF = Path(
+    "archive/20260925032034-b51a0273/26082480BKAV7A.pdf"
+)
+FALSE_POSITIVE_ADJUSTMENT_PDFS = (
+    Path(
+        "archive/20260925062354-720637ce/"
+        "NOT IN STATEMENT.zip_Invoice Shopee&Lazada_ACCOUNT HR_30072026_2607302669GA03.pdf"
+    ),
+    Path(
+        "archive/20260925062354-720637ce/"
+        "NOT IN STATEMENT.zip_Invoice Shopee&Lazada_ACCOUNT HR_27072026_260727PS44109J.pdf"
+    ),
+)
 
 
 class _UploadedFile:
@@ -103,7 +119,7 @@ def _order_text(
     adjustment_reason: str = "Return Refund Adjustment After Order\nCompleted",
     adjustment_amount: str = "-17.67",
     include_adjustment: bool = True,
-    product_return_marker: bool = True,
+    product_return_marker: bool = False,
 ) -> str:
     adjustment = ""
     if include_adjustment:
@@ -140,7 +156,7 @@ def test_completed_adjustment_keeps_transient_evidence_and_normal_identity_block
     assert extracted.invoice_financial_layout == NORMAL_ORDER
     assert extracted.refund_amount is None
     assert extracted.post_order_adjustment_observed is True
-    assert extracted.post_order_adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
+    assert extracted.post_order_adjustment_type == ORDER_ADJUSTMENT
     assert extracted.post_order_adjustment_reason == "Return Refund Adjustment After Order Completed"
     assert extracted.post_order_adjustment_date == "01/08/2026"
     assert extracted.post_order_adjustment_amount == Decimal("-17.67")
@@ -157,6 +173,142 @@ def test_completed_adjustment_keeps_transient_evidence_and_normal_identity_block
     assert order["post_order_adjustment_observed"] is True
     assert order["post_order_adjustment_reason"] == "Return Refund Adjustment After Order Completed"
     assert order["post_order_adjustment_amount"] == "-17.67"
+
+
+def test_compensation_adjustment_reason_is_explicit_source_evidence():
+    extracted = extract_shopee_data(
+        _order_text(
+            order_income="-6.88",
+            final_amount="130.36",
+            adjustment_reason="Return Refund Adjustment/Compensation",
+            adjustment_amount="137.24",
+        ),
+        "26082480BKAV7A.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.post_order_adjustment_observed is True
+    assert extracted.post_order_adjustment_reason == "Return Refund Adjustment/Compensation"
+    assert extracted.post_order_adjustment_amount == Decimal("137.24")
+    assert extracted.post_order_adjustment_final_amount_consistent is True
+    assert issue is None or issue.reason_code != POST_ORDER_ADJUSTMENT_SOURCE_MISSING
+
+
+def test_multiple_structured_adjustments_sum_without_fake_legacy_projection():
+    text = _order_text(
+        order_income="50.00",
+        final_amount="32.33",
+        include_adjustment=False,
+    ).replace(
+        "Final Amount RM32.33",
+        """Order Adjustment
+Adjustment Complete Date Adjustment Reason Released Amount
+01/08/2026 Return Refund Adjustment After Order Completed RM-10.00
+02/08/2026 Return Refund Adjustment/Compensation RM-7.67
+Total Adjustment Amount RM-17.67
+Final Amount RM32.33""",
+    )
+
+    extracted = extract_shopee_data(text, "multiple-adjustments.pdf")
+
+    assert [event.signed_amount for event in extracted.invoice_adjustments] == [
+        Decimal("-10.00"), Decimal("-7.67")
+    ]
+    assert all(event.is_complete for event in extracted.invoice_adjustments)
+    assert extracted.post_order_adjustment_observed is True
+    assert extracted.post_order_adjustment_type is None
+    assert extracted.post_order_adjustment_reason is None
+    assert extracted.post_order_adjustment_amount is None
+    assert extracted.post_order_adjustment_final_amount_consistent is True
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_adjustment_section_total_mismatch_fails_closed():
+    text = _order_text(order_income="50.00", final_amount="32.33").replace(
+        "Total Adjustment Amount RM-17.67", "Total Adjustment Amount RM-17.60"
+    )
+
+    issue = find_shopee_review_issue(
+        extract_shopee_data(text, "adjustment-total-mismatch.pdf")
+    )
+
+    assert issue is not None
+    assert issue.reason_code == POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT
+    assert "Total Adjustment Amount" in issue.reason
+
+
+def test_instructional_return_refund_text_is_not_adjustment_evidence():
+    text = _order_text(
+        order_income="50.00",
+        final_amount="50.00",
+        include_adjustment=False,
+    ).replace(
+        "Final Amount RM50.00",
+        "Buyer can raise return/refund requests from Order History\nFinal Amount RM50.00",
+    )
+
+    assert extract_invoice_adjustment_evidence(text) == ()
+    assert find_shopee_review_issue(
+        extract_shopee_data(text, "instructional-return-refund.pdf")
+    ) is None
+
+
+def test_page_boundary_does_not_become_part_of_adjustment_reason():
+    text = _order_text(
+        order_income="50.00",
+        final_amount="32.33",
+        adjustment_reason="Return Refund Adjustment After Order\nPage 1 of 2\nCompleted",
+    )
+
+    event = extract_shopee_data(text, "adjustment-page-boundary.pdf").invoice_adjustments[0]
+
+    assert event.source_reason == "Return Refund Adjustment After Order Completed"
+    assert event.signed_amount == Decimal("-17.67")
+
+
+def test_complete_adjustment_does_not_hide_an_independent_promotion_blocker():
+    extracted = extract_shopee_data(
+        _order_text(order_income="50.00", final_amount="32.33"),
+        "adjustment-plus-promotion.pdf",
+    )
+    product = dict(extracted.product_items[0])
+    product.update(
+        {
+            "promotion_group_id": "group-1",
+            "promotion_label": "Any 2 at RM50.00",
+            "promotion_metadata_status": "incomplete",
+            "_promotion_boundary_status": "ambiguous",
+        }
+    )
+
+    issue = find_shopee_review_issue(
+        replace(extracted, product_items=(product,))
+    )
+
+    assert issue is not None
+    assert issue.reason_code == "INCOMPLETE_PROMOTION_EVIDENCE"
+
+
+@pytest.mark.skipif(
+    not REAL_COMPENSATION_PDF.exists(),
+    reason="Current 26082480BKAV7A source fixture is not available.",
+)
+def test_real_26082480bkav7a_adjustment_is_complete_without_layout_false_blocker():
+    document = read_pdf_document(REAL_COMPENSATION_PDF)
+    extracted = extract_shopee_data(
+        document.text,
+        REAL_COMPENSATION_PDF.name,
+        parse_positioned_products(document),
+        document=document,
+    )
+
+    assert extracted.invoice_financial_layout == RETURN_REFUND
+    assert extracted.invoice_adjustments[0].source_reason == "Return Refund Adjustment/Compensation"
+    assert extracted.invoice_adjustments[0].signed_amount == Decimal("137.24")
+    assert extracted.post_order_adjustment_final_amount_consistent is True
+    issue = find_shopee_review_issue(extracted)
+    assert issue is None or issue.reason_code != "FINANCIAL_LAYOUT_UNRESOLVED"
 
 
 def test_completed_adjustment_with_inconsistent_final_amount_fails_closed():
@@ -185,6 +337,42 @@ def test_final_amount_equal_to_order_income_without_adjustment_passes():
     )
 
     assert find_shopee_review_issue(extracted) is None
+
+
+def test_incomplete_adjustment_marker_does_not_require_an_amount_when_final_equals_income():
+    extracted = extract_shopee_data(
+        _order_text(
+            order_income="50.00",
+            final_amount="50.00",
+            adjustment_amount="",
+        ),
+        "incomplete-adjustment-equal-final.pdf",
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.post_order_adjustment_observed is True
+    assert extracted.post_order_adjustment_amount is None
+    assert issue is None or issue.reason_code != POST_ORDER_ADJUSTMENT_AMOUNT_MISSING
+
+
+@pytest.mark.parametrize("source_pdf", FALSE_POSITIVE_ADJUSTMENT_PDFS)
+def test_real_no_adjustment_marker_does_not_require_an_amount_when_final_equals_income(
+    source_pdf: Path,
+):
+    document = read_pdf_document(source_pdf)
+    extracted = extract_shopee_data(
+        document.text,
+        source_pdf.name,
+        parse_positioned_products(document),
+        document=document,
+    )
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert extracted.income["final_amount"] == extracted.income["order_income"]
+    assert extracted.post_order_adjustment_amount is None
+    assert issue is None or issue.reason_code != POST_ORDER_ADJUSTMENT_AMOUNT_MISSING
 
 
 def test_final_amount_difference_without_adjustment_evidence_fails_closed():
@@ -233,20 +421,30 @@ def test_revalidation_enforces_shared_adjustment_contract():
 
     assert revalidate_shopee_invoice(order, products, price_master=master).error is None
 
-    conflict = dict(order, post_order_adjustment_amount="-17.60")
+    conflict = dict(order)
+    conflict["_invoice_adjustment_evidence"] = ({
+        **order["_invoice_adjustment_evidence"][0],
+        "signed_amount": "-17.60",
+    },)
     result = revalidate_shopee_invoice(conflict, products, price_master=master)
     assert result.error is not None
-    assert "does not equal source Final Amount" in result.error
+    assert "do not equal the explicit Total Adjustment Amount" in result.error
 
-    amount_missing = dict(order, post_order_adjustment_amount="N/A")
+    amount_missing = dict(order)
+    amount_missing["_invoice_adjustment_evidence"] = ({
+        **order["_invoice_adjustment_evidence"][0],
+        "signed_amount": "N/A",
+        "completeness": "INCOMPLETE",
+    },)
     result = revalidate_shopee_invoice(amount_missing, products, price_master=master)
     assert result.error is not None
     assert "could not be extracted" in result.error
 
     source_missing = dict(order, post_order_adjustment_observed=False)
+    source_missing["_invoice_adjustment_evidence"] = ()
     result = revalidate_shopee_invoice(source_missing, products, price_master=master)
     assert result.error is not None
-    assert "adjustment evidence is not available" in result.error
+    assert "Adjustment evidence is not available" in result.error
 
 
 def test_revalidation_uses_the_same_optional_component_visibility_contract():
@@ -304,21 +502,14 @@ def test_post_order_adjustment_evidence_is_not_added_to_the_canonical_invoice_sc
     assert "post_order_adjustment_amount" not in INVOICE_ORDERS_HEADERS
 
 
-@pytest.mark.parametrize(
-    "text",
-    (
-        _order_text(include_adjustment=False),
-        _order_text(
-            adjustment_reason="No adjustment has been made to this order yet",
-            adjustment_amount="0.00",
-        ),
-        _order_text(
-            adjustment_reason="Shopee Voucher Adjustment After Order\nCompleted",
-            adjustment_amount="-17.67",
-        ),
-    ),
-)
-def test_non_completed_return_refund_adjustment_rows_do_not_trigger_detection(text: str):
+def test_no_adjustment_section_does_not_trigger_detection():
+    text = _order_text(include_adjustment=False).replace(
+        "Final Amount RM32.36",
+        """Order Adjustment
+Adjustment Complete Date Adjustment Reason Released Amount
+No adjustment has been made to this order yet
+Final Amount RM32.36""",
+    )
     extracted = extract_shopee_data(text, "no-post-order-adjustment.pdf")
 
     assert extracted.post_order_adjustment_observed is False
@@ -329,10 +520,12 @@ def test_non_completed_return_refund_adjustment_rows_do_not_trigger_detection(te
 
 def test_empty_adjustment_section_does_not_bypass_normal_financial_validation():
     extracted = extract_shopee_data(
-        _order_text(
-            adjustment_reason="No adjustment has been made to this order yet",
-            adjustment_amount="0.00",
-            product_return_marker=False,
+        _order_text(include_adjustment=False).replace(
+            "Final Amount RM32.36",
+            """Order Adjustment
+Adjustment Complete Date Adjustment Reason Released Amount
+No adjustment has been made to this order yet
+Final Amount RM32.36""",
         ),
         "empty-adjustment-section.pdf",
     )
@@ -380,16 +573,13 @@ def test_user_supplied_completed_adjustment_pdf_corpus():
                 document, pdf_path.name, "post-order-adjustment-corpus"
             )
 
-            assert extracted.invoice_financial_layout == NORMAL_ORDER
+            assert extracted.invoice_financial_layout == "UNKNOWN_OR_MIXED"
             assert extracted.refund_amount is None
             assert extracted.post_order_adjustment_observed is True
-            assert extracted.post_order_adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
+            assert extracted.post_order_adjustment_type == ORDER_ADJUSTMENT
             assert extracted.post_order_adjustment_final_amount_consistent is True
-            assert reviews == []
-            assert len(orders) == 1
-            assert orders[0]["order_income"] == extracted.income["order_income"]
-            assert orders[0]["final_amount"] == extracted.income["final_amount"]
-            assert orders[0]["refund_amount"] == "N/A"
+            assert orders == []
+            assert len(reviews) == 1
             observed[extracted.order_id] = (
                 str(extracted.post_order_adjustment_date),
                 extracted.income["order_income"],
@@ -405,7 +595,7 @@ def test_user_supplied_completed_adjustment_pdf_corpus():
     reason="The user-supplied post-order adjustment PDF archive is not available.",
 )
 @pytest.mark.parametrize("upload_kind", ("direct", "zip"))
-def test_real_adjustment_upload_preserves_sidecar_through_staging_and_revalidation(
+def test_real_adjustment_upload_keeps_transaction_layout_fail_closed_when_only_marker_exists(
     tmp_path, monkeypatch, upload_kind: str
 ):
     monkeypatch.setattr(batch_service, "ARCHIVE_DIR", tmp_path / "archive")
@@ -431,52 +621,7 @@ def test_real_adjustment_upload_preserves_sidecar_through_staging_and_revalidati
     )
 
     assert len(archived) == len(expected)
-    assert reviews == []
-    assert {order["order_id"] for order in orders} == set(expected)
-    assert all(order["status"] == "Accepted" for order in orders)
-    assert all(order["invoice_financial_layout"] == NORMAL_ORDER for order in orders)
-    assert all(order["post_order_adjustment_observed"] is True for order in orders)
-    assert all(order["refund_amount"] == "N/A" for order in orders)
-
-    master = _real_product_master(products)
-    entries = classify_staging(
-        build_current_batch_staging(
-            batch_id=f"post-order-upload-{upload_kind}",
-            orders=orders,
-            products=products,
-            reviews=reviews,
-            price_master=master,
-        ),
-        InMemoryHistoricalInvoiceRepository(),
-    )
-    assert all(entry.status is IntakeStatus.NEW for entry in entries)
-
-    for order in orders:
-        order_id = order["order_id"]
-        complete_date, income, adjustment, final_amount = expected[order_id]
-        entry = next(entry for entry in entries if entry.order_id == order_id)
-        assert entry.post_order_adjustment is not None
-        assert entry.source_filename == order["source_pdf"]
-        assert len(entry.source_hash) == 64
-        assert entry.post_order_adjustment.adjustment_type == RETURN_REFUND_AFTER_ORDER_COMPLETED
-        assert entry.post_order_adjustment.adjustment_reason == "Return Refund Adjustment After Order Completed"
-        assert entry.post_order_adjustment.adjustment_complete_date == complete_date
-        assert entry.post_order_adjustment.released_amount == Decimal(adjustment)
-        assert entry.post_order_adjustment.final_amount_consistent is True
-        assert entry.bundle is not None
-        assert entry.bundle.order.order_income == Decimal(income)
-        assert entry.bundle.order.final_amount == Decimal(final_amount)
-        assert entry.bundle.order.refund_amount is None
-        related_products = [
-            product
-            for product in products
-            if product["order_id"] == order_id
-            and product["source_pdf"] == order["source_pdf"]
-        ]
-        revalidated = revalidate_shopee_invoice(
-            order,
-            related_products,
-            price_master=master,
-        )
-        assert revalidated.error is None
-        assert order["post_order_adjustment_amount"] == adjustment
+    assert orders == []
+    assert products == []
+    assert {review["order_id"] for review in reviews} == set(expected)
+    assert all("financial layout is unresolved" in review["reason"].casefold() for review in reviews)

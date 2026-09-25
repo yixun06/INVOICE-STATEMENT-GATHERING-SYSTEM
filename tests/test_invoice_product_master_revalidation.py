@@ -365,35 +365,7 @@ def test_apptest_refresh_failure_keeps_retry_and_clears_activity(
     }
 
 
-@pytest.mark.parametrize(
-    "latest_master",
-    (
-        _master(),
-        ProductPriceMaster.from_rows(
-            [
-                {
-                    "seller_sku": "SKU-1",
-                    "parent_sku": "",
-                    "product_name": "Wrong A",
-                    "variation_name": "",
-                    "unit_selling_price": "10.00",
-                    "nav_code": "NAV-A",
-                },
-                {
-                    "seller_sku": "SKU-1",
-                    "parent_sku": "",
-                    "product_name": "Wrong B",
-                    "variation_name": "",
-                    "unit_selling_price": "12.00",
-                    "nav_code": "NAV-B",
-                },
-            ]
-        ),
-    ),
-)
-def test_apptest_unchanged_or_conflicting_master_keeps_attention_and_retry(
-    tmp_path, monkeypatch, latest_master
-) -> None:
+def test_apptest_unchanged_master_keeps_attention_and_retry(tmp_path, monkeypatch) -> None:
     from src.invoice_app.ui import data_import
 
     monkeypatch.chdir(tmp_path)
@@ -401,7 +373,7 @@ def test_apptest_unchanged_or_conflicting_master_keeps_attention_and_retry(
     monkeypatch.setattr(
         data_import,
         "load_configured_product_price_master",
-        lambda: (latest_master, "Latest synthetic master"),
+        lambda: (_master(), "Latest synthetic master"),
     )
     monkeypatch.setattr(
         data_import,
@@ -427,6 +399,60 @@ def test_apptest_unchanged_or_conflicting_master_keeps_attention_and_retry(
     assert "Revalidate with latest Product Master" in {
         item.label for item in app.button
     }
+
+
+def test_apptest_conflicting_master_returns_source_correction_to_validate(
+    tmp_path, monkeypatch
+) -> None:
+    from src.invoice_app.ui import data_import
+
+    conflicting_master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "",
+                "product_name": "Wrong A",
+                "variation_name": "",
+                "unit_selling_price": "10.00",
+                "nav_code": "NAV-A",
+            },
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "",
+                "product_name": "Wrong B",
+                "variation_name": "",
+                "unit_selling_price": "12.00",
+                "nav_code": "NAV-B",
+            },
+        ]
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(data_import, "clear_product_master_source_cache", lambda: None)
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda: (conflicting_master, "Latest synthetic master"),
+    )
+
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_reconcile_app(app)
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["reviews"][0]["order_id"] == "SHP-1"
+    assert next(
+        item for item in app.button if item.label == "Continue to review & commit"
+    ).disabled
+    assert "Revalidate with latest Product Master" not in {
+        item.label for item in app.button
+    }
+
+    next(item for item in app.button if item.label == "Back").click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["data_import_step"] == 3
+    assert "Resolve Manual Review" in {item.value for item in app.subheader}
+    assert "Seller SKU" in {item.label for item in app.text_input}
 
 
 def test_unresolved_upload_cannot_expose_or_use_product_master_revalidation(

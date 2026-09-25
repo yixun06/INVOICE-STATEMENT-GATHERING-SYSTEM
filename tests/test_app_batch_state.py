@@ -21,6 +21,11 @@ from src.invoice_app.services.batch_service import (
     FIELD_LABELS,
     PLATFORM_ORDER_FIELDS,
 )
+from src.invoice_app.services.historical_invoice_intake import (
+    IntakeStatus,
+    InvoiceIntakeEntry,
+)
+from src.invoice_app.ui import data_import
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -412,7 +417,7 @@ def test_zenxin_preview_invoice_date_is_typed_without_lazada_format_coercion(tmp
     assert order_table["Invoice Date"].dtype.kind == "M"
     assert order_table["Invoice Date"].iloc[0].strftime("%d/%m/%Y") == "31/03/2026"
 
-def test_data_import_validation_restores_current_batch_dashboard_and_filterable_order_table(tmp_path, monkeypatch):
+def test_data_import_validate_restores_current_batch_dashboard_and_filterable_order_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -671,6 +676,9 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     app.session_state["processing_errors"] = []
 
     app.session_state["navigation"] = "Data Import"
+    app.session_state["import_source_type"] = "Platform Orders"
+    app.session_state["data_import_step"] = 3
+    app.session_state["invoice_upload_attempt"] = "resolved"
     app.run(timeout=20)
 
     assert app.exception == []
@@ -709,11 +717,13 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert "View skipped items" in {expander.label for expander in app.expander}
     assert {
         "Validate",
-        "Needs Attention",
         "Current batch summary",
         "Current Batch — Order Level Data",
-        "Resolve Manual Review",
     } <= {
+        element.value for element in app.subheader
+    }
+    assert "Review & Commit" not in {element.value for element in app.subheader}
+    assert {"Needs Attention", "Resolve Manual Review"} <= {
         element.value for element in app.subheader
     }
     current_order_table = next(
@@ -723,7 +733,6 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
         and dataframe.value["Order ID"].tolist() == ["ORD-A"]
     )
     assert current_order_table["Order ID"].tolist() == ["ORD-A"]
-    assert all("Historical Status" not in dataframe.value.columns for dataframe in app.dataframe)
 
     navigate(app, "Shopee")
 
@@ -1022,6 +1031,144 @@ def test_data_import_exposes_distinct_monthly_statement_workflow(tmp_path, monke
     stepper = {element.value for element in app.markdown if "badge[" in element.value}
     assert len(stepper) == 4
     assert not any("Reconcile" in item for item in stepper)
+
+
+def test_platform_invoice_uses_five_steps_without_provisional_normalization():
+    state = {
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "data_import_step": 5,
+    }
+
+    assert data_import._workflow_steps_for_source(data_import.PLATFORM_ORDERS) == (
+        "Select Source",
+        "Upload",
+        "Validate",
+        "Reconcile",
+        "Review & Commit",
+    )
+    assert data_import._normalize_step_for_source(state) == 5
+    assert state["data_import_step"] == 5
+
+
+def test_platform_invoice_review_route_shows_five_stepper(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "legacy-platform-review",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 5,
+        "invoice_upload_attempt": "resolved",
+        "upload_result_summary": {"pdfs_processed": 1},
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "processing_errors": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    stepper = {element.value for element in app.markdown if "badge[" in element.value}
+    assert len(stepper) == 5
+    assert any("4. Reconcile" in item for item in stepper)
+    assert app.session_state.filtered_state["data_import_step"] == 5
+    assert "Review & Commit" in {element.value for element in app.subheader}
+
+
+def test_platform_invoice_validate_reconcile_and_review_keep_their_own_controls(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    historical_entries = (
+        InvoiceIntakeEntry(
+            staging_id="already-imported.pdf:hash:SHP-HISTORY",
+            source_filename="already-imported.pdf",
+            source_hash="hash",
+            order_id="SHP-HISTORY",
+            status=IntakeStatus.ALREADY_IMPORTED,
+            message="Invoice already exists in UAT2.",
+        ),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "_reconcile_historical_invoice_staging",
+        lambda: historical_entries,
+    )
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "platform-ownership",
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "data_import_step": 3,
+        "invoice_upload_attempt": "resolved",
+        "upload_result_summary": {"pdfs_processed": 1},
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "processing_errors": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Validate" in {element.value for element in app.subheader}
+    assert "Historical classification details" not in {
+        element.label for element in app.expander
+    }
+    assert "Current batch summary" in {element.value for element in app.subheader}
+    assert "Current Batch — Order Level Data" in {
+        element.value for element in app.subheader
+    }
+    assert not any("non-NEW" in button.label for button in app.button)
+
+    app.session_state["data_import_step"] = 4
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Reconcile" in {element.value for element in app.subheader}
+    assert "Current batch summary" not in {element.value for element in app.subheader}
+    assert "Historical classification details" in {
+        element.label for element in app.expander
+    }
+    assert any("non-NEW" in button.label for button in app.button)
+    assert any(
+        button.label == "Continue to review & commit"
+        for button in app.button
+    )
+
+    app.session_state["data_import_step"] = 5
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "Review & Commit" in {element.value for element in app.subheader}
+    assert "Current batch summary" not in {element.value for element in app.subheader}
+    assert "Current Batch — Order Level Data" not in {
+        element.value for element in app.subheader
+    }
+    assert "Search and Filters" not in {element.value for element in app.subheader}
+    assert not any(element.label == "Order columns" for element in app.multiselect)
+    assert "Historical Invoice Commit" in {element.value for element in app.subheader}
+    assert any(button.key == "uat2_historical_commit" for button in app.button)
+    assert "Historical classification details" not in {
+        element.label for element in app.expander
+    }
+
+    next(
+        button for button in app.button if button.key == "invoice_commit_back"
+    ).click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["data_import_step"] == 4
+    assert "Reconcile" in {element.value for element in app.subheader}
 
 
 def test_data_import_prevents_second_source_for_an_active_batch(tmp_path, monkeypatch):

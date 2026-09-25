@@ -108,6 +108,7 @@ from ..services.manual_review_resolution import (
     FINAL_AMOUNT,
     FINANCIAL_CORRECTION,
     PRODUCT_COUNT_MISMATCH,
+    PRODUCT_IDENTITY_CORRECTION,
     SKU_RESOLUTION,
     PROMOTION_SUBTOTAL,
     add_draft_product,
@@ -128,6 +129,7 @@ from ..services.manual_review_resolution import (
     resolution_plan,
     set_financial_enrichment,
     set_draft_promotion_subtotal,
+    surface_product_identity_reviews,
     synchronize_correction_drafts,
 )
 from ..review_reason_codes import (
@@ -343,17 +345,43 @@ def _adopt_legacy_platform_batch() -> None:
     if st.session_state.get("batch_id") and not st.session_state.get("import_source_type"):
         st.session_state.import_source_type = PLATFORM_ORDERS
         st.session_state.data_import_step = max(int(st.session_state.get("data_import_step", 1)), 3)
+    _normalize_step_for_source(st.session_state)
+
+
+def _workflow_steps_for_source(source_type: Any) -> tuple[str, ...]:
+    if source_type == SHOPEE_MONTHLY_STATEMENT:
+        return MONTHLY_WIZARD_STEPS
+    return WIZARD_STEPS
+
+
+def _max_internal_step_for_source(source_type: Any) -> int:
+    """Monthly Statement retains its established internal Review step five."""
+    return len(WIZARD_STEPS)
+
+
+def _normalize_step_for_source(state: MutableMapping[str, Any]) -> int:
+    """Clamp legacy wizard state without changing staged source data."""
+    try:
+        requested_step = int(state.get("data_import_step", 1))
+    except (TypeError, ValueError):
+        requested_step = 1
+    step = min(
+        max(requested_step, 1),
+        _max_internal_step_for_source(state.get("import_source_type")),
+    )
+    state["data_import_step"] = step
+    return step
 
 
 def _current_step() -> int:
-    try:
-        return min(max(int(st.session_state.get("data_import_step", 1)), 1), len(WIZARD_STEPS))
-    except (TypeError, ValueError):
-        return 1
+    return _normalize_step_for_source(st.session_state)
 
 
 def _set_step(step: int) -> None:
-    st.session_state.data_import_step = min(max(step, 1), len(WIZARD_STEPS))
+    st.session_state.data_import_step = min(
+        max(step, 1),
+        _max_internal_step_for_source(st.session_state.get("import_source_type")),
+    )
 
 
 def _render_wizard_progress(current_step: int) -> None:
@@ -361,7 +389,10 @@ def _render_wizard_progress(current_step: int) -> None:
         monthly_step = 4 if current_step == 5 else current_step
         render_workflow_stepper(MONTHLY_WIZARD_STEPS, monthly_step)
         return
-    render_workflow_stepper(WIZARD_STEPS, current_step)
+    render_workflow_stepper(
+        _workflow_steps_for_source(st.session_state.get("import_source_type")),
+        current_step,
+    )
 
 
 def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
@@ -617,7 +648,10 @@ def _render_validation_step(
     )
     if _render_statement_source_error(result):
         return
-    _render_validation_status(result)
+    if is_platform_orders:
+        _render_platform_invoice_validation_status(result)
+    else:
+        _render_validation_status(result)
 
     if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
         _render_statement_refresh_action(
@@ -636,7 +670,7 @@ def _render_validation_step(
         )
 
     if is_platform_orders:
-        _render_contract_validation(result)
+        _render_platform_invoice_non_manual_issues(result)
         _render_manual_review_resolution()
         st.subheader("Current batch summary")
         render_platform_orders_summary()
@@ -788,6 +822,151 @@ def _render_validation_status(result: ImportResult) -> None:
             else _commit_readiness_reason(result)
         )
     render_authoritative_status(title="Needs Attention", message=message, state="blocked")
+
+
+def _platform_invoice_blocker_identity(
+    *, platform: Any, order_id: Any, source: Any
+) -> tuple[str, str]:
+    normalized_platform = str(platform or "Shopee").strip().casefold()
+    normalized_order = str(order_id or "").strip()
+    if normalized_order:
+        return normalized_platform, normalized_order.casefold()
+    return "source", str(source or "").strip().casefold()
+
+
+def _platform_invoice_primary_blockers(
+    result: ImportResult,
+    *,
+    historical_entries: tuple[Any, ...] = (),
+    historical_blocker: Any = None,
+) -> tuple[dict[str, Any], ...]:
+    """Project one primary Validate owner per current source identity.
+
+    This is presentation-only: it does not alter Manual Review, repository, or
+    historical classification semantics.
+    """
+    owned: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def register(
+        *, owner: str, platform: Any, order_id: Any, source: Any, reason: Any
+    ) -> None:
+        identity = _platform_invoice_blocker_identity(
+            platform=platform, order_id=order_id, source=source
+        )
+        if identity[1] and identity not in owned:
+            owned[identity] = {
+                "owner": owner,
+                "platform": str(platform or "Shopee"),
+                "order_id": str(order_id or "").strip() or None,
+                "source": str(source or "").strip() or None,
+                "reason": str(reason or "Requires review."),
+            }
+
+    for review in result.source_specific_details.get("manual_review", ()):
+        if isinstance(review, Mapping):
+            register(
+                owner="manual_review",
+                platform=review.get("platform"),
+                order_id=review.get("order_id"),
+                source=review.get("source_pdf"),
+                reason=review.get("reason"),
+            )
+    for error in result.source_specific_details.get("processing_errors", ()):
+        if isinstance(error, Mapping):
+            register(
+                owner="ingestion",
+                platform=error.get("platform"),
+                order_id=error.get("order_id"),
+                source=error.get("source_pdf") or error.get("filename"),
+                reason=error.get("reason") or error.get("error") or error.get("message"),
+            )
+    return tuple(owned.values())
+
+
+def _render_platform_invoice_validation_status(
+    result: ImportResult,
+    *,
+    historical_entries: tuple[Any, ...] = (),
+    historical_blocker: Any = None,
+) -> None:
+    blockers = _platform_invoice_primary_blockers(
+        result,
+        historical_entries=historical_entries,
+        historical_blocker=historical_blocker,
+    )
+    if blockers:
+        count = len(blockers)
+        render_authoritative_status(
+            title="Needs Attention",
+            message=(
+                f"{count} unique source{'s' if count != 1 else ''} "
+                f"{'requires' if count == 1 else 'require'} action "
+                "before validation can complete."
+            ),
+            state="blocked",
+        )
+        return
+    if result.commit_readiness.ready:
+        render_authoritative_status(
+            title="Ready",
+            message="The current Platform Invoice batch passed validation.",
+            state="ready",
+        )
+        return
+    render_authoritative_status(
+        title="Needs Attention",
+        message=_commit_readiness_reason(result),
+        state="blocked",
+    )
+
+
+def _render_platform_invoice_non_manual_issues(result: ImportResult) -> None:
+    """Keep real ingestion/duplicate issues visible without duplicating Manual Review."""
+    queue = build_exception_work_queue(result)
+    manual_identities = {
+        _platform_invoice_blocker_identity(
+            platform=review.get("platform"),
+            order_id=review.get("order_id"),
+            source=review.get("source_pdf"),
+        )
+        for review in result.source_specific_details.get("manual_review", ())
+        if isinstance(review, Mapping)
+    }
+
+    # A Manual Review / Online Resolution owns the primary action for its
+    # source.  Keep unrelated ingestion and duplicate work visible, but do not
+    # present a second generic queue card for that same source.
+    def is_owned_by_manual_review(item: ExceptionPresentationItem) -> bool:
+        return (
+            _platform_invoice_blocker_identity(
+                platform=item.platform,
+                order_id=item.order_id,
+                source=item.source,
+            )
+            in manual_identities
+        )
+
+    items = tuple(
+        replace(
+            item,
+            issues=tuple(
+                issue for issue in item.issues if issue.category != "manual_review"
+            ),
+        )
+        for item in queue.items
+        if any(issue.category != "manual_review" for issue in item.issues)
+        and not is_owned_by_manual_review(item)
+    )
+    filtered = ExceptionWorkQueue(
+        items=items,
+        source_issue_count=sum(item.issue_count for item in items),
+    )
+    blockers, notes = _partition_exception_work_queue(filtered)
+    _render_actionable_blockers_and_notes(
+        blockers,
+        notes,
+        key_prefix="invoice_non_manual_exception_queue",
+    )
 
 
 def _render_statement_source_error(result: ImportResult) -> bool:
@@ -1837,9 +2016,15 @@ def _render_manual_review_resolution() -> None:
                         _render_final_amount_form(plan.key, review)
                     elif plan.issue_type in {FINANCIAL_CORRECTION, ADJUSTMENT_CORRECTION}:
                         _render_financial_correction_form(plan.key, review)
+                    elif plan.issue_type == PRODUCT_IDENTITY_CORRECTION:
+                        _render_product_identity_resolution_form(plan.key, review)
                     else:
                         _render_income_form(plan.key, review)
-                    if plan.issue_type not in {FINANCIAL_CORRECTION, ADJUSTMENT_CORRECTION}:
+                    if plan.issue_type not in {
+                        FINANCIAL_CORRECTION,
+                        ADJUSTMENT_CORRECTION,
+                        PRODUCT_IDENTITY_CORRECTION,
+                    }:
                         _render_financial_enrichment_draft(plan.key, review)
                     if plan.issue_type == ADJUSTMENT_CORRECTION:
                         with st.expander("Technical Details", expanded=False):
@@ -1918,12 +2103,113 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
         st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
         st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
     else:
+        if outcome.resolved and values.get("product_identity_fields") is not None:
+            _reconcile_historical_invoice_staging()
         _preserve_manual_review_resolution_context(
             key,
             resolved=outcome.resolved,
             reason=outcome.reason,
         )
     st.rerun()
+
+
+def _surface_reconciliation_product_identity_reviews() -> None:
+    """Surface Product Master identity ambiguity during Reconcile.
+
+    This is a read-only Product Master lookup and changes current session
+    staging only.  It intentionally does not turn a missing/unavailable master
+    into a Manual Review record.
+    """
+    try:
+        master, _ = load_configured_product_price_master()
+    except ProductMasterSourceError:
+        return
+    created = surface_product_identity_reviews(st.session_state, price_master=master)
+    if created:
+        st.session_state.manual_resolution_notice = (
+            f"{created} Product Master identity issue(s) require source correction in Validate."
+        )
+
+
+def _render_product_identity_resolution_form(key: str, review: dict[str, Any]) -> None:
+    """Edit only source-derived identity facts for the affected staged items."""
+    products = review.get("product_payloads") or []
+    affected = review.get("product_identity_affected") or []
+    st.write("**Product identity needs source correction**")
+    st.write(str(review.get("reason") or "Product Master identity remains unresolved."))
+    st.caption("Correct only values visible in the original Invoice. Product Master price and NAV are re-derived after revalidation.")
+    evidence_rows = []
+    for item in affected:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= index < len(products):
+            continue
+        product = products[index]
+        evidence_rows.append(
+            {
+                "Affected item": index + 1,
+                "Seller SKU": product.get("seller_sku") or "",
+                "Product Name": product.get("product_name") or "",
+                "Variation": product.get("variation") or product.get("variation_name") or "",
+                "Product Master candidates": item.get("candidate_count"),
+            }
+        )
+    if evidence_rows:
+        st.write("Original source evidence / current parsed values")
+        st.dataframe(evidence_rows, hide_index=True)
+    with st.form(f"product_identity_resolution_{key}", border=False):
+        submitted: dict[str, dict[str, str]] = {}
+        for item in affected:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= index < len(products):
+                continue
+            product = products[index]
+            st.write(f"Affected item {index + 1}")
+            sku_column, name_column, variation_column = st.columns((1, 3, 2))
+            with sku_column:
+                seller_sku = st.text_input(
+                    "Seller SKU",
+                    value=str(product.get("seller_sku") or ""),
+                    key=f"mr_identity_sku_{key}_{index}",
+                )
+            with name_column:
+                product_name = st.text_input(
+                    "Product Name",
+                    value=str(product.get("product_name") or ""),
+                    key=f"mr_identity_name_{key}_{index}",
+                )
+            with variation_column:
+                variation = st.text_input(
+                    "Variation",
+                    value=str(product.get("variation") or product.get("variation_name") or ""),
+                    key=f"mr_identity_variation_{key}_{index}",
+                )
+            submitted[str(index)] = {
+                "seller_sku": seller_sku,
+                "product_name": product_name,
+                "variation": variation,
+            }
+        confirmed = st.checkbox(
+            "I confirm these product identity values are visible in the original Shopee Invoice.",
+            key=f"mr_identity_confirm_{key}",
+        )
+        if st.form_submit_button("Apply & Revalidate", type="primary"):
+            _apply_manual_resolution(
+                key,
+                {
+                    "source_confirmed": confirmed,
+                    "product_identity_fields": submitted,
+                },
+            )
 
 
 def _render_combined_resolution_form(key: str, review: dict[str, Any]) -> None:
@@ -2404,8 +2690,9 @@ def _render_reconciliation_step() -> None:
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
         if not eligibility.eligible:
-            _render_blocked_invoice_destination(4)
+            _render_blocked_invoice_destination(5)
             return
+        _surface_reconciliation_product_identity_reviews()
         entries = _reconcile_historical_invoice_staging()
         historical_validation_blocker = st.session_state.get(
             "historical_validation_blocker"
@@ -2454,6 +2741,7 @@ def _render_reconciliation_step() -> None:
             entries,
             allow_removal=True,
             key_prefix="reconcile_historical",
+            suppress_manual_review_duplicates=True,
         )
         return
     if _render_statement_already_imported():
@@ -2724,7 +3012,7 @@ def _render_review_and_commit_step() -> None:
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
         if not eligibility.eligible:
-            _render_blocked_invoice_destination(5)
+            _render_blocked_invoice_destination(4)
             return
         if st.session_state.get("invoice_commit_completed"):
             imported_count = st.session_state.get("invoice_commit_completed_count")
@@ -2757,7 +3045,6 @@ def _render_review_and_commit_step() -> None:
         _render_historical_invoice_commit()
         _render_back_button(4, key="invoice_commit_back")
         _render_invoice_exit_button(key="exit_invoice_commit")
-        _render_source_summary(result)
         return
     if _render_statement_already_imported():
         return
@@ -2878,7 +3165,7 @@ def _render_historical_invoice_commit() -> None:
     st.subheader("Historical Invoice Commit")
     st.caption(
         "Only Accepted Shopee invoices are eligible. Lazada and ZENXIN remain outside UAT2 Phase 3 persistence. "
-        "Historical status is calculated during Reconcile."
+        "Historical status is calculated during Reconcile and refreshed immediately before Commit."
     )
     _render_historical_partial_import_failure()
     entries = tuple(st.session_state.get("uat2_historical_commit_entries", ()))
@@ -3047,22 +3334,46 @@ def _render_historical_status_details(
     *,
     allow_removal: bool,
     key_prefix: str,
+    suppress_manual_review_duplicates: bool = False,
 ) -> None:
     if not entries:
         st.caption("No target Shopee Invoice source is ready for historical classification.")
         return
+    manual_identities = {
+        _platform_invoice_blocker_identity(
+            platform=review.get("platform"),
+            order_id=review.get("order_id"),
+            source=review.get("source_pdf"),
+        )
+        for review in st.session_state.get("reviews", [])
+        if isinstance(review, Mapping)
+    }
+    actionable_entries = tuple(
+        entry
+        for entry in entries
+        if not (
+            suppress_manual_review_duplicates
+            and entry.status is IntakeStatus.NEEDS_REVIEW
+            and _platform_invoice_blocker_identity(
+                platform="Shopee",
+                order_id=entry.order_id,
+                source=entry.source_filename,
+            )
+            in manual_identities
+        )
+    )
     if allow_removal:
         non_new_sources = tuple(
             dict.fromkeys(
                 entry.source_filename
-                for entry in entries
+                for entry in actionable_entries
                 if entry.status is not IntakeStatus.NEW and entry.source_filename
             )
         )
         already_count = sum(
-            entry.status is IntakeStatus.ALREADY_IMPORTED for entry in entries
+            entry.status is IntakeStatus.ALREADY_IMPORTED for entry in actionable_entries
         )
-        new_count = sum(entry.status is IntakeStatus.NEW for entry in entries)
+        new_count = sum(entry.status is IntakeStatus.NEW for entry in actionable_entries)
         if already_count:
             st.success(
                 f"Already imported: {already_count} · Remaining new: {new_count}",
@@ -3111,7 +3422,7 @@ def _render_historical_status_details(
                     "Historical Status": entry.status.value,
                     "Reason / Message": entry.message or "Ready for Review & Commit.",
                 }
-                for entry in entries
+                for entry in actionable_entries
             ],
             hide_index=True,
         )
@@ -3119,7 +3430,7 @@ def _render_historical_status_details(
             return
         needs_review_sources = [
             entry.source_filename
-            for entry in entries
+            for entry in actionable_entries
             if entry.status is IntakeStatus.NEEDS_REVIEW and entry.source_filename
         ]
         if needs_review_sources and st.button(
@@ -3132,6 +3443,8 @@ def _render_historical_status_details(
                 label="Remove all NEEDS_REVIEW sources",
             )
         for entry in entries:
+            if entry not in actionable_entries:
+                continue
             if entry.status is IntakeStatus.NEW:
                 continue
             actions = recovery_actions_for_source(

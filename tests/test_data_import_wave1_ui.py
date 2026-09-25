@@ -8,13 +8,14 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
-def _seed_invoice_validate(app: AppTest, *, blocked: bool) -> None:
+def _seed_invoice_validate(app: AppTest, *, blocked: bool, step: int = 3) -> None:
     app.session_state["authenticated"] = True
     app.session_state["navigation"] = "Data Import"
     app.session_state["batch_id"] = "wave1-batch"
     app.session_state["pdf_count"] = 4
     app.session_state["import_source_type"] = "Platform Orders"
-    app.session_state["data_import_step"] = 3
+    app.session_state["data_import_step"] = step
+    app.session_state["invoice_upload_attempt"] = "resolved"
     app.session_state["orders"] = [
         {
             "platform": "Shopee",
@@ -87,7 +88,7 @@ def test_blocked_validate_is_blocker_first_and_keeps_forward_gate(tmp_path, monk
 
     assert app.exception == []
     status = next(error for error in app.error if "Needs Attention" in error.value)
-    assert "1 current-batch item" in status.value
+    assert "1 unique source requires action" in status.value
     continue_button = next(
         button for button in app.button if button.label == "Continue to reconcile"
     )
@@ -95,12 +96,13 @@ def test_blocked_validate_is_blocker_first_and_keeps_forward_gate(tmp_path, monk
     assert continue_button.proto.type == "secondary"
     assert _position(app, element_type="error", text="Needs Attention") < _position(
         app, element_type="button", text="Continue to reconcile"
-    ) < _position(app, element_type="subheader", text="Current batch summary")
+    )
     queue = next(frame.value for frame in app.dataframe if "Issues" in frame.value.columns)
     assert queue.iloc[0]["Summary"] == "PDF processing failed."
-    assert _position(app, element_type="subheader", text="Needs Attention") < _position(
-        app, element_type="subheader", text="Current Batch — Order Level Data"
-    )
+    assert "Current batch summary" in {item.value for item in app.subheader}
+    assert "Current Batch — Order Level Data" in {
+        item.value for item in app.subheader
+    }
 
 
 def test_ready_validate_puts_usable_continue_next_to_status(tmp_path, monkeypatch):
@@ -112,7 +114,8 @@ def test_ready_validate_puts_usable_continue_next_to_status(tmp_path, monkeypatc
 
     assert app.exception == []
     assert any(
-        "Ready" in success.value and "1 accepted order validated successfully" in success.value
+        "Ready" in success.value
+        and "current Platform Invoice batch passed validation" in success.value
         for success in app.success
     )
     continue_button = next(
@@ -122,7 +125,11 @@ def test_ready_validate_puts_usable_continue_next_to_status(tmp_path, monkeypatc
     assert continue_button.proto.type == "primary"
     assert _position(app, element_type="success", text="Ready") < _position(
         app, element_type="button", text="Continue to reconcile"
-    ) < _position(app, element_type="subheader", text="Current batch summary")
+    )
+    assert "Current batch summary" in {item.value for item in app.subheader}
+    assert "Current Batch — Order Level Data" in {
+        item.value for item in app.subheader
+    }
 
 
 def test_validate_places_order_columns_between_filters_and_order_table(tmp_path, monkeypatch):
@@ -161,6 +168,53 @@ def test_validate_has_one_batch_metric_group_and_keeps_latest_action_separate(
         for caption in app.caption
     )
     assert not any("Processing complete" in item.value for item in app.success)
+
+
+def test_validate_preview_uses_latest_current_staging_after_revalidation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    _seed_invoice_validate(app, blocked=False)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    initial_table = next(
+        dataframe.value
+        for dataframe in app.dataframe
+        if "Order ID" in dataframe.value.columns
+    )
+    assert initial_table["Order ID"].tolist() == ["READY-1"]
+
+    app.session_state["orders"] = [
+        {
+            "platform": "Shopee",
+            "order_id": "REVALIDATED-2",
+            "order_income": "50.00",
+            "final_amount": "50.00",
+            "source_pdf": "revalidated.pdf",
+        }
+    ]
+    app.session_state["products"] = [
+        {
+            "platform": "Shopee",
+            "order_id": "REVALIDATED-2",
+            "product_name": "Revalidated bundle",
+            "seller_sku": "BUNDLE-2",
+            "quantity": 1,
+        }
+    ]
+    app.run(timeout=20)
+
+    assert app.exception == []
+    refreshed_table = next(
+        dataframe.value
+        for dataframe in app.dataframe
+        if "Order ID" in dataframe.value.columns
+    )
+    assert refreshed_table["Order ID"].tolist() == ["REVALIDATED-2"]
+    assert "READY-1" not in refreshed_table["Order ID"].tolist()
 
 
 def test_compact_stepper_is_the_only_progress_layer(tmp_path, monkeypatch):

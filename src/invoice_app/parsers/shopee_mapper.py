@@ -124,6 +124,23 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
         "final_amount": final_amount,
         "refund_amount": _source_money(data.refund_amount),
+        "_invoice_adjustment_evidence": tuple(
+            {
+                "semantic_type": event.semantic_type,
+                "source_label": event.source_label,
+                "source_reason": event.source_reason,
+                "adjustment_complete_date": event.adjustment_complete_date,
+                "signed_amount": _source_money(event.signed_amount),
+                "total_adjustment_amount": _source_money(
+                    event.total_adjustment_amount
+                ),
+                "source_locator": event.source_locator,
+                "section_index": event.section_index,
+                "completeness": event.completeness,
+                "source_confidence": event.source_confidence,
+            }
+            for event in data.invoice_adjustments
+        ),
         # V1 staged evidence only. These keys are deliberately not part of the
         # canonical UAT2 invoice schema or source-fingerprint contract.
         "post_order_adjustment_observed": data.post_order_adjustment_observed,

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
+from ..domain.invoice_adjustment import InvoiceAdjustmentEvidence
 from ..review_reason_codes import (
     POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
     POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
@@ -243,18 +244,82 @@ def validate_shopee_final_amount_adjustment(
     label_presence: frozenset[str] | None,
     adjustment_observed: bool,
     adjustment_amount: Any,
+    adjustment_evidence: Iterable[InvoiceAdjustmentEvidence | Mapping[str, Any]] | None = None,
 ) -> tuple[str, str] | None:
-    """Validate only source-visible Final Amount and supported adjustment evidence."""
+    """Validate source Final Amount against transient Invoice Adjustment evidence."""
     if not _source_field_visible("final_amount", income, label_presence):
         return None
     order_income = _decimal_value(income.get("order_income"))
     final_amount = _decimal_value(income.get("final_amount"))
     if order_income is None or final_amount is None:
         return None
+    final_amount_differs = abs(final_amount - order_income) > MONEY_TOLERANCE
+
+    structured_events = (
+        _coerce_invoice_adjustment_evidence(adjustment_evidence)
+        if adjustment_evidence is not None
+        else None
+    )
+    if structured_events is not None:
+        if not structured_events:
+            if final_amount_differs:
+                return (
+                    "Final Amount differs from Order Income, but source-visible Adjustment evidence is not available.",
+                    POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
+                )
+            return None
+        if any(not event.is_complete for event in structured_events):
+            complete_events = tuple(
+                event for event in structured_events if event.is_complete
+            )
+            if complete_events:
+                complete_total = sum(
+                    (event.signed_amount for event in complete_events), Decimal("0")
+                )
+                if abs(order_income + complete_total - final_amount) <= MONEY_TOLERANCE:
+                    return None
+                return (
+                    "Post-order Adjustment evidence conflicts: source Order Income plus the source Adjustment total does not equal source Final Amount.",
+                    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+                )
+            if not final_amount_differs:
+                return None
+            return (
+                "Post-order Adjustment source evidence is incomplete; the required date, reason, or signed amount could not be extracted.",
+                POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
+            )
+        for section_events in _events_by_section(structured_events).values():
+            total = next(
+                (
+                    event.total_adjustment_amount
+                    for event in section_events
+                    if event.total_adjustment_amount is not None
+                ),
+                None,
+            )
+            if total is not None and abs(
+                sum((event.signed_amount for event in section_events), Decimal("0"))
+                - total
+            ) > MONEY_TOLERANCE:
+                return (
+                    "Post-order Adjustment evidence conflicts: the source Adjustment rows do not equal the explicit Total Adjustment Amount.",
+                    POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+                )
+        parsed_adjustment = sum(
+            (event.signed_amount for event in structured_events), Decimal("0")
+        )
+        if abs(order_income + parsed_adjustment - final_amount) > MONEY_TOLERANCE:
+            return (
+                "Post-order Adjustment evidence conflicts: source Order Income plus the source Adjustment total does not equal source Final Amount.",
+                POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+            )
+        return None
 
     if adjustment_observed:
         parsed_adjustment = _decimal_value(adjustment_amount)
         if parsed_adjustment is None:
+            if not final_amount_differs:
+                return None
             return (
                 "Post-order adjustment amount is visibly required by the supported source evidence but could not be extracted.",
                 POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
@@ -266,7 +331,7 @@ def validate_shopee_final_amount_adjustment(
             )
         return None
 
-    if abs(final_amount - order_income) > MONEY_TOLERANCE:
+    if final_amount_differs:
         return (
             "Final Amount differs from Order Income, but supported source-visible adjustment evidence is not available.",
             POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
@@ -275,15 +340,69 @@ def validate_shopee_final_amount_adjustment(
 
 
 def post_order_adjustment_final_amount_consistent(
-    income: Mapping[str, Any], adjustment_amount: Any
+    income: Mapping[str, Any],
+    adjustment_amount: Any,
+    *,
+    adjustment_evidence: Iterable[InvoiceAdjustmentEvidence | Mapping[str, Any]] | None = None,
 ) -> bool | None:
     """Return consistency for parsed source values using the money tolerance."""
     order_income = _decimal_value(income.get("order_income"))
     final_amount = _decimal_value(income.get("final_amount"))
-    parsed_adjustment = _decimal_value(adjustment_amount)
+    if adjustment_evidence is not None:
+        events = _coerce_invoice_adjustment_evidence(adjustment_evidence)
+        if any(not event.is_complete for event in events):
+            return None
+        parsed_adjustment = sum((event.signed_amount for event in events), Decimal("0"))
+    else:
+        parsed_adjustment = _decimal_value(adjustment_amount)
     if order_income is None or final_amount is None or parsed_adjustment is None:
         return None
     return abs(order_income + parsed_adjustment - final_amount) <= MONEY_TOLERANCE
+
+
+def _coerce_invoice_adjustment_evidence(
+    evidence: Iterable[InvoiceAdjustmentEvidence | Mapping[str, Any]],
+) -> tuple[InvoiceAdjustmentEvidence, ...]:
+    events: list[InvoiceAdjustmentEvidence] = []
+    for item in evidence:
+        if isinstance(item, InvoiceAdjustmentEvidence):
+            events.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            raise TypeError("Invoice Adjustment evidence must be structured source evidence.")
+        amount = _decimal_value(item.get("signed_amount"))
+        total = _decimal_value(item.get("total_adjustment_amount"))
+        event = InvoiceAdjustmentEvidence(
+            semantic_type=str(item.get("semantic_type") or "ORDER_ADJUSTMENT"),
+            source_label=str(item.get("source_label") or "").strip(),
+            source_reason=(
+                str(item.get("source_reason")).strip()
+                if item.get("source_reason") is not None
+                else None
+            ),
+            adjustment_complete_date=(
+                str(item.get("adjustment_complete_date")).strip()
+                if item.get("adjustment_complete_date") is not None
+                else None
+            ),
+            signed_amount=amount,
+            total_adjustment_amount=total,
+            source_locator=str(item.get("source_locator") or "").strip(),
+            section_index=int(item.get("section_index") or 0),
+            completeness=str(item.get("completeness") or "INCOMPLETE"),
+            source_confidence=str(item.get("source_confidence") or "STRUCTURED_SECTION"),
+        )
+        events.append(event)
+    return tuple(events)
+
+
+def _events_by_section(
+    events: Iterable[InvoiceAdjustmentEvidence],
+) -> dict[int, tuple[InvoiceAdjustmentEvidence, ...]]:
+    grouped: dict[int, list[InvoiceAdjustmentEvidence]] = {}
+    for event in events:
+        grouped.setdefault(event.section_index, []).append(event)
+    return {index: tuple(values) for index, values in grouped.items()}
 
 
 def financial_reconciliation_evidence_notes(

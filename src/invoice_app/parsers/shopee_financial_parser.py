@@ -4,6 +4,12 @@ from decimal import Decimal
 import re
 from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
+from ..domain.invoice_adjustment import (
+    ADJUSTMENT_EVIDENCE_COMPLETE,
+    ADJUSTMENT_EVIDENCE_INCOMPLETE,
+    ORDER_ADJUSTMENT,
+    InvoiceAdjustmentEvidence,
+)
 from ..utils.normalize import normalize_whitespace, parse_decimal
 
 if TYPE_CHECKING:
@@ -21,20 +27,18 @@ _ORDER_ADJUSTMENT_HEADER = re.compile(
     r"\bAdjustment\s+Complete\s+Date\s+Adjustment\s+Reason\s+Released\s+Amount\b",
     flags=re.IGNORECASE,
 )
-_RETURN_REFUND_AFTER_COMPLETED_ROW = re.compile(
-    rf"\b(?P<date>\d{{2}}/\d{{2}}/\d{{4}})\s+"
-    r"Return\s+Refund\s+Adjustment\s+After\s+Order\s+"
-    # Shopee's PDF text layer may put the right-column Released Amount before
-    # the wrapped final word of the Adjustment Reason. Support only those two
-    # renderings of this one exact reason.
-    rf"(?:Completed\s+(?P<amount_after>{MONEY_PATTERN})|"
-    rf"(?P<amount_before>{MONEY_PATTERN})\s*(?:\n\s*)?Completed)",
+_ADJUSTMENT_DATE = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+_TOTAL_ADJUSTMENT_AMOUNT = re.compile(
+    rf"\bTotal\s+Adjustment\s+Amount\b\s*:?[ \t]*({MONEY_PATTERN})",
     flags=re.IGNORECASE,
 )
-_RETURN_REFUND_AFTER_COMPLETED_EVIDENCE = re.compile(
-    rf"\b(?P<date>\d{{2}}/\d{{2}}/\d{{4}})\s+"
-    r"Return\s+Refund\s+Adjustment\s+After\s+Order\s+Completed\b",
+_NO_ADJUSTMENT = re.compile(
+    r"\bNo\s+adjustment\s+has\s+been\s+made\s+to\s+this\s+order\s+yet\b",
     flags=re.IGNORECASE,
+)
+_ADJUSTMENT_SECTION_END = re.compile(
+    r"^\s*(?:Buyer\s+Payment|Order\s+History|Home\s+My\s+Orders|Final\s+Amount)\b",
+    flags=re.IGNORECASE | re.MULTILINE,
 )
 
 INCOME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -150,39 +154,161 @@ def extract_refund_amount(text: str) -> Decimal | None:
 
 def extract_post_order_return_refund_adjustment(
     text: str,
-) -> tuple[str, str, str, Decimal | None] | None:
-    """Extract only the supported completed Order Adjustment source row.
+) -> tuple[str, str, str, Decimal] | None:
+    """Return the legacy one-record view of structured Invoice Adjustments.
 
-    This is intentionally separate from the original Invoice's Refund Amount.
-    The Order Adjustment header and exact source-visible reason prevent product
-    Return/Refund text, empty sections, and future adjustment types from being
-    treated as completed post-order adjustment evidence.
+    New validation consumes :func:`extract_invoice_adjustment_evidence`.  This
+    wrapper keeps existing staging and UI contracts stable without restricting
+    detection to one source wording.
     """
-    for header in _ORDER_ADJUSTMENT_HEADER.finditer(text):
-        row = _RETURN_REFUND_AFTER_COMPLETED_ROW.search(text, header.end())
-        if row is not None:
-            return (
-                RETURN_REFUND_AFTER_ORDER_COMPLETED,
-                # This literal is returned only after the exact source-visible
-                # reason was matched above; it is not reconstructed from the
-                # normalized event type downstream.
-                "Return Refund Adjustment After Order Completed",
-                normalize_whitespace(row.group("date")),
-                parse_decimal(
-                    row.group("amount_after") or row.group("amount_before")
-                ).quantize(Decimal("0.01")),
-            )
-        missing_amount_row = _RETURN_REFUND_AFTER_COMPLETED_EVIDENCE.search(
-            text, header.end()
+    return legacy_invoice_adjustment_projection(
+        extract_invoice_adjustment_evidence(text)
+    )
+
+
+def legacy_invoice_adjustment_projection(
+    events: tuple[InvoiceAdjustmentEvidence, ...],
+) -> tuple[str, str, str, Decimal] | None:
+    """Expose one event only for legacy non-persistence consumers.
+
+    Multiple or incomplete source events deliberately have no singular view:
+    joining source reasons, picking one date, or assigning a refund taxonomy
+    would fabricate a business event.  Structured evidence remains the
+    validation authority.
+    """
+    if len(events) != 1 or not events[0].is_complete:
+        return None
+    event = events[0]
+    return (
+        ORDER_ADJUSTMENT,
+        event.source_reason or "",
+        event.adjustment_complete_date or "",
+        event.signed_amount,
+    )
+
+
+def extract_invoice_adjustment_evidence(
+    text: str,
+) -> tuple[InvoiceAdjustmentEvidence, ...]:
+    """Extract zero or more rows from source-labelled Order Adjustment tables.
+
+    Rows are recognized from table structure (header, date, released amount,
+    and section total), not from an allow-list of Adjustment Reason wording.
+    Exact source reasons and signed amounts are retained.
+    """
+    headers = tuple(_ORDER_ADJUSTMENT_HEADER.finditer(text))
+    events: list[InvoiceAdjustmentEvidence] = []
+    for section_index, header in enumerate(headers, start=1):
+        candidates = [match.start() for match in headers[section_index:]]
+        section_end = _ADJUSTMENT_SECTION_END.search(text, header.end())
+        if section_end is not None:
+            candidates.append(section_end.start())
+        end = min(candidates) if candidates else len(text)
+        section = text[header.end():end]
+        if _is_explicit_no_adjustment_section(section):
+            continue
+
+        total_match = _TOTAL_ADJUSTMENT_AMOUNT.search(section)
+        total = (
+            parse_decimal(total_match.group(1)).quantize(Decimal("0.01"))
+            if total_match is not None
+            else None
         )
-        if missing_amount_row is not None:
-            return (
-                RETURN_REFUND_AFTER_ORDER_COMPLETED,
-                "Return Refund Adjustment After Order Completed",
-                normalize_whitespace(missing_amount_row.group("date")),
-                None,
+        rows_text = (
+            section[: total_match.start()] if total_match is not None else section
+        )
+        date_matches = list(_ADJUSTMENT_DATE.finditer(rows_text))
+        source_label = normalize_whitespace(header.group(0))
+
+        if not date_matches:
+            if normalize_whitespace(rows_text):
+                events.append(
+                    InvoiceAdjustmentEvidence(
+                        semantic_type=ORDER_ADJUSTMENT,
+                        source_label=source_label,
+                        source_reason=_meaningful_adjustment_text(rows_text),
+                        adjustment_complete_date=None,
+                        signed_amount=None,
+                        total_adjustment_amount=total,
+                        source_locator=f"Order Adjustment section {section_index}",
+                        section_index=section_index,
+                        completeness=ADJUSTMENT_EVIDENCE_INCOMPLETE,
+                    )
+                )
+            continue
+
+        for row_index, date_match in enumerate(date_matches, start=1):
+            row_end = (
+                date_matches[row_index].start()
+                if row_index < len(date_matches)
+                else len(rows_text)
             )
-    return None
+            row = rows_text[date_match.end():row_end]
+            amount_match = re.search(MONEY_PATTERN, row, flags=re.IGNORECASE)
+            if amount_match is None:
+                reason = _meaningful_adjustment_text(row)
+                amount = None
+            else:
+                before = row[: amount_match.start()]
+                after = row[amount_match.end() :]
+                reason_parts = [part for part in (
+                    _meaningful_adjustment_text(before),
+                    _meaningful_adjustment_text(after),
+                ) if part]
+                reason = normalize_whitespace(" ".join(reason_parts)) or None
+                amount = parse_decimal(amount_match.group(0)).quantize(Decimal("0.01"))
+            complete = bool(reason) and amount is not None
+            events.append(
+                InvoiceAdjustmentEvidence(
+                    semantic_type=ORDER_ADJUSTMENT,
+                    source_label=source_label,
+                    source_reason=reason,
+                    adjustment_complete_date=normalize_whitespace(date_match.group(0)),
+                    signed_amount=amount,
+                    total_adjustment_amount=total,
+                    source_locator=(
+                        f"Order Adjustment section {section_index}, row {row_index}"
+                    ),
+                    section_index=section_index,
+                    completeness=(
+                        ADJUSTMENT_EVIDENCE_COMPLETE
+                        if complete
+                        else ADJUSTMENT_EVIDENCE_INCOMPLETE
+                    ),
+                )
+            )
+    return tuple(events)
+
+
+def _meaningful_adjustment_text(value: str) -> str | None:
+    """Keep row wording while excluding known navigation/page artefacts."""
+    parts = [
+        normalize_whitespace(line)
+        for line in value.splitlines()
+        if _is_adjustment_reason_line(line)
+    ]
+    normalized = normalize_whitespace(" ".join(parts))
+    return normalized or None
+
+
+def _is_explicit_no_adjustment_section(section: str) -> bool:
+    lines = [normalize_whitespace(line) for line in section.splitlines()]
+    meaningful = [line for line in lines if line]
+    return bool(meaningful) and all(_NO_ADJUSTMENT.fullmatch(line) for line in meaningful)
+
+
+def _is_adjustment_reason_line(line: str) -> bool:
+    normalized = normalize_whitespace(line)
+    if not normalized or not re.search(r"[A-Za-z\u4e00-\u9fff]", normalized):
+        return False
+    return not bool(
+        re.fullmatch(
+            r"(?:Home\s+My\s+Orders|Order\s+History|Buyer\s+Payment|"
+            r"Page\s+\d+\s+(?:of|/)\s*\d+)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def income_label_presence(text: str) -> frozenset[str]:
@@ -229,16 +355,15 @@ def invoice_financial_layout_signals(
 ) -> frozenset[str]:
     labels = label_presence if label_presence is not None else income_label_presence(text)
     refund_amount = extract_refund_amount(text)
-    post_order_adjustment = extract_post_order_return_refund_adjustment(text)
     signals = {
         name
         for name, present in {
             "refund_amount": refund_amount is not None and refund_amount != 0,
-            # A completed Order Adjustment is later independent evidence. Its
-            # product-level Return/Refund marker must not reclassify the
-            # original, already-completed Invoice as a transaction refund.
-            "return_refund_marker": post_order_adjustment is None
-            and _has_structured_return_refund_marker(product_items or ()),
+            # Original transaction-layout evidence is independent from later
+            # Invoice Adjustment events and must never be suppressed by them.
+            "return_refund_marker": _has_structured_return_refund_marker(
+                product_items or ()
+            ),
             "reverse_shipping_fee": "reverse_shipping_fee" in labels,
             "reverse_shipping_fee_sst": "reverse_shipping_fee_sst" in labels,
         }.items()

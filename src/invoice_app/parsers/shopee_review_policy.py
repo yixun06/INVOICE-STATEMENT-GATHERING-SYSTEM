@@ -202,6 +202,7 @@ def find_shopee_review_issue(
         label_presence=data.income_label_presence,
         adjustment_observed=data.post_order_adjustment_observed,
         adjustment_amount=data.post_order_adjustment_amount,
+        adjustment_evidence=data.invoice_adjustments,
     )
     if adjustment_issue is not None:
         reason, reason_code = adjustment_issue

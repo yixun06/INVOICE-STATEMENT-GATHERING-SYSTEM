@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from .batch_service import apply_batch_rules, is_manual_review_record
-from .product_price_master import ProductPriceMaster
+from .product_price_master import PriceLookupStatus, ProductPriceMaster
 from .shopee_invoice_revalidation import revalidate_shopee_invoice
 from ..parsers.shopee_mapper import resolve_shopee_payment_status
 from ..parsers.shopee_financial_parser import INCOME_ALIASES, is_missing_financial_value
@@ -25,6 +25,7 @@ from ..review_reason_codes import (
     INCOMPLETE_PROMOTION_EVIDENCE,
     POST_ORDER_ADJUSTMENT_AMOUNT_MISSING,
     POST_ORDER_ADJUSTMENT_EVIDENCE_CONFLICT,
+    PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED,
     SKU_RESOLUTION_REQUIRED,
 )
 
@@ -35,6 +36,7 @@ PROMOTION_SUBTOTAL = "PROMOTION_SUBTOTAL"
 SKU_RESOLUTION = "SKU_RESOLUTION"
 FINANCIAL_CORRECTION = "FINANCIAL_CORRECTION"
 ADJUSTMENT_CORRECTION = "ADJUSTMENT_CORRECTION"
+PRODUCT_IDENTITY_CORRECTION = "PRODUCT_IDENTITY_CORRECTION"
 CORRECTION_DRAFTS_KEY = "manual_review_correction_drafts"
 _EXPECTED_COUNT = re.compile(r"source declares\s+(\d+)\s+products?", re.I)
 _FINANCIAL_RECONCILIATION_PREFIX = "Financial Reconciliation Failed:"
@@ -134,6 +136,8 @@ def resolution_plan(review: Mapping[str, Any]) -> ResolutionPlan | None:
         return None
     if code == SKU_RESOLUTION_REQUIRED:
         return ResolutionPlan(review_key(review), SKU_RESOLUTION)
+    if code == PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED:
+        return ResolutionPlan(review_key(review), PRODUCT_IDENTITY_CORRECTION)
     if code == INCOMPLETE_PROMOTION_EVIDENCE:
         eligibility = promotion_subtotal_resolution_eligibility(review)
         if eligibility.eligible:
@@ -168,6 +172,107 @@ def _has_source_missing_sku(review: Mapping[str, Any]) -> bool:
         for product in review.get("product_payloads") or []
         if isinstance(product, Mapping)
     )
+
+
+def surface_product_identity_reviews(
+    state: MutableMapping[str, Any], *, price_master: ProductPriceMaster
+) -> int:
+    """Move source-damaged, ambiguous Shopee identities into Validate review.
+
+    The Product Master remains read-only.  Only the current session's accepted
+    order/product dictionaries move into an existing Manual Review payload, so
+    a later source correction must pass the same full revalidation path before
+    it returns to Accepted staging.
+    """
+    orders = list(state.get("orders", []))
+    products = list(state.get("products", []))
+    reviews = list(state.get("reviews", []))
+    retained_orders: list[dict[str, Any]] = []
+    moved_identities: set[tuple[str, str]] = set()
+    created = 0
+
+    for order in orders:
+        if (
+            str(order.get("platform") or "").strip() != "Shopee"
+            or str(order.get("status") or "").strip() != "Accepted"
+        ):
+            retained_orders.append(order)
+            continue
+        identity = (
+            str(order.get("source_pdf") or "").strip(),
+            str(order.get("order_id") or "").strip(),
+        )
+        related = [
+            dict(product)
+            for product in products
+            if (
+                str(product.get("platform") or "").strip() == "Shopee"
+                and str(product.get("source_pdf") or "").strip() == identity[0]
+                and str(product.get("order_id") or "").strip() == identity[1]
+            )
+        ]
+        affected: list[dict[str, Any]] = []
+        for index, product in enumerate(related):
+            lookup = price_master.lookup(
+                seller_sku=product.get("seller_sku") or product.get("resolved_seller_sku"),
+                product_name=product.get("product_name"),
+                variation_name=product.get("variation") or product.get("variation_name"),
+            )
+            if lookup.status not in {
+                PriceLookupStatus.PRICING_CONFLICT,
+                PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
+            }:
+                continue
+            affected.append(
+                {
+                    "index": index,
+                    "candidate_count": len(lookup.source_rows),
+                    "candidate_rows": lookup.source_rows,
+                    "reason": lookup.reason
+                    or "Product Master identity remains unresolved.",
+                }
+            )
+        if not affected:
+            retained_orders.append(order)
+            continue
+        moved_identities.add(identity)
+        primary = affected[0]
+        reviews.append(
+            {
+                "batch_id": order.get("batch_id"),
+                "source_pdf": identity[0],
+                "platform": "Shopee",
+                "order_id": identity[1],
+                "status": "Manual Review",
+                "reason_code": PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED,
+                "reason": primary["reason"],
+                "order_payload": dict(order),
+                "product_payloads": related,
+                "product_identity_affected": affected,
+            }
+        )
+        created += 1
+
+    if not created:
+        return 0
+    state["orders"] = retained_orders
+    state["products"] = [
+        product
+        for product in products
+        if (
+            str(product.get("source_pdf") or "").strip(),
+            str(product.get("order_id") or "").strip(),
+        )
+        not in moved_identities
+    ]
+    state["reviews"] = reviews
+    for stale in (
+        "uat2_historical_commit_entries",
+        "uat2_historical_commit_refresh_required",
+        "uat2_historical_commit_signature",
+    ):
+        state.pop(stale, None)
+    return created
 
 def synchronize_correction_drafts(state: MutableMapping[str, Any]) -> None:
     """Discard drafts that no longer belong to a current source/order/review."""
@@ -443,6 +548,30 @@ def apply_resolution(state: MutableMapping[str, Any], *, key: str, values: Mappi
         if error:
             return ResolutionOutcome(False, error)
         products.append(added)
+    elif plan.issue_type == PRODUCT_IDENTITY_CORRECTION:
+        if values.get("source_confirmed") is not True:
+            return ResolutionOutcome(False, "Confirm that the corrected product identity fields are visible in the original Invoice source.")
+        submitted = values.get("product_identity_fields")
+        if not isinstance(submitted, Mapping):
+            return ResolutionOutcome(False, "Provide the source-visible product identity fields for every affected item.")
+        affected = review.get("product_identity_affected") or []
+        for item in affected:
+            if not isinstance(item, Mapping):
+                return ResolutionOutcome(False, "The affected product identity record is invalid.")
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                return ResolutionOutcome(False, "The affected product identity record is invalid.")
+            candidate = submitted.get(str(index))
+            if not isinstance(candidate, Mapping) or index < 0 or index >= len(products):
+                return ResolutionOutcome(False, "Provide the source-visible product identity fields for every affected item.")
+            product = products[index]
+            product["seller_sku"] = str(candidate.get("seller_sku") or "").strip()
+            product["resolved_seller_sku"] = product["seller_sku"]
+            product["product_name"] = str(candidate.get("product_name") or "").strip()
+            variation = str(candidate.get("variation") or "").strip()
+            product["variation"] = variation
+            product["variation_name"] = variation
     elif plan.issue_type in {
         SKU_RESOLUTION,
         PROMOTION_SUBTOTAL,

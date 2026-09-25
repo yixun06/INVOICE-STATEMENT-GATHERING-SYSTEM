@@ -57,7 +57,186 @@ def _historical_signature(state):
     return sha256(repr((state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
 
 
-def test_historical_validation_failure_is_one_compact_business_blocker(
+def _platform_result(*, reviews=(), processing_errors=()):
+    return adapt_platform_orders_import_result(
+        batch_id="projection-batch",
+        orders=[
+            {
+                "platform": "Shopee",
+                "order_id": "ACCEPTED",
+                "source_pdf": "accepted.pdf",
+                "status": "Accepted",
+            }
+        ],
+        products=[],
+        reviews=reviews,
+        processing_errors=processing_errors,
+        duplicate_skipped=[],
+        unsupported_files=[],
+    )
+
+
+def test_platform_validate_primary_blockers_count_one_manual_source_once():
+    from src.invoice_app.ui import data_import
+
+    review = {
+        "platform": "Shopee",
+        "order_id": "26082485840HV1",
+        "source_pdf": "26082485840HV1.pdf",
+        "status": "Manual Review",
+        "reason": "Product identity needs source correction.",
+    }
+    entries = (
+        InvoiceIntakeEntry(
+            "review:26082485840HV1.pdf:26082485840HV1",
+            "26082485840HV1.pdf",
+            "",
+            "26082485840HV1",
+            IntakeStatus.NEEDS_REVIEW,
+            "Manual Review source remains in the current batch.",
+            None,
+        ),
+    )
+
+    blockers = data_import._platform_invoice_primary_blockers(
+        _platform_result(reviews=[review]),
+        historical_entries=entries,
+        historical_blocker=None,
+    )
+
+    assert blockers == (
+        {
+            "owner": "manual_review",
+            "platform": "Shopee",
+            "order_id": "26082485840HV1",
+            "source": "26082485840HV1.pdf",
+            "reason": "Product identity needs source correction.",
+        },
+    )
+
+
+def test_platform_validate_primary_blockers_leave_historical_outcomes_for_review():
+    from src.invoice_app.ui import data_import
+
+    entries = (
+        InvoiceIntakeEntry(
+            "already", "already.pdf", "hash-a", "ALREADY", IntakeStatus.ALREADY_IMPORTED,
+            "Same material historical invoice is already imported.", None,
+        ),
+        InvoiceIntakeEntry(
+            "conflict", "conflict.pdf", "hash-c", "CONFLICT", IntakeStatus.SOURCE_CONFLICT,
+            "Stored historical invoice has different material source facts.", None,
+        ),
+    )
+
+    blockers = data_import._platform_invoice_primary_blockers(
+        _platform_result(), historical_entries=entries, historical_blocker=None
+    )
+
+    assert blockers == ()
+
+
+def test_platform_validate_blocker_projection_rebuilds_without_stale_manual_reason():
+    from src.invoice_app.ui import data_import
+
+    review = {
+        "platform": "Shopee", "order_id": "26082480BKAV7A",
+        "source_pdf": "26082480BKAV7A.pdf", "status": "Manual Review",
+        "reason": "Obsolete Adjustment evidence missing.",
+    }
+    before = data_import._platform_invoice_primary_blockers(
+        _platform_result(reviews=[review]), historical_entries=(), historical_blocker=None
+    )
+    after = data_import._platform_invoice_primary_blockers(
+        _platform_result(), historical_entries=(), historical_blocker=None
+    )
+
+    assert before[0]["reason"] == "Obsolete Adjustment evidence missing."
+    assert after == ()
+
+
+def test_platform_non_manual_queue_does_not_duplicate_a_manual_review_source(
+    monkeypatch,
+):
+    from src.invoice_app.ui import data_import
+
+    review = {
+        "platform": "Shopee",
+        "order_id": "26082485840HV1",
+        "source_pdf": "26082485840HV1.pdf",
+        "status": "Manual Review",
+        "reason": "Product identity needs source correction.",
+    }
+    captured = {}
+    monkeypatch.setattr(
+        data_import,
+        "_render_actionable_blockers_and_notes",
+        lambda blockers, notes, **_kwargs: captured.update(
+            blockers=blockers, notes=notes
+        ),
+    )
+
+    data_import._render_platform_invoice_non_manual_issues(
+        _platform_result(
+            reviews=[review],
+            processing_errors=[
+                {
+                    "platform": "Shopee",
+                    "order_id": "26082485840HV1",
+                    "source_pdf": "26082485840HV1.pdf",
+                    "reason": "A stale generic processing projection.",
+                }
+            ],
+        )
+    )
+
+    assert captured["blockers"].items == ()
+    assert captured["notes"].items == ()
+
+
+def _platform_validate_unique_status_app() -> None:
+    from src.invoice_app.ui import data_import
+    from src.invoice_app.services.historical_invoice_intake import (
+        IntakeStatus,
+        InvoiceIntakeEntry,
+    )
+    from src.invoice_app.services.import_result_adapters import (
+        adapt_platform_orders_import_result,
+    )
+
+    review = {
+        "platform": "Shopee", "order_id": "26082485840HV1",
+        "source_pdf": "26082485840HV1.pdf", "status": "Manual Review",
+        "reason": "Product identity needs source correction.",
+    }
+    entry = InvoiceIntakeEntry(
+        "review:26082485840HV1.pdf:26082485840HV1",
+        "26082485840HV1.pdf", "", "26082485840HV1", IntakeStatus.NEEDS_REVIEW,
+        "Manual Review source remains in the current batch.", None,
+    )
+    result = adapt_platform_orders_import_result(
+        batch_id="projection-batch",
+        orders=[], products=[], reviews=[review], processing_errors=[],
+        duplicate_skipped=[], unsupported_files=[],
+    )
+    data_import._render_platform_invoice_validation_status(
+        result,
+        historical_entries=(entry,),
+        historical_blocker=None,
+    )
+
+
+def test_platform_validate_status_reports_one_unique_source_not_duplicate_layers():
+    app = AppTest.from_function(_platform_validate_unique_status_app)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert len(app.error) == 1
+    assert "1 unique source requires action" in app.error[0].value
+
+
+def test_historical_reconciliation_failure_is_one_compact_business_blocker(
     tmp_path, monkeypatch
 ):
     from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (

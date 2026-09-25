@@ -112,6 +112,7 @@ def revalidate_shopee_invoice(
         label_presence=_income_label_presence(order),
         adjustment_observed=order.get("post_order_adjustment_observed") is True,
         adjustment_amount=order.get("post_order_adjustment_amount"),
+        adjustment_evidence=order.get("_invoice_adjustment_evidence"),
     )
     if adjustment_issue is not None:
         return _failed(working, adjustment_issue[0])

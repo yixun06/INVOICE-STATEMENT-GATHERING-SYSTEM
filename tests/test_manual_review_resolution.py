@@ -1,11 +1,21 @@
 from streamlit.testing.v1 import AppTest
 
+from src.invoice_app.repositories.historical_invoice_repository import (
+    InMemoryHistoricalInvoiceRepository,
+)
+from src.invoice_app.services.historical_invoice_intake import (
+    IntakeStatus,
+    build_current_batch_staging,
+    classify_staging,
+)
+
 from src.invoice_app.services.manual_review_resolution import (
     ADJUSTMENT_CORRECTION,
     CORRECTION_DRAFTS_KEY,
     FINANCIAL_CORRECTION,
     MISSING_INCOME,
     PRODUCT_COUNT_MISMATCH,
+    PRODUCT_IDENTITY_CORRECTION,
     PROMOTION_SUBTOTAL,
     add_draft_product,
     apply_product_draft,
@@ -23,8 +33,12 @@ from src.invoice_app.services.manual_review_resolution import (
     resolution_plan,
     set_draft_promotion_subtotal,
     synchronize_correction_drafts,
+    surface_product_identity_reviews,
 )
-from src.invoice_app.review_reason_codes import SKU_RESOLUTION_REQUIRED
+from src.invoice_app.review_reason_codes import (
+    PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED,
+    SKU_RESOLUTION_REQUIRED,
+)
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.review_reason_codes import (
     FINAL_AMOUNT_EXTRACTION_MISSING,
@@ -89,6 +103,112 @@ def test_manual_sku_resolution_preserves_blank_source_sku_and_requires_product_m
     assert state["products"][0]["seller_sku"] == ""
     assert state["products"][0]["sku_missing_in_source"] is True
     assert state["products"][0]["resolved_seller_sku"] == "SKU-2"
+
+
+def _identity_master():
+    return ProductPriceMaster.from_rows([
+        {
+            "seller_sku": "IDENTITY-SKU",
+            "product_name": "Pumpkin Seaweed Crisps",
+            "variation_name": "Pumpkin Seed Seaweed",
+            "unit_selling_price": "5.90",
+            "nav_code": "NAV-PUMPKIN",
+        },
+        {
+            "seller_sku": "IDENTITY-SKU",
+            "product_name": "Sesame Seaweed Crisps",
+            "variation_name": "Pumpkin Seed Seaweed",
+            "unit_selling_price": "5.90",
+            "nav_code": "NAV-SESAME",
+        },
+    ])
+
+
+def _identity_state():
+    order = {
+        "batch_id": "batch", "source_pdf": "26082485840HV1.pdf",
+        "platform": "Shopee", "order_id": "26082485840HV1", "status": "Accepted",
+        "invoice_financial_layout": "NORMAL_ORDER", "merchandise_subtotal": "5.90",
+        "product_price": "5.90", "shipping_subtotal": "0.00",
+        "shipping_fee_paid_by_buyer": "0.00",
+        "shipping_fee_charged_by_logistic_provider": "0.00",
+        "seller_paid_shipping_fee_sst": "0.00", "fees_charges_total": "0.00",
+        "commission_fee": "0.00", "service_fee": "0.00", "transaction_fee": "0.00",
+        "order_income": "5.90", "estimated_order_income": "5.90", "income_type": "Estimated",
+        "final_amount": "5.90",
+    }
+    product = {
+        "batch_id": "batch", "source_pdf": "26082485840HV1.pdf",
+        "platform": "Shopee", "order_id": "26082485840HV1", "status": "Accepted",
+        "seller_sku": "IDENTITY-SKU",
+        "product_name": "Sesame Seaweed Crisps Home My Orders",
+        "variation": "Pumpkin Seed Seaweed", "quantity": 1, "unit_price": "5.90",
+        "line_total": "5.90", "line_subtotal": "5.90", "source_line_subtotal": "5.90",
+    }
+    return {"orders": [order], "products": [product], "reviews": []}
+
+
+def test_source_damaged_same_price_identity_moves_to_validate_and_requires_source_correction():
+    state = _identity_state()
+    master = _identity_master()
+
+    assert surface_product_identity_reviews(state, price_master=master) == 1
+    assert state["orders"] == []
+    assert state["products"] == []
+    review = state["reviews"][0]
+    assert review["reason_code"] == PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED
+    assert review["product_identity_affected"] == [{
+        "index": 0, "candidate_count": 2, "candidate_rows": (1, 2),
+        "reason": "Candidate identities remain unresolved, but all exact SKU / Parent SKU candidates share one unique Unit Selling Price.",
+    }]
+    plan = resolution_plan(review)
+    assert plan is not None and plan.issue_type == PRODUCT_IDENTITY_CORRECTION
+
+    unresolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "product_identity_fields": {"0": {
+                "seller_sku": "IDENTITY-SKU",
+                "product_name": "Sesame Seaweed Crisps Home My Orders",
+                "variation": "Pumpkin Seed Seaweed",
+            }},
+        },
+        price_master=master,
+    )
+    assert unresolved.resolved is False
+    assert state["reviews"] == [review]
+
+    resolved = apply_resolution(
+        state,
+        key=plan.key,
+        values={
+            "source_confirmed": True,
+            "product_identity_fields": {"0": {
+                "seller_sku": "IDENTITY-SKU",
+                "product_name": "Sesame Seaweed Crisps",
+                "variation": "Pumpkin Seed Seaweed",
+            }},
+        },
+        price_master=master,
+    )
+    assert resolved.resolved is True
+    assert state["reviews"] == []
+    assert state["products"][0]["nav"] == "NAV-SESAME"
+    refreshed = classify_staging(
+        build_current_batch_staging(
+            batch_id="batch",
+            orders=state["orders"],
+            products=state["products"],
+            reviews=state["reviews"],
+            price_master=master,
+            source_hashes={("26082485840HV1.pdf", "26082485840HV1"): "a" * 64},
+        ),
+        InMemoryHistoricalInvoiceRepository(),
+    )
+    assert len(refreshed) == 1
+    assert refreshed[0].status is IntakeStatus.NEW
 
 
 def _income_review():
@@ -1458,6 +1578,54 @@ def test_combined_missing_sku_and_promotion_controls_share_one_apply_action():
 
     assert app.exception == []
     assert {field.label for field in app.text_input} >= {"Resolved Seller SKU", "Promotion Subtotal"}
+    assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 1
+
+
+def _product_identity_manual_review_app():
+    import streamlit as st
+
+    from src.invoice_app.ui import data_import
+
+    review = {
+        "batch_id": "batch", "source_pdf": "26082485840HV1.pdf",
+        "platform": "Shopee", "order_id": "26082485840HV1",
+        "status": "Manual Review",
+        "reason_code": "PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED",
+        "reason": "Candidate identities remain unresolved, but all exact SKU / Parent SKU candidates share one unique Unit Selling Price.",
+        "order_payload": {"order_id": "26082485840HV1"},
+        "product_payloads": [{
+            "seller_sku": "IDENTITY-SKU",
+            "product_name": "Sesame Seaweed Crisps Home My Orders",
+            "variation": "Pumpkin Seed Seaweed",
+        }],
+        "product_identity_affected": [{
+            "index": 0, "candidate_count": 2, "candidate_rows": (1, 2),
+        }],
+    }
+    st.session_state.setdefault("orders", [])
+    st.session_state.setdefault("products", [])
+    st.session_state.setdefault("reviews", [review])
+    st.session_state.setdefault("batch_id", "batch")
+    data_import._render_manual_review_resolution()
+
+
+def test_product_identity_review_shows_only_source_fields_and_existing_evidence():
+    app = AppTest.from_function(_product_identity_manual_review_app)
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert {widget.label for widget in app.text_input} == {
+        "Seller SKU", "Product Name", "Variation"
+    }
+    assert any(
+        checkbox.label
+        == "I confirm these product identity values are visible in the original Shopee Invoice."
+        for checkbox in app.checkbox
+    )
+    assert "Original source evidence / current parsed values" in {
+        item.value for item in app.markdown
+    }
     assert len([button for button in app.button if button.label == "Apply & Revalidate"]) == 1
 
 
