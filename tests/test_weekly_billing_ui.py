@@ -114,10 +114,11 @@ render_weekly_billing(dataset)
         "Qty",
         "UOM",
         "Unit Price",
-        "Dis%",
+        "Original Sales",
         "Disc Amt",
         "Amount",
     )
+    assert app.dataframe[0].value.iloc[0]["Original Sales"] == 20.0
     assert tuple(app.dataframe[1].value.columns) == ("Description", "Amount")
 
 

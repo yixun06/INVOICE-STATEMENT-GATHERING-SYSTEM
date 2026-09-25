@@ -28,6 +28,13 @@ from src.invoice_app.services.weekly_billing import (
 from src.invoice_app.services.weekly_billing_export import (
     export_weekly_billing_report,
 )
+from src.invoice_app.services.weekly_billing_barcode_export import (
+    export_product_summary_barcode_pdf,
+    summarize_product_summary_barcodes,
+)
+from src.invoice_app.services.weekly_billing_barcode_table_export import (
+    export_product_summary_barcode_table_pdf,
+)
 from src.invoice_app.services.weekly_billing_staging import StagingDataError
 
 
@@ -40,7 +47,7 @@ PRODUCT_SUMMARY_COLUMNS = (
     "Qty",
     "UOM",
     "Unit Price",
-    "Dis%",
+    "Original Sales",
     "Disc Amt",
     "Amount",
 )
@@ -98,7 +105,9 @@ def render_weekly_billing(
             "Unit Price": st.column_config.NumberColumn(
                 "Unit Price", format="RM %.2f"
             ),
-            "Dis%": st.column_config.TextColumn("Dis%"),
+            "Original Sales": st.column_config.NumberColumn(
+                "Original Sales", format="RM %.2f"
+            ),
             "Disc Amt": st.column_config.NumberColumn("Disc Amt", format="RM %.2f"),
             "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
         },
@@ -114,6 +123,7 @@ def render_weekly_billing(
         },
     )
     _render_financial_readiness(report)
+    _render_barcode_export(report.product_summary)
     try:
         product_master, _source_label = load_configured_product_price_master()
     except ProductMasterSourceError as error:
@@ -142,6 +152,53 @@ def render_weekly_billing(
     )
 
 
+def _render_barcode_export(summary: WeeklyBillingSummary) -> None:
+    barcode_summary = summarize_product_summary_barcodes(summary)
+    st.caption(
+        "Barcode labels: "
+        f"{barcode_summary.label_count:,} | "
+        f"Valid EAN-13: {barcode_summary.valid_ean13_count:,} | "
+        f"Barcode unavailable: {barcode_summary.unavailable_count:,}"
+    )
+    try:
+        barcode_pdf = export_product_summary_barcode_pdf(summary)
+    except (RuntimeError, ValueError) as error:
+        st.error(f"Barcode PDF is unavailable: {error}")
+    else:
+        period = summary.period
+        st.download_button(
+            "Export Barcode PDF",
+            barcode_pdf,
+            file_name=(
+                "Weekly_Billing_Barcodes_"
+                f"{period.statement_period_from:%Y%m%d}_"
+                f"{period.statement_period_to:%Y%m%d}.pdf"
+            ),
+            mime="application/pdf",
+            key="weekly_billing_barcode_pdf_export",
+            icon=":material/barcode:",
+        )
+
+    try:
+        barcode_table_pdf = export_product_summary_barcode_table_pdf(summary)
+    except (RuntimeError, ValueError) as error:
+        st.error(f"Product Summary Barcode PDF is unavailable: {error}")
+    else:
+        period = summary.period
+        st.download_button(
+            "Export Product Summary Barcode PDF",
+            barcode_table_pdf,
+            file_name=(
+                "Weekly_Billing_Product_Summary_Barcodes_"
+                f"{period.statement_period_from:%Y%m%d}_"
+                f"{period.statement_period_to:%Y%m%d}.pdf"
+            ),
+            mime="application/pdf",
+            key="weekly_billing_product_summary_barcode_pdf_export",
+            icon=":material/table_view:",
+        )
+
+
 def _render_metrics(summary: WeeklyBillingSummary) -> None:
     with st.container(horizontal=True, gap="small"):
         st.metric("Orders", f"{summary.order_count:,}", border=True)
@@ -165,7 +222,7 @@ def _summary_frame(summary: WeeklyBillingSummary) -> pd.DataFrame:
                 "Qty": row.quantity,
                 "UOM": row.uom,
                 "Unit Price": float(row.unit_price),
-                "Dis%": row.discount_percent,
+                "Original Sales": float(row.original_sales),
                 "Disc Amt": float(row.discount_amount),
                 "Amount": float(row.amount),
             }

@@ -71,6 +71,12 @@ class ProductSummaryRow:
     amount: Decimal
     source_item_count: int
 
+    @property
+    def original_sales(self) -> Decimal:
+        """Approved Product Summary sales value before the discount amount."""
+
+        return self.unit_price * self.quantity
+
 
 @dataclass(frozen=True)
 class StagingDataRow:

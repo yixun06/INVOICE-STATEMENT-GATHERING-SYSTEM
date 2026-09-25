@@ -24,7 +24,7 @@ PRODUCT_SUMMARY_HEADERS = (
     "Qty",
     "UOM",
     "Unit Price",
-    "Dis%",
+    "Original Sales",
     "Disc Amt",
     "Amount",
 )
@@ -51,12 +51,12 @@ def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
                 row.quantity,
                 row.uom,
                 float(row.unit_price),
-                row.discount_percent,
+                float(row.original_sales),
                 float(row.discount_amount),
                 float(row.amount),
             )
         )
-    for column in (7, 9, 10):
+    for column in (7, 8, 9, 10):
         for cells in sheet.iter_rows(min_row=2, min_col=column, max_col=column):
             cells[0].number_format = '"RM" #,##0.00'
     widths = {
@@ -67,7 +67,7 @@ def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
         "E": 10,
         "F": 10,
         "G": 16,
-        "H": 10,
+        "H": 16,
         "I": 16,
         "J": 16,
     }
@@ -229,15 +229,15 @@ def _write_product_summary(sheet, summary: WeeklyBillingSummary) -> None:
     for row in summary.product_rows:
         sheet.append((
             row.number, row.sku_code, row.nav, row.product_name, row.quantity, row.uom,
-            float(row.unit_price), row.discount_percent, float(row.discount_amount),
+            float(row.unit_price), float(row.original_sales), float(row.discount_amount),
             float(row.amount),
         ))
-    for column in (7, 9, 10):
+    for column in (7, 8, 9, 10):
         for cells in sheet.iter_rows(min_row=2, min_col=column, max_col=column):
             cells[0].number_format = '"RM" #,##0.00'
     for column, width in {
         "A": 8, "B": 18, "C": 18, "D": 58, "E": 10, "F": 10,
-        "G": 16, "H": 10, "I": 16, "J": 16,
+        "G": 16, "H": 16, "I": 16, "J": 16,
     }.items():
         sheet.column_dimensions[column].width = width
 

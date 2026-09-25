@@ -743,13 +743,15 @@ def test_excel_uses_exact_summary_rows_numeric_money_and_deterministic_order():
         (2, "SKU-B", "NAV-B", "Beta", 1),
     ]
     assert all(sheet.cell(row=row, column=7).data_type == "n" for row in (2, 3))
+    assert all(sheet.cell(row=row, column=8).data_type == "n" for row in (2, 3))
     assert all(sheet.cell(row=row, column=9).data_type == "n" for row in (2, 3))
     assert all(sheet.cell(row=row, column=10).data_type == "n" for row in (2, 3))
-    assert all(row[5] == "EA" and row[7] is None for row in values[1:])
+    assert all(row[5] == "EA" for row in values[1:])
     assert values[1:] == [
-        (1, "SKU-A", "NAV-A", "Alpha", 1, "EA", 10, None, 2, 8),
-        (2, "SKU-B", "NAV-B", "Beta", 1, "EA", 10, None, 2, 8),
+        (1, "SKU-A", "NAV-A", "Alpha", 1, "EA", 10, 10, 2, 8),
+        (2, "SKU-B", "NAV-B", "Beta", 1, "EA", 10, 10, 2, 8),
     ]
     assert sum(row[4] for row in values[1:]) == summary.total_quantity
+    assert Decimal(str(sum(row[7] for row in values[1:]))) == summary.total_standard_amount
     assert Decimal(str(sum(row[8] for row in values[1:]))) == summary.total_discount_amount
     assert Decimal(str(sum(row[9] for row in values[1:]))) == summary.total_amount

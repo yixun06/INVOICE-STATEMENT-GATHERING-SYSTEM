@@ -333,8 +333,8 @@ def test_export_aggregates_only_staging_and_preserves_product_and_financial_shee
     )
 
     assert [tuple(cell.value for cell in row) for row in workbook["Product Summary"].iter_rows(min_row=2)] == [
-        (1, "SKU-000123", "4007457", "Identity fallback row | Original", 9, "EA", 12.9, None, 0, 10),
-        (2, "SKU-000123", "4007457", "Identity fallback row | Original", 2, "EA", 12.9, None, 0, 10),
+        (1, "SKU-000123", "4007457", "Identity fallback row | Original", 9, "EA", 12.9, 116.1, 0, 10),
+        (2, "SKU-000123", "4007457", "Identity fallback row | Original", 2, "EA", 12.9, 25.8, 0, 10),
     ]
     assert workbook["Staging Data"].max_row == 2
     assert workbook["Staging Data"].cell(2, 6).value == "4007457"
