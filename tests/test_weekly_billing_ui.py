@@ -98,6 +98,9 @@ render_weekly_billing(dataset)
     app.run(timeout=20)
 
     assert app.exception == []
+    download_labels = {button.label for button in app.download_button}
+    assert "Export Barcode PDF" not in download_labels
+    assert "Export Product Summary Barcode PDF" in download_labels
     assert [metric.label for metric in app.metric] == [
         "Orders",
         "Products",

@@ -29,7 +29,6 @@ from src.invoice_app.services.weekly_billing_export import (
     export_weekly_billing_report,
 )
 from src.invoice_app.services.weekly_billing_barcode_export import (
-    export_product_summary_barcode_pdf,
     summarize_product_summary_barcodes,
 )
 from src.invoice_app.services.weekly_billing_barcode_table_export import (
@@ -160,25 +159,6 @@ def _render_barcode_export(summary: WeeklyBillingSummary) -> None:
         f"Valid EAN-13: {barcode_summary.valid_ean13_count:,} | "
         f"Barcode unavailable: {barcode_summary.unavailable_count:,}"
     )
-    try:
-        barcode_pdf = export_product_summary_barcode_pdf(summary)
-    except (RuntimeError, ValueError) as error:
-        st.error(f"Barcode PDF is unavailable: {error}")
-    else:
-        period = summary.period
-        st.download_button(
-            "Export Barcode PDF",
-            barcode_pdf,
-            file_name=(
-                "Weekly_Billing_Barcodes_"
-                f"{period.statement_period_from:%Y%m%d}_"
-                f"{period.statement_period_to:%Y%m%d}.pdf"
-            ),
-            mime="application/pdf",
-            key="weekly_billing_barcode_pdf_export",
-            icon=":material/barcode:",
-        )
-
     try:
         barcode_table_pdf = export_product_summary_barcode_table_pdf(summary)
     except (RuntimeError, ValueError) as error:
