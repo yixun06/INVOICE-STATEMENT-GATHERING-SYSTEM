@@ -17,7 +17,8 @@ from src.invoice_app.domain.weekly_billing import (
 )
 from src.invoice_app.services import weekly_billing_barcode_table_export as table_export
 from src.invoice_app.services.weekly_billing_barcode_table_export import (
-    BRANDING_LOGO_PATH,
+    TABLE_BARCODE_HEIGHT,
+    TABLE_BARCODE_BAR_WIDTH,
     FIRST_PAGE_SUMMARY_GAP,
     FIRST_PAGE_SUMMARY_HEIGHT,
     TABLE_COLUMN_WIDTHS_MM,
@@ -163,7 +164,7 @@ def test_first_page_summary_uses_authoritative_period_and_reconciled_totals():
     assert (header.barcode_ready, header.barcode_unavailable) == (1, 1)
     for value in (
         "WEEKLY BILLING PRODUCT SUMMARY",
-        "Zenxin Agriculture Sdn Bhd",
+        "Zenxin Agri-Organic Food (AH) Sdn Bhd",
         "Sales Period: 10 Aug 2026 – 16 Aug 2026",
         "Source: Shopee Weekly Statement",
         "Product Rows",
@@ -178,11 +179,10 @@ def test_first_page_summary_uses_authoritative_period_and_reconciled_totals():
         "Barcode Unavailable: 1",
     ):
         assert value in first_page
-    assert BRANDING_LOGO_PATH.is_file()
-    x_objects = (
-        _reader(summary).pages[0]["/Resources"].get("/XObject", {}).get_object().values()
-    )
-    assert any(image.get_object().get("/Subtype") == "/Image" for image in x_objects)
+    assert not hasattr(table_export, "BRANDING_LOGO_PATH")
+    x_object_reference = _reader(summary).pages[0]["/Resources"].get("/XObject")
+    x_objects = x_object_reference.get_object().values() if x_object_reference else ()
+    assert not any(image.get_object().get("/Subtype") == "/Image" for image in x_objects)
 
 
 def test_first_page_summary_appears_once_and_table_header_repeats_on_later_pages():
@@ -233,9 +233,9 @@ def test_table_projection_equals_final_product_summary_values_exactly():
         "7",
         "invalid-sku-complete",
         "Barcode unavailable",
+        "3",
         "NAV-77",
         "完整 Description & source",
-        "3",
         "BOX",
         "RM 12.30",
         "RM 36.90",
@@ -264,12 +264,14 @@ def test_template_is_a4_landscape_with_exact_v01_columns_and_widths():
         round(expected_height, 3),
     )
     assert TABLE_HEADERS == (
-        "No.", "SKU Code", "Barcode", "NAV", "Description", "Qty", "UOM",
+        "No.", "SKU Code", "Barcode", "Qty", "NAV", "Description", "UOM",
         "Unit Price", "Original Sales", "Disc given", "Amount",
     )
-    assert TABLE_COLUMN_WIDTHS_MM == (9, 20, 50, 18, 78, 12, 12, 15, 20, 15, 15)
+    assert TABLE_COLUMN_WIDTHS_MM == (9, 20, 50, 12, 18, 78, 12, 15, 20, 15, 15)
     assert sum(TABLE_COLUMN_WIDTHS_MM) == 264
     assert TABLE_CONTENT_WIDTH == pytest.approx(264 * mm)
+    assert TABLE_BARCODE_BAR_WIDTH == pytest.approx(0.28 * mm)
+    assert TABLE_BARCODE_HEIGHT == pytest.approx(12 * mm)
 
 
 def test_first_page_summary_height_is_compact_and_deterministic():

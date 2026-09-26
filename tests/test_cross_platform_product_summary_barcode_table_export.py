@@ -56,7 +56,7 @@ def test_cross_platform_pdf_uses_the_final_summary_rows_and_cross_platform_metad
     text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(pdf)).pages)
 
     assert pdf.startswith(b"%PDF-")
-    assert "Zenxin Agriculture Sdn Bhd" in text
+    assert "Zenxin Agri-Organic Food (AH) Sdn Bhd" in text
     assert "CROSS PLATFORM PRODUCT SUMMARY" in text
     assert "Platform: Shopee" in text
     assert "Reporting Period: 08 Aug 2026 – 10 Aug 2026" in text
@@ -77,7 +77,7 @@ def test_cross_platform_pdf_uses_the_final_summary_rows_and_cross_platform_metad
     assert "Barcode unavailable" in text
     assert rows[0].sku_code in text
     assert TABLE_HEADERS == (
-        "No.", "SKU Code", "Barcode", "NAV", "Description", "Qty", "UOM",
+        "No.", "SKU Code", "Barcode", "Qty", "NAV", "Description", "UOM",
         "Unit Price", "Original Sales", "Disc given", "Amount",
     )
 

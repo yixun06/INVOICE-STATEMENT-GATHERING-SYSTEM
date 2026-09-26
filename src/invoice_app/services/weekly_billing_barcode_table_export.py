@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
-from pathlib import Path
 from typing import Sequence
 from xml.sax.saxutils import escape
 
@@ -17,10 +16,8 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Flowable,
-    Image,
     KeepTogether,
     LongTable,
     Paragraph,
@@ -43,9 +40,9 @@ TABLE_HEADERS = (
     "No.",
     "SKU Code",
     "Barcode",
+    "Qty",
     "NAV",
     "Description",
-    "Qty",
     "UOM",
     "Unit Price",
     "Original Sales", #unit price x quantity
@@ -53,7 +50,7 @@ TABLE_HEADERS = (
     "Amount",
 )
 # The approved table geometry is retained and fits within the 281 mm printable width.
-TABLE_COLUMN_WIDTHS_MM = (9, 20, 50, 18, 78, 12, 12, 15, 20, 15,15)
+TABLE_COLUMN_WIDTHS_MM = (9, 20, 50, 12, 18, 78, 12, 15, 20, 15, 15)
 TABLE_COLUMN_WIDTHS = tuple(width * mm for width in TABLE_COLUMN_WIDTHS_MM)
 TABLE_CONTENT_WIDTH = sum(TABLE_COLUMN_WIDTHS)
 TABLE_BODY_FONT_SIZE = 6.5
@@ -62,12 +59,6 @@ TABLE_BARCODE_BAR_WIDTH = 0.28 * mm
 TABLE_BARCODE_HEIGHT = 12 * mm
 FIRST_PAGE_SUMMARY_HEIGHT = 36 * mm
 FIRST_PAGE_SUMMARY_GAP = 2 * mm
-BRANDING_LOGO_PATH = (
-    Path(__file__).resolve().parents[3] / "assets" / "branding" / "zenxin-logo.png"
-)
-BRANDING_LOGO_WIDTH = 28 * mm
-
-
 @dataclass(frozen=True)
 class ProductSummaryBarcodeTableRow:
     """Display-only projection of one unchanged final Product Summary row."""
@@ -126,9 +117,9 @@ def build_product_summary_barcode_table_rows_from_product_rows(
                 str(row.number),
                 row.sku_code,
                 "" if is_valid_ean13(row.sku_code) else "Barcode unavailable",
+                str(row.quantity),
                 row.nav,
                 row.product_name,
-                str(row.quantity),
                 row.uom or "",
                 _format_money(row.unit_price),
                 _format_money(row.original_sales),
@@ -213,9 +204,9 @@ def render_product_summary_barcode_table_pdf(
                 Paragraph(escape(values[0]), styles["center"]),
                 Paragraph(escape(values[1]), styles["left"]),
                 barcode_cell,
-                Paragraph(escape(values[3]), styles["left"]),
+                Paragraph(escape(values[3]), styles["center"]),
                 Paragraph(escape(values[4]), styles["left"]),
-                Paragraph(escape(values[5]), styles["center"]),
+                Paragraph(escape(values[5]), styles["left"]),
                 Paragraph(escape(values[6]), styles["center"]),
                 Paragraph(escape(values[7]), styles["right"]),
                 Paragraph(escape(values[8]), styles["center"]),
@@ -449,12 +440,12 @@ def _presentation_first_page_summary_flowable(
     )
     title_and_company = Table(
         [
-            [Paragraph("Zenxin Agriculture Sdn Bhd", company)],
+            [Paragraph("Zenxin Agri-Organic Food (AH) Sdn Bhd", company)],
             [Paragraph(escape(presentation.heading), title)],
             [Paragraph(escape(presentation.metadata_lines[0]), period)],
             [Paragraph(escape(presentation.metadata_lines[1]), source)],
         ],
-        colWidths=(TABLE_CONTENT_WIDTH - 38 * mm,),
+        colWidths=(TABLE_CONTENT_WIDTH,),
         rowHeights=(5.8 * mm, 5.2 * mm, 3.8 * mm, 3.3 * mm),
         hAlign="LEFT",
     )
@@ -469,28 +460,9 @@ def _presentation_first_page_summary_flowable(
             )
         )
     )
-    branding_row = Table(
-        [[title_and_company, _branding_logo_flowable()]],
-        colWidths=(TABLE_CONTENT_WIDTH - 38 * mm, 38 * mm),
-        rowHeights=(24 * mm,),
-        hAlign="LEFT",
-    )
-    branding_row.setStyle(
-        TableStyle(
-            (
-                ("VALIGN", (0, 0), (0, 0), "MIDDLE"),
-                ("VALIGN", (1, 0), (1, 0), "TOP"),
-                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            )
-        )
-    )
     summary_table = Table(
         [
-            [branding_row],
+            [title_and_company],
             [metric_table],
             [
                 Paragraph(
@@ -521,24 +493,6 @@ def _presentation_first_page_summary_flowable(
         )
     )
     return summary_table
-
-
-def _branding_logo_flowable() -> Image:
-    """Load the version-controlled Zenxin logo at its natural aspect ratio."""
-    if not BRANDING_LOGO_PATH.is_file():
-        raise RuntimeError(
-            "Zenxin branding logo is unavailable: expected "
-            f"{BRANDING_LOGO_PATH}."
-        )
-    image_width, image_height = ImageReader(str(BRANDING_LOGO_PATH)).getSize()
-    if image_width <= 0 or image_height <= 0:
-        raise RuntimeError(f"Zenxin branding logo is invalid: {BRANDING_LOGO_PATH}.")
-    return Image(
-        str(BRANDING_LOGO_PATH),
-        width=BRANDING_LOGO_WIDTH,
-        height=BRANDING_LOGO_WIDTH * image_height / image_width,
-        mask="auto",
-    )
 
 
 def _format_money(value: Decimal) -> str:
