@@ -32,6 +32,8 @@ from src.invoice_app.services.all_products import (
     ALL_PRODUCT_DISPLAY_FIELD_LABELS,
     CROSS_PLATFORM_PRODUCT_DISPLAY_COLUMNS,
     CROSS_PLATFORM_PRODUCT_DISPLAY_FIELD_LABELS,
+    CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_COLUMNS,
+    CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_FIELD_LABELS,
     ALL_PRODUCT_FIELD_LABELS,
     ALL_PRODUCT_REVIEW_COLUMNS,
     ALL_PRODUCT_REVIEW_FIELD_LABELS,
@@ -39,6 +41,7 @@ from src.invoice_app.services.all_products import (
     CROSS_PLATFORM_SUMMARY_FIELD_LABELS,
     build_all_product_views,
     build_cross_platform_product_rows,
+    build_cross_platform_product_summary_display_rows,
     build_shopee_product_level_rows,
     filter_cross_platform_product_rows,
     missing_sku_product_summary_rows,
@@ -89,6 +92,9 @@ from src.invoice_app.ui.settlement_test_lab import (
 from src.invoice_app.ui.weekly_billing import (
     WEEKLY_BILLING_PAGE,
     render_weekly_billing,
+)
+from src.invoice_app.ui.cross_platform_product_summary import (
+    render_cross_platform_product_summary,
 )
 
 st.set_page_config(page_title=APP_TITLE, page_icon=":material/receipt_long:", layout="wide")
@@ -1527,36 +1533,45 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
         st.caption("No Seller SKU summary rows match the current filters.")
         return
 
-    summary_df = frame_with_columns(summary_rows, CROSS_PLATFORM_SUMMARY_COLUMNS)
-    summary_df["total_quantity"] = pd.to_numeric(summary_df["total_quantity"], errors="coerce").astype("Int64")
-    for field in ("unit_selling_price", "total_selling_price", "total_discount_given"):
+    summary_df = frame_with_columns(summary_rows, CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_COLUMNS)
+    summary_df["number"] = pd.to_numeric(summary_df["number"], errors="coerce").astype("Int64")
+    summary_df["quantity"] = pd.to_numeric(summary_df["quantity"], errors="coerce").astype("Int64")
+    for field in ("unit_price", "original_sales", "discount_amount", "amount"):
         summary_df[field] = pd.to_numeric(
             summary_df[field].map(lambda value: float(value) if isinstance(value, Decimal) else value),
             errors="coerce",
         )
-    summary_labels = CROSS_PLATFORM_SUMMARY_FIELD_LABELS
+    summary_labels = CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_FIELD_LABELS
     st.dataframe(
-        summary_df[CROSS_PLATFORM_SUMMARY_COLUMNS].rename(columns=summary_labels),
+        summary_df[CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_COLUMNS].rename(columns=summary_labels),
         hide_index=True,
         key="cross_platform_product_summary_table",
         column_config={
-            summary_labels["seller_sku"]: st.column_config.TextColumn(
-                summary_labels["seller_sku"], pinned=True, width="medium"
+            summary_labels["number"]: st.column_config.NumberColumn(
+                summary_labels["number"], format="%d", width="small"
             ),
-            summary_labels["product_name"]: st.column_config.TextColumn(
-                summary_labels["product_name"], pinned=True, width="large"
+            summary_labels["sku_code"]: st.column_config.TextColumn(
+                summary_labels["sku_code"], pinned=True, width="medium"
             ),
-            summary_labels["unit_selling_price"]: st.column_config.NumberColumn(
-                summary_labels["unit_selling_price"], format="RM %.2f", width="small", alignment="right"
+            summary_labels["nav"]: st.column_config.TextColumn(summary_labels["nav"], width="small"),
+            summary_labels["description"]: st.column_config.TextColumn(
+                summary_labels["description"], pinned=True, width="large"
             ),
-            summary_labels["total_quantity"]: st.column_config.NumberColumn(
-                summary_labels["total_quantity"], format="%d", width="small"
+            summary_labels["quantity"]: st.column_config.NumberColumn(
+                summary_labels["quantity"], format="%d", width="small"
             ),
-            summary_labels["total_selling_price"]: st.column_config.NumberColumn(
-                summary_labels["total_selling_price"], format="RM %.2f", width="small", alignment="right"
+            summary_labels["uom"]: st.column_config.TextColumn(summary_labels["uom"], width="small"),
+            summary_labels["unit_price"]: st.column_config.NumberColumn(
+                summary_labels["unit_price"], format="RM %.2f", width="small", alignment="right"
             ),
-            summary_labels["total_discount_given"]: st.column_config.NumberColumn(
-                summary_labels["total_discount_given"], format="RM %.2f", width="small", alignment="right"
+            summary_labels["original_sales"]: st.column_config.NumberColumn(
+                summary_labels["original_sales"], format="RM %.2f", width="small", alignment="right"
+            ),
+            summary_labels["discount_amount"]: st.column_config.NumberColumn(
+                summary_labels["discount_amount"], format="RM %.2f", width="small", alignment="right"
+            ),
+            summary_labels["amount"]: st.column_config.NumberColumn(
+                summary_labels["amount"], format="RM %.2f", width="small", alignment="right"
             ),
         },
         height=320,
@@ -1750,7 +1765,9 @@ def show_all_tab(orders: list[dict], products: list[dict], reviews: list[dict]) 
             "Grouped by Seller SKU, Product Name, and available Variation. Product pricing uses the Shopee Product Master.",
         )
         product_summary_rows = summarize_cross_platform_products(filtered_summary_product_rows)
-        show_cross_platform_summary_table(product_summary_rows)
+        show_cross_platform_summary_table(
+            build_cross_platform_product_summary_display_rows(filtered_summary_product_rows)
+        )
         show_cross_platform_summary_export(product_summary_rows)
         st.caption(f"Product Master Source: {price_master_source}")
         show_cross_platform_missing_sku_rows(
@@ -1939,7 +1956,7 @@ elif selected_page == "Dashboard":
     st.caption("Current active-batch reporting view. Import and validation remain in Data Import.")
     show_overall_dashboard(orders, products, reviews, pdf_count)
 elif selected_page == "Cross Platform Summary":
-    show_all_tab(orders, products, reviews)
+    render_cross_platform_product_summary()
 else:
     orders_by_platform = split_by_platform(orders)
     products_by_platform = split_by_platform(products)

@@ -226,94 +226,29 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
 
 
 
-def test_all_tab_separates_incomplete_product_rows_without_exporting_them(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = AppTest.from_file(str(APP_PATH))
-    app.session_state["authenticated"] = True
-    app.session_state["orders"] = []
-    app.session_state["products"] = []
-    app.session_state["reviews"] = [
-        {
-            "batch_id": "batch-all-review",
-            "platform": "Lazada",
-            "order_id": "LZD-R",
-            "source_pdf": "lazada.pdf",
-            "status": "Manual Review",
-            "reason": "Financial Reconciliation Failed",
-            "timestamp": "2026-08-21T10:00:00+00:00",
-            "order_payload": {"delivery_fee": "N/A"},
-            "product_payloads": [
-                {
-                    "platform": "Lazada",
-                    "order_id": "LZD-R",
-                    "product_name": "Complete product",
-                    "unit_price": "12.00",
-                    "paid_price": "9.00",
-                    "seller_sku": "SKU-A",
-                    "quantity": 1,
-                },
-                {
-                    "platform": "Lazada",
-                    "order_id": "LZD-R",
-                    "product_name": "Missing price product",
-                    "unit_price": "N/A",
-                    "seller_sku": "SKU-B",
-                    "quantity": 1,
-                },
-            ],
-        }
-    ]
-    app.session_state["batch_id"] = "batch-all-review"
-    app.session_state["pdf_count"] = 1
-    app.session_state["navigation"] = "Cross Platform Summary"
-
-    app.run(timeout=20)
-
-    assert app.exception == []
-    assert app.expander == []
-    assert {"Product Summary", "Filters", "All Products", "All Manual Review"} <= {
-        element.value for element in app.subheader
-    }
-    assert {"From Date", "To Date"} <= {date_input.label for date_input in app.date_input}
-    assert all(date_input.label != "Order Created Date Range" for date_input in app.date_input)
-    platform_filter = next(
-        selectbox for selectbox in app.selectbox if selectbox.label == "Platform"
-    )
-    assert platform_filter.options == ["All", "Shopee", "Lazada", "ZENXIN"]
-    frames_by_columns = {tuple(frame.value.columns): frame.value for frame in app.dataframe}
-    all_products = frames_by_columns[
-        ("Order Created Date",
-        "Product Name",
-        "Product Price",
-        "Seller SKU #",
-        "Qty",
-        "Platform")
-    ]
-    assert all_products["Product Name"].tolist() == ["Complete product"]
-    assert all_products["Product Price"].tolist() == ["12.00"]
-    assert "Data Status" not in all_products.columns
-    product_summary = frames_by_columns[
-        ("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")
-    ]
-    assert product_summary["Seller SKU"].tolist() == ["SKU-A"]
-    assert product_summary["Total Quantity"].tolist() == [1]
-    assert product_summary["Total Selling Price"].tolist() == [9.0]
-    assert {"Export All Products", "Export Product Summary"} <= {
-        button.label for button in app.get("download_button")
-    }
-    all_review = frames_by_columns[
-        (
-            "Product Name",
-            "Product Price",
-            "Seller SKU #",
-            "Qty",
-            "Delivery Fee",
-            "Platform",
-            "All Review Reason",
+def test_cross_platform_navigation_uses_the_read_only_committed_report():
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    cross_platform_branch = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "selected_page"
+        and any(
+            isinstance(comparator, ast.Constant)
+            and comparator.value == "Cross Platform Summary"
+            for comparator in node.test.comparators
         )
-    ]
-    assert all_review["Product Name"].tolist() == ["Missing price product"]
-    assert all_review["All Review Reason"].tolist() == ["Missing or invalid Product Price"]
+    )
+    calls = {
+        call.func.id
+        for call in ast.walk(cross_platform_branch)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+
+    assert "render_cross_platform_product_summary" in calls
+    assert "show_all_tab" not in calls
 
 
 def test_platform_tabs_hide_manual_review_section_when_that_platform_has_none(tmp_path, monkeypatch):
@@ -798,102 +733,19 @@ def test_platform_export_keeps_full_batch_separate_from_filtered_view(tmp_path, 
     assert dict(full_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 2
     assert dict(filtered_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 1
 
-def test_cross_platform_from_to_filters_share_the_same_detail_and_summary_population(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = AppTest.from_file(str(APP_PATH))
-    app.session_state["authenticated"] = True
-    app.session_state["orders"] = [
-        {"platform": "Shopee", "order_id": "SHP-1", "order_created_date": "05/08/2026"},
-        {"platform": "Lazada", "order_id": "LZD-1", "order_date": "15 08 2026"},
-    ]
-    app.session_state["products"] = [
-        {
-            "platform": "Shopee",
-            "order_id": "SHP-1",
-            "product_name": "Early product",
-            "seller_sku": "SKU-EARLY",
-            "unit_price": "10.00",
-            "quantity": 1,
-            "line_subtotal": "10.00",
-        },
-        {
-            "platform": "Lazada",
-            "order_id": "LZD-1",
-            "product_name": "Later product",
-            "seller_sku": "SKU-LATER",
-            "unit_price": "20.00",
-            "quantity": 1,
-            "paid_price": "20.00",
-        },
-    ]
-    app.session_state["reviews"] = []
-    app.session_state["batch_id"] = "batch-cross-platform-filter"
-    app.session_state["pdf_count"] = 2
-    app.session_state["navigation"] = "Cross Platform Summary"
+def test_cross_platform_page_does_not_keep_session_date_filtering_code():
+    source = APP_PATH.read_text(encoding="utf-8")
+    branch = source[source.index('elif selected_page == "Cross Platform Summary":') :]
 
-    app.run(timeout=20)
-
-    from_date = next(element for element in app.date_input if element.label == "From Date")
-    from_date.set_value(date(2026, 8, 8)).run(timeout=20)
-    frames_by_columns = {tuple(frame.value.columns): frame.value for frame in app.dataframe}
-    detail = frames_by_columns[
-        ("Order Created Date", "Product Name", "Product Price", "Seller SKU #", "Qty", "Platform")
-    ]
-    summary = frames_by_columns[("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")]
-    assert detail["Product Name"].tolist() == ["Later product"]
-    assert detail["Order Created Date"].iloc[0].date() == date(2026, 8, 15)
-    assert summary["Seller SKU"].tolist() == ["SKU-LATER"]
-
-    next(element for element in app.date_input if element.label == "From Date").set_value(None).run(timeout=20)
-    next(element for element in app.date_input if element.label == "To Date").set_value(date(2026, 8, 8)).run(timeout=20)
-    frames_by_columns = {tuple(frame.value.columns): frame.value for frame in app.dataframe}
-    detail = frames_by_columns[
-        ("Order Created Date", "Product Name", "Product Price", "Seller SKU #", "Qty", "Platform")
-    ]
-    summary = frames_by_columns[("Seller SKU", "Product Name", "Unit Selling Price", "Total Quantity", "Total Selling Price", "Total Discount Given")]
-    assert detail["Product Name"].tolist() == ["Early product"]
-    assert summary["Seller SKU"].tolist() == ["SKU-EARLY"]
-
-    next(element for element in app.date_input if element.label == "From Date").set_value(date(2026, 8, 15)).run(timeout=20)
-    assert any(error.value == "From Date must be on or before To Date." for error in app.error)
-    frames_by_columns = {tuple(frame.value.columns): frame.value for frame in app.dataframe}
-    detail = frames_by_columns[
-        ("Order Created Date", "Product Name", "Product Price", "Seller SKU #", "Qty", "Platform")
-    ]
-    assert detail["Product Name"].tolist() == ["Early product", "Later product"]
+    assert "render_cross_platform_product_summary()" in branch
+    assert "show_all_tab(orders, products, reviews)" not in branch
 
 
-def test_cross_platform_date_filter_with_no_matching_rows_shows_empty_state_without_error(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = AppTest.from_file(str(APP_PATH))
-    app.session_state["authenticated"] = True
-    app.session_state["orders"] = [
-        {"platform": "Shopee", "order_id": "SHP-1", "order_created_date": "05/08/2026"}
-    ]
-    app.session_state["products"] = [
-        {
-            "platform": "Shopee",
-            "order_id": "SHP-1",
-            "product_name": "Only product",
-            "seller_sku": "SKU-ONLY",
-            "unit_price": "10.00",
-            "quantity": 1,
-            "line_subtotal": "10.00",
-        }
-    ]
-    app.session_state["reviews"] = []
-    app.session_state["batch_id"] = "batch-cross-platform-empty"
-    app.session_state["pdf_count"] = 1
-    app.session_state["navigation"] = "Cross Platform Summary"
+def test_cross_platform_page_uses_its_own_read_only_ui_module():
+    source = APP_PATH.read_text(encoding="utf-8")
 
-    app.run(timeout=20)
-    next(element for element in app.date_input if element.label == "From Date").set_value(
-        date(2026, 8, 6)
-    ).run(timeout=20)
-
-    assert app.exception == []
-    assert "No products match the current filters." in {caption.value for caption in app.caption}
-    assert any(button.label == "Export All Products" and button.disabled for button in app.button)
+    assert "from src.invoice_app.ui.cross_platform_product_summary import" in source
+    assert "render_cross_platform_product_summary" in source
 
 
 def _weekly_stage_for_ui() -> StagedShopeeWeeklyStatement:

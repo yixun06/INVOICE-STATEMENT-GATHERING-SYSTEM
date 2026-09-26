@@ -103,6 +103,35 @@ CROSS_PLATFORM_SUMMARY_FIELD_LABELS = {
     "total_discount_given": "Total Discount Given",
 }
 
+# This is intentionally a UI-only projection.  The existing six-column
+# summary remains the export contract until a separately approved export
+# change is made.
+CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_COLUMNS = [
+    "number",
+    "sku_code",
+    "nav",
+    "description",
+    "quantity",
+    "uom",
+    "unit_price",
+    "original_sales",
+    "discount_amount",
+    "amount",
+]
+
+CROSS_PLATFORM_PRODUCT_SUMMARY_DISPLAY_FIELD_LABELS = {
+    "number": "No.",
+    "sku_code": "SKU Code",
+    "nav": "NAV",
+    "description": "Description",
+    "quantity": "Qty",
+    "uom": "UOM",
+    "unit_price": "Unit Price",
+    "original_sales": "Original Sales",
+    "discount_amount": "Disc Amt",
+    "amount": "Amount",
+}
+
 _REPORTING_DATE_FIELD_BY_PLATFORM = {
     "Shopee": "order_created_date",
     "Lazada": "order_date",
@@ -277,18 +306,61 @@ def missing_sku_product_summary_rows(rows: list[dict[str, Any]]) -> list[dict[st
 
 def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate pricing rows by SKU plus Product Name/Variation price identity."""
+    result = [_cross_platform_summary_output(summary) for summary in _cross_platform_summary_groups(rows).values()]
+    return sorted(
+        result,
+        key=lambda row: (str(row["seller_sku"]).casefold(), str(row["product_name"]).casefold()),
+    )
+
+
+def build_cross_platform_product_summary_display_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the approved ten-column Product Summary reporting projection.
+
+    This does not alter the underlying grouping or the existing export summary
+    contract.  Lazada and ZENXIN normal-sale/discount values remain unavailable
+    unless those values are already source-backed in the current model.
+    """
+    result: list[dict[str, Any]] = []
+    for summary in _cross_platform_summary_groups(rows).values():
+        base = _cross_platform_summary_output(summary)
+        original_sales = (
+            MISSING_VALUE_PLACEHOLDER
+            if summary["_has_missing_normal_selling_value"]
+            else summary["_normal_selling_total"]
+        )
+        nav = _summary_nav_value(summary)
+        result.append(
+            {
+                "number": None,
+                "sku_code": base["seller_sku"],
+                "nav": nav,
+                "description": base["product_name"],
+                "quantity": base["total_quantity"],
+                # Current supported product-source contracts do not provide a
+                # reliable UOM field.  Do not invent EA.
+                "uom": MISSING_VALUE_PLACEHOLDER,
+                "unit_price": base["unit_selling_price"],
+                "original_sales": original_sales,
+                "discount_amount": base["total_discount_given"],
+                "amount": base["total_selling_price"],
+            }
+        )
+    result.sort(key=lambda row: (str(row["sku_code"]).casefold(), str(row["description"]).casefold()))
+    for number, row in enumerate(result, start=1):
+        row["number"] = number
+    return result
+
+
+def _cross_platform_summary_groups(rows: list[dict[str, Any]]) -> dict[tuple[Any, ...], dict[str, Any]]:
     summaries: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row_index, row in enumerate(rows):
         seller_sku = normalize_sku_text(row.get("seller_sku"))
         if _is_missing(seller_sku):
             continue
         unit_price = _decimal_or_none(row.get("reporting_unit_selling_price"))
-        identity = (
-            seller_sku,
-            _normalized_product_summary_name(row.get("product_name")),
-            _normalized_identity_text(row.get("reporting_variation_name")),
-            *_product_summary_unit_price_identity(row, row_index, unit_price),
-        )
+        identity = _cross_platform_summary_identity(row, row_index, seller_sku, unit_price)
         summary = summaries.setdefault(
             identity,
             {
@@ -300,6 +372,11 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
                 "_has_non_authoritative_unit_price": False,
                 "_selling_total": Decimal("0"),
                 "_has_missing_selling_value": False,
+                "_normal_selling_total": Decimal("0"),
+                "_has_missing_normal_selling_value": False,
+                "_nav_values": set(),
+                "_has_unavailable_nav": False,
+                "_has_conflicting_nav": False,
             },
         )
         summary["total_quantity"] += parse_quantity(row.get("quantity"))
@@ -314,9 +391,36 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
             summary["_has_missing_selling_value"] = True
         else:
             summary["_selling_total"] += selling_value
+        normal_selling_value = _decimal_or_none(row.get("reporting_normal_selling_value"))
+        if normal_selling_value is None:
+            summary["_has_missing_normal_selling_value"] = True
+        else:
+            summary["_normal_selling_total"] += normal_selling_value
+        nav_status = row.get("reporting_nav_status")
+        if nav_status == "resolved":
+            summary["_nav_values"].add(row["reporting_nav"])
+        elif nav_status == "conflict":
+            summary["_has_conflicting_nav"] = True
+        else:
+            summary["_has_unavailable_nav"] = True
+    return summaries
 
-    result: list[dict[str, Any]] = []
-    for summary in summaries.values():
+
+def _cross_platform_summary_identity(
+    row: dict[str, Any],
+    row_index: int,
+    seller_sku: str,
+    unit_price: Decimal | None,
+) -> tuple[Any, ...]:
+    return (
+        seller_sku,
+        _normalized_product_summary_name(row.get("product_name")),
+        _normalized_identity_text(row.get("reporting_variation_name")),
+        *_product_summary_unit_price_identity(row, row_index, unit_price),
+    )
+
+
+def _cross_platform_summary_output(summary: dict[str, Any]) -> dict[str, Any]:
         unit_selling_price = (
             None
             if summary["_has_unavailable_unit_price"] or len(summary["_unit_prices"]) != 1
@@ -325,38 +429,38 @@ def summarize_cross_platform_products(rows: list[dict[str, Any]]) -> list[dict[s
         total_selling_price = (
             None if summary["_has_missing_selling_value"] else summary["_selling_total"]
         )
-        result.append(
-            {
-                "seller_sku": summary["seller_sku"],
-                "product_name": summary["product_name"],
-                "unit_selling_price": (
-                    MISSING_VALUE_PLACEHOLDER
-                    if unit_selling_price is None
-                    else unit_selling_price
-                ),
-                "total_quantity": summary["total_quantity"],
-                "total_selling_price": (
-                    MISSING_VALUE_PLACEHOLDER
-                    if total_selling_price is None
-                    else total_selling_price
-                ),
-                "total_discount_given": (
-                    MISSING_VALUE_PLACEHOLDER
-                    if (
-                        unit_selling_price is None
-                        or total_selling_price is None
-                        or summary["_has_non_authoritative_unit_price"]
-                    )
-                    else (unit_selling_price * summary["total_quantity"] - total_selling_price).quantize(
-                        MONEY_QUANTUM
-                    )
-                ),
-            }
-        )
-    return sorted(
-        result,
-        key=lambda row: (str(row["seller_sku"]).casefold(), str(row["product_name"]).casefold()),
-    )
+        return {
+            "seller_sku": summary["seller_sku"],
+            "product_name": summary["product_name"],
+            "unit_selling_price": (
+                MISSING_VALUE_PLACEHOLDER if unit_selling_price is None else unit_selling_price
+            ),
+            "total_quantity": summary["total_quantity"],
+            "total_selling_price": (
+                MISSING_VALUE_PLACEHOLDER
+                if total_selling_price is None
+                else total_selling_price
+            ),
+            "total_discount_given": (
+                MISSING_VALUE_PLACEHOLDER
+                if (
+                    unit_selling_price is None
+                    or total_selling_price is None
+                    or summary["_has_non_authoritative_unit_price"]
+                )
+                else (unit_selling_price * summary["total_quantity"] - total_selling_price).quantize(
+                    MONEY_QUANTUM
+                )
+            ),
+        }
+
+
+def _summary_nav_value(summary: dict[str, Any]) -> str:
+    if summary["_has_conflicting_nav"] or len(summary["_nav_values"]) > 1:
+        return "Conflict"
+    if summary["_has_unavailable_nav"] or len(summary["_nav_values"]) != 1:
+        return MISSING_VALUE_PLACEHOLDER
+    return next(iter(summary["_nav_values"]))
 
 
 def _product_summary_unit_price_identity(
@@ -381,7 +485,7 @@ def _apply_cross_platform_product_pricing(
 ) -> list[dict[str, Any]]:
     decorated = [dict(row) for row in rows]
     if price_master is None:
-        return [_price_master_unavailable(row) for row in decorated]
+        return [_with_reporting_nav(_price_master_unavailable(row), None) for row in decorated]
 
     shopee_by_order: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, row in enumerate(decorated):
@@ -410,7 +514,31 @@ def _apply_cross_platform_product_pricing(
                 "reporting_allocation_method": result.allocation_method,
                 "reporting_allocation_evidence": result.allocation_evidence,
             }
-    return decorated
+    return [_with_reporting_nav(row, price_master) for row in decorated]
+
+
+def _with_reporting_nav(
+    row: dict[str, Any],
+    price_master: ProductPriceMaster | None,
+) -> dict[str, Any]:
+    """Attach a display-only NAV fact using the existing deterministic lookup."""
+    if price_master is None:
+        return {**row, "reporting_nav": None, "reporting_nav_status": "unavailable"}
+
+    lookup = price_master.lookup(
+        seller_sku=_lookup_input_text(row.get("seller_sku")),
+        product_name=_lookup_input_text(row.get("product_name")),
+        variation_name=_lookup_input_text(row.get("reporting_variation_name")),
+    )
+    if lookup.status in {
+        PriceLookupStatus.PRICING_CONFLICT,
+        PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
+    }:
+        return {**row, "reporting_nav": None, "reporting_nav_status": "conflict"}
+    nav_code = _lookup_input_text(lookup.nav_code)
+    if nav_code:
+        return {**row, "reporting_nav": nav_code, "reporting_nav_status": "resolved"}
+    return {**row, "reporting_nav": None, "reporting_nav_status": "unavailable"}
 
 
 def _shopee_pricing_input(row: dict[str, Any]) -> dict[str, Any]:
