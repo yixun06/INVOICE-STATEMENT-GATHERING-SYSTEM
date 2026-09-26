@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from typing import Sequence
 from xml.sax.saxutils import escape
 
 from reportlab.graphics import renderPDF
@@ -90,10 +91,33 @@ class ProductSummaryBarcodeTableHeader:
     barcode_unavailable: int
 
 
+@dataclass(frozen=True)
+class ProductSummaryBarcodeTablePresentation:
+    """Renderer-only document heading supplied by an already-final rowset."""
+
+    document_title: str
+    heading: str
+    metadata_lines: tuple[str, str]
+    metrics: tuple[tuple[str, str], ...]
+    barcode_ready: int
+    barcode_unavailable: int
+    show_barcode_status_line: bool = True
+
+
 def build_product_summary_barcode_table_rows(
     product_summary: WeeklyBillingSummary,
 ) -> tuple[ProductSummaryBarcodeTableRow, ...]:
     """Map final rows to their PDF display values without regrouping or recalculation."""
+
+    return build_product_summary_barcode_table_rows_from_product_rows(
+        product_summary.product_rows
+    )
+
+
+def build_product_summary_barcode_table_rows_from_product_rows(
+    product_rows: Sequence[ProductSummaryRow],
+) -> tuple[ProductSummaryBarcodeTableRow, ...]:
+    """Render existing final Product Summary rows without querying or aggregating."""
 
     return tuple(
         ProductSummaryBarcodeTableRow(
@@ -113,7 +137,7 @@ def build_product_summary_barcode_table_rows(
             ),
             has_graphical_barcode=is_valid_ean13(row.sku_code),
         )
-        for row in product_summary.product_rows
+        for row in product_rows
     )
 
 
@@ -146,9 +170,22 @@ def export_product_summary_barcode_table_pdf(
 ) -> bytes:
     """Render one non-splitting table row per final Product Summary row."""
 
-    text_font = _ensure_label_text_font()
-    table_rows = build_product_summary_barcode_table_rows(product_summary)
     summary_header = build_product_summary_barcode_table_header(product_summary)
+    return render_product_summary_barcode_table_pdf(
+        product_rows=product_summary.product_rows,
+        presentation=_weekly_billing_presentation(summary_header),
+    )
+
+
+def render_product_summary_barcode_table_pdf(
+    *,
+    product_rows: Sequence[ProductSummaryRow],
+    presentation: ProductSummaryBarcodeTablePresentation,
+) -> bytes:
+    """Render one final Product Summary rowset with caller-owned metadata only."""
+
+    text_font = _ensure_label_text_font()
+    table_rows = build_product_summary_barcode_table_rows_from_product_rows(product_rows)
     output = BytesIO()
     document = SimpleDocTemplate(
         output,
@@ -157,7 +194,7 @@ def export_product_summary_barcode_table_pdf(
         rightMargin=TABLE_PAGE_MARGIN,
         topMargin=TABLE_PAGE_MARGIN,
         bottomMargin=TABLE_PAGE_MARGIN,
-        title="Weekly Billing Product Summary Barcodes",
+        title=presentation.document_title,
         pageCompression=1,
     )
     styles = _table_paragraph_styles(text_font)
@@ -213,7 +250,7 @@ def export_product_summary_barcode_table_pdf(
         [
             KeepTogether(
                 [
-                    _first_page_summary_flowable(summary_header, text_font),
+                    _presentation_first_page_summary_flowable(presentation, text_font),
                     Spacer(1, FIRST_PAGE_SUMMARY_GAP),
                 ]
             ),
@@ -221,6 +258,28 @@ def export_product_summary_barcode_table_pdf(
         ]
     )
     return output.getvalue()
+
+
+def _weekly_billing_presentation(
+    summary: ProductSummaryBarcodeTableHeader,
+) -> ProductSummaryBarcodeTablePresentation:
+    return ProductSummaryBarcodeTablePresentation(
+        document_title="Weekly Billing Product Summary Barcodes",
+        heading="WEEKLY BILLING PRODUCT SUMMARY",
+        metadata_lines=(
+            f"Sales Period: {summary.sales_period}",
+            "Source: Shopee Weekly Statement",
+        ),
+        metrics=(
+            ("Product Rows", str(summary.product_rows)),
+            ("Total Qty", str(summary.total_quantity)),
+            ("Total Original Sales", _format_money(summary.total_original_sales)),
+            ("Total Discount Given", _format_money(summary.total_discount_given)),
+            ("Total Amount", _format_money(summary.total_amount)),
+        ),
+        barcode_ready=summary.barcode_ready,
+        barcode_unavailable=summary.barcode_unavailable,
+    )
 
 
 class _Ean13BarcodeFlowable(Flowable):
@@ -289,6 +348,17 @@ def _first_page_summary_flowable(
 ) -> Table:
     """Create the compact, once-only warehouse document heading for page one."""
 
+    return _presentation_first_page_summary_flowable(
+        _weekly_billing_presentation(summary), text_font
+    )
+
+
+def _presentation_first_page_summary_flowable(
+    presentation: ProductSummaryBarcodeTablePresentation,
+    text_font: str,
+) -> Table:
+    """Render the approved heading geometry from caller-owned metadata and rows."""
+
     title = ParagraphStyle(
         "BarcodeTableSummaryTitle",
         fontName="Helvetica-Bold",
@@ -354,19 +424,13 @@ def _first_page_summary_flowable(
         spaceBefore=0,
         spaceAfter=0,
     )
-    metrics = (
-        ("Product Rows", str(summary.product_rows)),
-        ("Total Qty", str(summary.total_quantity)),
-        ("Total Original Sales", _format_money(summary.total_original_sales)),
-        ("Total Discount Given", _format_money(summary.total_discount_given)),
-        ("Total Amount", _format_money(summary.total_amount)),
-    )
+    metrics = presentation.metrics
     metric_table = Table(
         [
             [Paragraph(escape(label), metric_label) for label, _value in metrics],
             [Paragraph(escape(value), metric_value) for _label, value in metrics],
         ],
-        colWidths=(TABLE_CONTENT_WIDTH / 5,) * 5,
+        colWidths=(TABLE_CONTENT_WIDTH / len(metrics),) * len(metrics),
         rowHeights=(3.4 * mm, 5.6 * mm),
         hAlign="LEFT",
     )
@@ -386,9 +450,9 @@ def _first_page_summary_flowable(
     title_and_company = Table(
         [
             [Paragraph("Zenxin Agriculture Sdn Bhd", company)],
-            [Paragraph("WEEKLY BILLING PRODUCT SUMMARY", title)],
-            [Paragraph(f"Sales Period: {escape(summary.sales_period)}", period)],
-            [Paragraph("Source: Shopee Weekly Statement", source)],
+            [Paragraph(escape(presentation.heading), title)],
+            [Paragraph(escape(presentation.metadata_lines[0]), period)],
+            [Paragraph(escape(presentation.metadata_lines[1]), source)],
         ],
         colWidths=(TABLE_CONTENT_WIDTH - 38 * mm,),
         rowHeights=(5.8 * mm, 5.2 * mm, 3.8 * mm, 3.3 * mm),
@@ -430,9 +494,13 @@ def _first_page_summary_flowable(
             [metric_table],
             [
                 Paragraph(
-                    "Barcode Ready: "
-                    f"{summary.barcode_ready}    |    "
-                    f"Barcode Unavailable: {summary.barcode_unavailable}",
+                    (
+                        "Barcode Ready: "
+                        f"{presentation.barcode_ready}    |    "
+                        f"Barcode Unavailable: {presentation.barcode_unavailable}"
+                    )
+                    if presentation.show_barcode_status_line
+                    else "",
                     status,
                 )
             ],

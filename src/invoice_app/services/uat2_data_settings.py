@@ -24,6 +24,9 @@ from src.invoice_app.services.google_sheets_monthly_statement_writer import (
 from src.invoice_app.services.weekly_billing import (
     GoogleSheetsWeeklyBillingReader,
 )
+from src.invoice_app.services.cross_platform_product_summary import (
+    GoogleSheetsCrossPlatformProductSummaryReader,
+)
 
 
 DEFAULT_UAT2_DATA_SPREADSHEET_ID = "1sZHYrmL9KuxhIdlZUN-EIy5tedmlbY62fOPxP22hsF8"
@@ -58,6 +61,14 @@ class UAT2DataSettings:
 
     def create_weekly_billing_reader(self) -> GoogleSheetsWeeklyBillingReader:
         return GoogleSheetsWeeklyBillingReader(
+            spreadsheet_id=self.google_spreadsheet_id,
+            gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+        )
+
+    def create_cross_platform_product_summary_reader(
+        self,
+    ) -> GoogleSheetsCrossPlatformProductSummaryReader:
+        return GoogleSheetsCrossPlatformProductSummaryReader(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )
