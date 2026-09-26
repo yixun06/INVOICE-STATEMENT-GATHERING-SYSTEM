@@ -41,6 +41,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_SUMMARY_TAB,
 )
 from src.invoice_app.services.product_summary_identity import (
+    product_summary_group_key,
     resolve_product_summary_identity,
 )
 
@@ -734,10 +735,9 @@ def _aggregate_source_items(
             variation=item.variation,
             historical_pm_unit_price=item.historical_pm_unit_price,
         )
-        key = (
-            identity.nav,
-            item.sku_code,
-            identity.historical_pm_unit_price,
+        key = product_summary_group_key(
+            identity=identity,
+            resolved_sku=item.sku_code,
         )
         groups[key].append(item)
         if identity.display_description not in descriptions[key]:

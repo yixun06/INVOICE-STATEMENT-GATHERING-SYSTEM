@@ -99,6 +99,20 @@ def resolve_product_summary_identity(
     )
 
 
+def product_summary_group_key(
+    *,
+    identity: ProductSummaryIdentity,
+    resolved_sku: str,
+) -> tuple[str, str, Decimal]:
+    """Return the shared final Product Summary grouping key."""
+
+    return (
+        identity.nav,
+        _required_text(resolved_sku, "resolved_sku"),
+        identity.historical_pm_unit_price,
+    )
+
+
 def normalize_technical_product_title(value: str) -> str:
     """Normalize only approved source-layout noise for Product Summary display."""
 

@@ -21,10 +21,12 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
 )
+from src.invoice_app.services.product_summary_identity import (
+    product_summary_group_key,
+    resolve_product_summary_identity,
+)
 from src.invoice_app.utils.normalize import (
-    normalize_match_text,
     normalize_sku_text,
-    normalize_whitespace,
 )
 
 
@@ -195,7 +197,9 @@ def build_cross_platform_product_summary(
 def _reporting_item(
     item: CanonicalInvoiceItem, payout_date: date
 ) -> CommittedReportingItem:
-    seller_sku = normalize_sku_text(item.resolved_seller_sku or item.seller_sku)
+    seller_sku = normalize_sku_text(
+        _text(item.resolved_seller_sku) or _text(item.seller_sku)
+    )
     if not seller_sku:
         raise CrossPlatformProductSummaryError(
             "BUSINESS DECISION REQUIRED — CROSS PLATFORM SKU MISSING: "
@@ -205,6 +209,11 @@ def _reporting_item(
     if not description:
         raise CrossPlatformProductSummaryError(
             f"{item.order_id}/{item.item_index}: missing persisted Product Name."
+        )
+    nav = _text(item.nav)
+    if not nav:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted NAV."
         )
     if item.quantity is None or item.quantity <= 0:
         raise CrossPlatformProductSummaryError(
@@ -221,7 +230,7 @@ def _reporting_item(
         item_index=item.item_index,
         payout_completed_date=payout_date,
         seller_sku=seller_sku,
-        nav=_text(item.nav) or "N/A",
+        nav=nav,
         description=description,
         variation=_text(item.variation),
         quantity=item.quantity,
@@ -294,40 +303,39 @@ def _allocate_shopee_amounts(
 def _aggregate_product_rows(
     source_items: Sequence[CommittedReportingItem],
 ) -> tuple[ProductSummaryRow, ...]:
-    groups: dict[tuple[str, str, str, Decimal], list[CommittedReportingItem]] = defaultdict(list)
+    groups: dict[tuple[str, str, Decimal], list[CommittedReportingItem]] = defaultdict(list)
+    descriptions: dict[tuple[str, str, Decimal], list[str]] = defaultdict(list)
     for item in source_items:
-        identity = (
-            item.seller_sku,
-            normalize_match_text(item.description),
-            normalize_whitespace(item.variation).casefold(),
-            item.unit_price,
+        identity = resolve_product_summary_identity(
+            nav=item.nav,
+            seller_sku=item.seller_sku,
+            product_name=item.description,
+            variation=item.variation,
+            historical_pm_unit_price=item.unit_price,
         )
-        groups[identity].append(item)
+        key = product_summary_group_key(
+            identity=identity,
+            resolved_sku=item.seller_sku,
+        )
+        groups[key].append(item)
+        if identity.display_description not in descriptions[key]:
+            descriptions[key].append(identity.display_description)
 
     unsorted: list[ProductSummaryRow] = []
-    for members in groups.values():
-        nav_values = {item.nav for item in members}
-        if len(nav_values) != 1:
-            first = members[0]
-            raise CrossPlatformProductSummaryError(
-                "BUSINESS DECISION REQUIRED — CROSS PLATFORM NAV CONFLICT: "
-                f"{first.seller_sku}/{first.description}."
-            )
-        first = members[0]
+    for key, members in groups.items():
         amount = sum((item.amount or Decimal("0.00") for item in members), Decimal("0.00"))
         quantity = sum(item.quantity for item in members)
-        unit_price = first.unit_price
         unsorted.append(
             ProductSummaryRow(
                 number=0,
-                sku_code=first.seller_sku,
-                nav=first.nav,
-                product_name=_description_label(first.description, first.variation),
+                sku_code=key[1],
+                nav=key[0],
+                product_name=" | ".join(descriptions[key]),
                 uom="EA",
-                unit_price=unit_price,
+                unit_price=key[2],
                 quantity=quantity,
                 discount_percent=None,
-                discount_amount=unit_price * quantity - amount,
+                discount_amount=key[2] * quantity - amount,
                 amount=amount,
                 source_item_count=len(members),
             )
@@ -346,12 +354,6 @@ def _aggregate_product_rows(
             start=1,
         )
     )
-
-
-def _description_label(description: str, variation: str) -> str:
-    return description if not variation else f"{description} — {variation}"
-
-
 def _tab_rows(
     tabs: Mapping[str, Sequence[Sequence[Any]]],
     tab: str,
