@@ -573,13 +573,13 @@ def test_user_supplied_completed_adjustment_pdf_corpus():
                 document, pdf_path.name, "post-order-adjustment-corpus"
             )
 
-            assert extracted.invoice_financial_layout == "UNKNOWN_OR_MIXED"
+            assert extracted.invoice_financial_layout == NORMAL_ORDER
             assert extracted.refund_amount is None
             assert extracted.post_order_adjustment_observed is True
             assert extracted.post_order_adjustment_type == ORDER_ADJUSTMENT
             assert extracted.post_order_adjustment_final_amount_consistent is True
-            assert orders == []
-            assert len(reviews) == 1
+            assert len(orders) == 1
+            assert reviews == []
             observed[extracted.order_id] = (
                 str(extracted.post_order_adjustment_date),
                 extracted.income["order_income"],
@@ -595,7 +595,7 @@ def test_user_supplied_completed_adjustment_pdf_corpus():
     reason="The user-supplied post-order adjustment PDF archive is not available.",
 )
 @pytest.mark.parametrize("upload_kind", ("direct", "zip"))
-def test_real_adjustment_upload_keeps_transaction_layout_fail_closed_when_only_marker_exists(
+def test_real_adjustment_upload_keeps_marker_only_layout_normal_and_adjustment_evidence(
     tmp_path, monkeypatch, upload_kind: str
 ):
     monkeypatch.setattr(batch_service, "ARCHIVE_DIR", tmp_path / "archive")
@@ -621,7 +621,8 @@ def test_real_adjustment_upload_keeps_transaction_layout_fail_closed_when_only_m
     )
 
     assert len(archived) == len(expected)
-    assert orders == []
-    assert products == []
-    assert {review["order_id"] for review in reviews} == set(expected)
-    assert all("financial layout is unresolved" in review["reason"].casefold() for review in reviews)
+    assert {order["order_id"] for order in orders} == set(expected)
+    assert all(order["invoice_financial_layout"] == NORMAL_ORDER for order in orders)
+    assert all(order["post_order_adjustment_observed"] is True for order in orders)
+    assert {product["order_id"] for product in products} == set(expected)
+    assert reviews == []

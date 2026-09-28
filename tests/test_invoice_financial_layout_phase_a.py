@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
@@ -16,9 +18,11 @@ from src.invoice_app.parsers.shopee_financial_parser import (
     RETURN_REFUND,
     UNKNOWN_OR_MIXED,
     classify_invoice_financial_layout,
+    classify_invoice_financial_layout_from_signals,
     income_label_presence,
     parse_income_details,
 )
+from src.invoice_app.parsers.shopee_mapper import map_shopee_records
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     _deserialize_item,
@@ -166,6 +170,51 @@ def test_layout_requires_two_independent_refund_signals():
     assert classify_invoice_financial_layout(NORMAL_TEXT) == NORMAL_ORDER
     assert classify_invoice_financial_layout(NORMAL_TEXT + "\nRefund Amount -RM1.00") == UNKNOWN_OR_MIXED
     assert classify_invoice_financial_layout(REFUND_TEXT) == RETURN_REFUND
+
+
+@pytest.mark.parametrize(
+    ("signals", "expected"),
+    (
+        (frozenset(), NORMAL_ORDER),
+        (frozenset({"return_refund_marker"}), NORMAL_ORDER),
+        (frozenset({"refund_amount"}), UNKNOWN_OR_MIXED),
+        (frozenset({"refund_amount", "return_refund_marker"}), RETURN_REFUND),
+        (frozenset({"refund_amount", "reverse_shipping_fee"}), RETURN_REFUND),
+        (frozenset({"refund_amount", "reverse_shipping_fee_sst"}), RETURN_REFUND),
+        (frozenset({"reverse_shipping_fee"}), UNKNOWN_OR_MIXED),
+        (frozenset({"reverse_shipping_fee_sst"}), UNKNOWN_OR_MIXED),
+    ),
+)
+def test_financial_layout_signal_matrix_keeps_marker_only_pending_return_normal(
+    signals: frozenset[str], expected: str
+):
+    assert classify_invoice_financial_layout_from_signals(signals) == expected
+
+
+def test_marker_only_pending_return_revalidates_as_normal_without_layout_review():
+    marker_only_text = NORMAL_TEXT.replace(
+        "\nTest Product\n",
+        "\n1 Return/Refund Test Product\n",
+    )
+    extracted = extract_shopee_data(marker_only_text, "260910M4M573RT.pdf")
+    order, products = map_shopee_records(extracted, "marker-only-revalidation")
+    master = ProductPriceMaster.from_rows([
+        {
+            "seller_sku": "SKU-1",
+            "product_name": "Test Product",
+            "variation_name": "Original",
+            "unit_selling_price": "25.00",
+            "nav_code": "NAV-1",
+        }
+    ])
+
+    assert extracted.invoice_financial_layout == NORMAL_ORDER
+    assert extracted.refund_amount is None
+    assert find_shopee_review_issue(extracted) is None
+    assert order["_financial_layout_signals"] == ("return_refund_marker",)
+    result = revalidate_shopee_invoice(order, products, price_master=master)
+    assert result.invoice_financial_layout == NORMAL_ORDER
+    assert result.error is None
 
 
 def test_valid_refund_layout_is_accepted_without_normal_fee_labels():

@@ -373,6 +373,8 @@ def invoice_financial_layout_signals(
 
 
 def classify_invoice_financial_layout_from_signals(signals: frozenset[str]) -> str:
+    if signals == frozenset({"return_refund_marker"}):
+        return NORMAL_ORDER
     additional_direct_evidence = {
         "return_refund_marker",
         "reverse_shipping_fee",

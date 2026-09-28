@@ -145,7 +145,7 @@ def test_refund_classifier_requires_nonzero_amount_and_second_typed_source_signa
     ) == RETURN_REFUND
     assert classify_invoice_financial_layout(
         "Refund Amount RM0.00", product_items=[marker_item]
-    ) == UNKNOWN_OR_MIXED
+    ) == NORMAL_ORDER
     assert classify_invoice_financial_layout(
         "Refund Amount -RM10.00"
     ) == UNKNOWN_OR_MIXED
