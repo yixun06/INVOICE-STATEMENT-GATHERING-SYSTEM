@@ -3,7 +3,7 @@ name: invoicegather-scope
 description: Long-term system consensus, business rules, data semantics, architecture guardrails, import/commit workflow, validation/reconciliation boundaries, UI/UX direction, and development constraints for InvoiceGather V2. Use whenever developing, debugging, reviewing requirements, architecture, parsers, validation, reconciliation, Streamlit UI, reporting, persistence, database, settlement, shipment, roles, or Excel export. Preserve stable extraction behavior, separate batch validation from pre-commit database validation, preserve source facts, and ask before locking uncertain business rules.
 ---
 
-# InvoiceGather Scope & Development Guardrails — V2.4 (UAT2)
+# InvoiceGather Scope & Development Guardrails — V2.6 (UAT2)
 
 ## 0. How to use this skill
 
@@ -35,6 +35,221 @@ Current Confirmed Requirement > Historical Intermediate Design
 ```
 
 ---
+
+# V2.6 Current Handoff, Cross Reporting, and Project-Memory Protocol
+
+This V2.6 handoff is authoritative over conflicting older V2.5, V2.4, and
+V2.3 wording. Older sections remain useful only for non-conflicting parser,
+source-safety, Statement, and historical rationale.
+
+## Current Platform Invoice workflow — Locked
+
+The visible Platform Invoice workflow is exactly:
+
+```text
+Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
+```
+
+- **Validate** owns extraction correctness, current-batch source preview,
+  source validation, Manual Review, supported source correction and complete
+  revalidation, and re-upload/processing blockers. Manual Review is a hard
+  Validate gate.
+- **Reconcile** owns Product Master/NAV reconciliation and historical Invoice
+  DB classification (`NEW`, `ALREADY_IMPORTED`, `SOURCE_CONFLICT`) plus safe
+  removal from the current candidate batch only. It never deletes historical
+  records.
+- **Review & Commit** owns final readiness, the guarded commit controls, and
+  persistence.
+
+Do not restore or document the rejected four-step workflow.
+
+## Current Cross Platform Summary — Locked
+
+Cross Platform Summary is an implemented, **live read-only database-backed
+report** over committed `Invoice_Orders` and `Invoice_Items`. It is not a
+current-session All Products view, does not have its own reporting table, and
+must make no UAT2/schema write merely to render or export.
+
+The current adapter reads one logical committed snapshot per render:
+
+```text
+committed Invoice_Orders + Invoice_Items
+-> payout eligibility
+-> Platform / Payout Completed Date filters
+-> persisted promotion allocation
+-> canonical Product Summary consolidation
+-> one final rowset
+-> dashboard + table + barcode-table PDF
+```
+
+Current committed reporting scope is Shopee rows with a
+`payout_completed_date`. The Platform / From Date / To Date controls apply to
+that payout date before aggregation; they are not Order Created Date filters.
+Do not claim a new platform adapter merely because it appears in a Platform
+filter option.
+
+The reachable page contains only:
+
+```text
+Cross Platform Summary
+Platform / From Date / To Date
+Dashboard
+Product Summary
+Cross Platform Barcode Table PDF
+```
+
+Do not present legacy All Products, All Manual Review, Missing SKU, Excluded,
+or current-session detail panels as required visible Cross Platform UI. Legacy
+helpers may remain for compatibility but do not define reachable behavior.
+
+### Shared canonical Product Summary policy — Locked
+
+Weekly Billing and Cross Platform Summary share one canonical grouping policy:
+
+```text
+NAV + resolved Seller SKU + persisted historical Product Master Unit Price
+```
+
+Product Name and Variation are deterministic display facts only; they must not
+split a final Product Summary row. Same SKU and Unit Price with a different NAV
+is a separate row. Missing persisted NAV is a blocking reporting error; never
+project it as `N/A`. Do not restore a Cross-specific NAV-conflict rule.
+
+The final table order is:
+
+```text
+No. | SKU Code | NAV | Description | Qty | UOM | Unit Price |
+Original Sales | Disc Amt | Amount
+```
+
+`UOM = EA`. No column is intentionally pinned. Dashboard totals must consume
+the exact final rowset: row count, quantity, Original Sales, signed Disc Amt,
+and Amount. Never `abs()` or clamp Discount Given.
+
+### Cross Platform Barcode Table PDF — Locked
+
+The `Cross Platform Barcode Table PDF` consumes the same final Product Summary
+rowset as the UI. Its columns are No., SKU Code, Barcode, NAV, Description,
+Qty, UOM, Unit Price, Original Sales, Disc given, Amount. Summary metrics are
+Total Product, Total Qty, Total Original Sales, Total Discount Given, Total
+Amount, Barcode Ready, and Barcode Unavailable.
+
+For a valid EAN-13 SKU, render a vector barcode and digits. Otherwise preserve
+the full original SKU and render `Barcode unavailable`. Never suffix-strip,
+truncate to 13 digits, substitute a Product Master barcode, or omit a row.
+Currency is current Phase 1 Shopee MY/RM; do not invent FX semantics.
+
+### Current Weekly Barcode UI — Locked
+
+Weekly Billing retains Excel export and `Export Product Summary Barcode PDF`.
+The old `Export Barcode PDF` control is hidden. Both barcode exports consume
+their applicable final summary rowset and must not reparse, regroup, change
+Excel, or write UAT2 data.
+
+## Mandatory PROJECT_STATUS Sync
+
+`PROJECT_STATUS.md` is InvoiceGather's living derived current-state handoff.
+Every InvoiceGather execution must synchronize it before declaring completion.
+This is an incremental update by default, not permission to repeatedly audit
+the entire repository.
+
+### Default incremental sync
+
+For a normal task, inspect only the current task, Product Owner decision used,
+changed files/relevant implementation, relevant tests, Git diff/status, and
+commit/push/deployment outcome. Update the affected `PROJECT_STATUS.md`
+section and add one concise execution-history entry.
+
+Do not repeatedly re-read unrelated parsers, Statement services, Weekly
+Billing, Cross Platform UI, the whole Scope, or the full test suite unless the
+task affects them. Save model context, not validation quality. Retrieve only
+the relevant portions of `PROJECT_STATUS.md` and this Skill unless a
+contradiction, cross-domain change, major milestone, or explicit Product Owner
+full audit requires broader context.
+
+### Full reconstruction is exceptional
+
+A broad reality audit is allowed only when project status is known/suspected
+stale, code conflicts with documentation, a major milestone affects multiple
+domains, an external merge/branch changes the baseline, the Product Owner asks
+for it, or incremental evidence cannot determine the truth. The 2026-09-28
+documentation reconstruction is such an audit.
+
+### Evidence and authority
+
+`PROJECT_STATUS.md` is derived—not authoritative over current reachable
+implementation, relevant tests, current Git, or newer explicit Product
+Owner-approved Scope. Investigate and update stale Project Status; never alter
+correct code merely to match it.
+
+Codex or ChatGPT recommendations are not Product Owner decisions. Only
+explicit Product Owner approval creates durable business rules. If a required
+meaning is unresolved, state `BUSINESS DECISION REQUIRED` or `SCHEMA DECISION
+REQUIRED`; never promote a recommendation into consensus.
+
+### Required update triggers and Git events
+
+Update Project Status after every durable state change: Product Owner rule,
+implementation or bug fix, UI/architecture/business-rule/persistence change,
+test or regression result that changes understanding, Git checkpoint/push,
+deployment verification, root-cause audit, data repair, or blocker change.
+
+After every successful commit, push, merge/checkpoint, or deployment
+verification, synchronize Project Status in the same execution. Record commit
+hash/message, pushed branch/checkpoint, and deployment status separately. A
+Git operation without Project Status synchronization is incomplete InvoiceGather
+work.
+
+A read-only audit may update Project Status: read-only normally prohibits
+application code, UAT2, schema, and Git mutation, not documentation sync,
+unless the Product Owner expressly forbids all file changes. Record concise
+finding, root cause, verification, unresolved decisions, UAT2 write delta,
+and schema delta. Do not change durable Scope rules without Product Owner
+approval.
+
+### Execution history and Scope boundary
+
+Add one compact `Recent Execution History` entry per execution using:
+
+```text
+Date; Task; State; Outcome; Verification; Git; UAT2 write delta;
+Schema delta; Decision required; Next
+```
+
+Do not paste raw Codex logs. Use Project Status for every execution; update
+this Scope only when durable consensus changes (approved business/workflow,
+architecture, matching/reconciliation, persistence/schema, or long-term
+engineering guardrail). Routine test results and every commit do not belong in
+the Scope.
+
+### Committed-state dependency guardrail
+
+Selective staging can omit a runtime dependency. For shared helpers, renderers,
+factories, adapters, and interfaces, run a committed-state / clean-checkout
+smoke before calling a checkpoint self-contained. Dirty-worktree tests alone
+do not prove deployability.
+
+### Mandatory final-report footer
+
+Every future InvoiceGather Codex final response must end with exactly this
+project-status summary (use `NO` where not applicable):
+
+```text
+PROJECT STATUS SYNC
+- PROJECT_STATUS.md:
+- Canonical status updated:
+- Execution history entry:
+- invoicegather-scope updated: YES / NO
+- Product Owner decisions recorded:
+- Git checkpoint recorded:
+- Deployment status recorded:
+- Remaining unresolved items:
+```
+
+If no durable canonical state changed, state `PROJECT_STATUS.md: UPDATED`,
+`Canonical status updated: NO DURABLE CHANGE`, `Execution history entry:
+ADDED`, and `invoicegather-scope updated: NO`. If Project Status cannot be
+updated, report `PROJECT STATUS SYNC - BLOCKED` and the reason.
 
 # V2.5 Current Handoff and Authoritative Delivery Scope
 
@@ -1955,7 +2170,13 @@ Do not collapse all of them into one generic review state.
 
 ---
 
-# 8. Cross Platform Summary — Confirmed Current Direction
+# 8. Cross Platform Summary — Superseded historical session-view direction
+
+This section describes the former current-session All Products direction. It
+is superseded for reachable Cross Platform reporting by the V2.6 Current Cross
+Platform Summary section above. Retain it only as historical rationale; do not
+use it to restore All Products/All Manual Review panels, Order Created Date
+filters, or session-derived Cross reporting.
 
 Navigation has moved from:
 
@@ -2095,7 +2316,12 @@ All Manual Review remains product-level eligibility review, not a sum of platfor
 
 ---
 
-# 9. Cross Platform Product Summary — Confirmed
+# 9. Cross Platform Product Summary — Superseded historical grouping direction
+
+The Seller-SKU-only identity and related name/variation behavior below are
+superseded by V2.6 shared canonical identity: NAV + resolved Seller SKU +
+persisted historical Product Master Unit Price. Product Name and Variation are
+display facts only for current Weekly and Cross Product Summary rows.
 
 ## 9.1 Product identity
 
@@ -3161,7 +3387,12 @@ removed. The Shopee Dashboard remains reserved for a future DB-backed Live
 Analysis view. Manual Review correction/editing, Add Missing Product, and Apply
 & Revalidate are explicitly deferred to Round 2.
 
-### Manual Review resolution — Round 2
+### Manual Review resolution — Superseded in part by current supported correction/revalidation
+
+The V2.6 Platform Invoice workflow is authoritative for currently supported
+Manual Review correction/revalidation. Treat any conflicting Round 2 wording
+below as historical; it does not remove an implemented, source-visible
+correction path. Unsupported corrections still require a Product Owner decision.
 
 Manual Review corrects supported extraction facts only; it must never invent a
 missing source value, SKU, amount, date, or zero. Use compact issue-driven
@@ -3235,7 +3466,9 @@ Long-term unresolved production reconciliation exceptions may later have dedicat
 
 # 17. Reporting Direction — Database-First Production Model
 
-Current batch Dashboard and Cross Platform Summary are useful prototypes and can remain during development.
+The current session Dashboard remains an import-side view. Cross Platform
+Summary is no longer a current-batch prototype: V2.6 defines it as the
+implemented, read-only committed-data report.
 
 Long-term reporting should query production data rather than current upload state.
 
@@ -3275,9 +3508,11 @@ If asked to implement these before database history exists, clarify whether the 
 
 Excel export remains core functionality.
 
-Do not regress current platform exports or current All Products export without explicit scope.
+Do not regress current platform exports without explicit scope. The legacy All
+Products export is not a current Cross Platform UI contract.
 
-The final Cross Platform Product Summary workbook/button layout is still not fully locked unless a task prompt confirms it.
+The current Cross Platform Barcode Table PDF layout is locked by V2.6. Do not
+infer a new Cross Excel/export button contract without Product Owner approval.
 
 When new reporting exports are implemented after database integration, they should respect the same data semantics as the database-backed view/filter state.
 

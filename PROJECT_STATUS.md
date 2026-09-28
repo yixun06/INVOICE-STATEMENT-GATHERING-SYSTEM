@@ -1,121 +1,96 @@
 # InvoiceGather Project Status
 
-## Current Baseline — 2026-09-13
+## Current Baseline
 
-Branch: `feature/uat2-invoice-persistence-integration`
-HEAD: `d8cef87` — `feat: add v2-aware statement commit`
+- Date: 2026-09-28
+- Branch: `feature/uat2-invoice-persistence-integration`
+- HEAD: `678cd06452d27b1ddf91af5c42b7cfdbe51379aa` — `fix: align cross platform product consolidation`
+- Remote: `origin/feature/uat2-invoice-persistence-integration` resolves to the same HEAD. **PUSHED**.
+- Remote deployment: a prior Weekly UI update was manually verified remotely; later checkpoints, including `678cd06`, are **not recorded as REMOTE DEPLOYMENT VERIFIED**.
+- Worktree: unrelated modified tests and untracked audit/asset/output artifacts were present before this documentation audit and remain untouched.
 
-InvoiceGather is a reconciliation-and-evidence system. Its committed
-Invoice-derived dataset is the operational **Zenxin DB**; it is not dependent
-on a separate ERP or warehouse database for Shopee reconciliation.
+InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived data is the operational Zenxin DB; source PDFs/XLSX remain provenance evidence.
 
-```text
-Shopee / Lazada / ZENXIN source documents
-→ extraction and validation
-→ committed Invoice-derived business data (Zenxin DB)
+## Current System State
 
-Shopee Weekly Statement
-→ reconciliation against Zenxin DB
-→ reviewed, guarded Statement commit
-```
+### Platform Invoice — COMMITTED
 
-## Implemented
+Visible workflow: `1. Select Source -> 2. Upload -> 3. Validate -> 4. Reconcile -> 5. Review & Commit`.
 
-- Deterministic Shopee, Lazada, and ZENXIN Invoice PDF extraction and
-  validation, Product Master enrichment, and Invoice persistence.
-- Shopee Weekly Statement native-XLSX ingestion, source validation, native
-  Summary and detailed financial-component evidence, and Reconciliation V2.
-- The real Streamlit path: Statement upload → review → V2 evaluator → adapter
-  → UI.
-- V2-aware Statement Commit: fresh authoritative reads under the shared commit
-  lock, V2 rerun, reviewed-evidence fingerprint check, one atomic Google write,
-  and deterministic readback verification.
-- Closed original Invoice immutability: a later source change is evidence for a
-  separate adjustment domain, never an automatic rewrite of original Income,
-  Final Amount, or Refund.
+- **Validate** owns source/PDF extraction, current-batch preview, source validation, Manual Review, supported source correction/revalidation, and re-upload/processing blockers. Manual Review is a hard gate.
+- **Reconcile** owns Product Master/NAV validation and historical Invoice DB classification (`NEW`, `ALREADY_IMPORTED`, `SOURCE_CONFLICT`), including current-batch removal only. It never deletes historical rows.
+- **Review & Commit** owns final readiness and guarded Invoice persistence.
 
-## Reconciliation V2 Contract
+`f989a8a` restored the five-step workflow; the rejected four-step description is stale.
 
-- Identity scope is `ITEM`, `GROUP`, or `UNRESOLVED`.
-- `GROUP` is a valid product-group reconciliation without a provable individual
-  Statement-row-to-Invoice-item allocation. It is not an error and must never
-  invent `matched_item_index` or per-item Statement money.
-- Merchandise and final seller settlement are distinct results.
-- Settlement basis is `EXACT`, `EXPLAINED`, or `NONE`; settlement is reconciled
-  when the basis is not `NONE`. `EXPLAINED` is a pass: authoritative Statement
-  components explain the difference within the RM0.02 per-order tolerance.
-- Missing money is not zero; residuals never cancel across orders; Statement
-  adjustments remain separate from original order settlement.
+### Shopee Statement / Reconciliation V2 — COMMITTED
 
-## Golden Acceptance Benchmark
+- Native XLSX ingestion, internal validation, Reconciliation V2, and the Streamlit review path are implemented.
+- Each order carries independent `ITEM`/`GROUP`/`UNRESOLVED` identity, merchandise, allocation, and `EXACT`/`EXPLAINED`/`NONE` settlement evidence. `GROUP` is valid when physical allocation cannot be proven.
+- V2-aware commit fresh-reads Invoice data and Product Master under the shared lock, reruns V2, compares reviewed evidence, performs one logical atomic Google write, and verifies readback. Only `ITEM` may enrich a proven Invoice item; `GROUP` preserves Statement evidence without Item enrichment.
+- Current schema: `Invoice_Orders` 44 columns; `Invoice_Items` 22; `Statement_Data` 40; `Statement_Financial_Components` 17.
 
-The period **2026-08-31 to 2026-09-06** is an acceptance/regression benchmark,
-not production logic:
+The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2026-09-06: 296 orders / 442 SKU rows, 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE`, RM0.00 unexplained residual. It is not cross-week production proof.
 
-| Measure | Accepted result |
-| --- | ---: |
-| Statement orders / SKU source rows | 296 / 442 |
-| Relationship identity evidence | 396 `ITEM`, 46 `GROUP`, 0 `UNRESOLVED` |
-| Order-level scope summaries | 278 `ITEM`, 18 `GROUP` |
-| Merchandise reconciled | 296 / 296 |
-| Invoice and Statement Product Price | RM15,948.77 each |
-| Settlement | 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE` |
-| Unexplained residual | RM0.00 |
-| Separate Adjustment total | RM122.20 |
-| Commit plan | 740 `Statement_Data` rows; 15,965 component rows; 32 native Summary rows |
+### Weekly Billing — COMMITTED
 
-Statement quantity is absent from the authoritative source, so the benchmark
-makes no quantity-match claim.
+- Committed-data Shopee Statement-period report with Product Summary, Financial Summary, and Excel export.
+- It uses the shared final rowset; it does not reparse or write UAT2 data.
+- **Visible:** Excel export and `Export Product Summary Barcode PDF`.
+- **Hidden:** the old `Export Barcode PDF` button (`8d79888`).
+- Barcode output preserves final-row order. Valid EAN-13 renders vector barcode plus digits; an invalid SKU remains verbatim with `Barcode unavailable` and is never guessed or omitted.
 
-## Weekly Billing Golden Controls
+### Cross Platform Summary — COMMITTED, LIVE, READ-ONLY
 
-For the same accepted period, the current Weekly Billing benchmark is:
+- Live report over one snapshot of committed `Invoice_Orders` and `Invoice_Items`; it creates no Cross reporting table and makes no UAT2/schema writes.
+- Current adapter scope is committed payout-eligible Shopee rows. Platform and inclusive **Payout Completed Date** From/To filters apply before allocation and aggregation.
+- One final rowset drives dashboard, ten-column Product Summary table, and `Cross Platform Barcode Table PDF`.
+- Canonical grouping: **NAV + resolved Seller SKU + persisted historical Product Master Unit Price**. Product Name and Variation are display facts only and do not split rows. Same SKU/price with different NAV is separate. Missing NAV blocks the report; never show `N/A`.
+- Visible page: filters, dashboard, Product Summary, Cross Platform Barcode Table PDF. Old All Products, All Manual Review, Missing SKU, Excluded, and session-detail panels are not reachable.
+- Columns: No., SKU Code, NAV, Description, Qty, UOM, Unit Price, Original Sales, Disc Amt, Amount. UOM is `EA`; no columns are intentionally pinned.
+- Dashboard uses that exact final rowset: count, quantity, original sales, signed discount, and amount. Discount is neither absolute-valued nor clamped.
 
-| Measure | Accepted result |
-| --- | ---: |
-| Product Summary rows | 177 |
-| Orders / Invoice Items | 296 / 442 |
-| Quantity | 715 |
-| Standard | RM17,956.30 |
-| Disc Amt | RM2,007.53 |
-| Amount | RM15,948.77 |
-| Staging Data | 177 rows, 715 quantity, 26 columns; columns 18-26 blank |
-| Workbook tab order | `Product Summary`, `Staging Data`, `Financial Summary` |
+## Current Regression Controls
 
-The Standard and Disc Amt controls were updated after the approved Product
-Master price for Order `2609045MDX0J9G` / NAV `3000573` became RM39.90. The
-Amount control is unchanged; this benchmark records approved persisted source
-facts and is not a pricing or Product Summary calculation rule.
+These Product Owner-accepted UAT2 comparisons are time-specific regression facts, not universal formulas. The earlier mismatch was a **consolidation-grain difference only**, not a source-population, payout-membership, promotion-allocation, or financial-arithmetic defect.
 
-## Persistence
+| Payout period | Weekly / Cross rows | Source items | Qty | Original Sales | Discount | Amount |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2026-08-03 to 2026-08-09 | 209 / 209 | 765 / 765 | 1,141 | RM30,482.70 | RM3,415.60 | RM27,067.10 |
+| 2026-08-10 to 2026-08-16 | 234 / 234 | 1,038 / 1,038 | 1,575 | RM37,242.70 | RM1,733.39 | RM35,509.31 |
+| 2026-08-31 to 2026-09-06 | 170 / 170 | 442 / 442 | 715 | RM17,848.10 | RM1,899.33 | RM15,948.77 |
 
-Approved schema widths remain unchanged: `Invoice_Orders` 44,
-`Invoice_Items` 22, `Statement_Data` 40,
-`Statement_Financial_Components` 17, and `Statement_Summary` 14 columns.
-`Statement_Summary` preserves native Summary label, hierarchy reference, money,
-and currency without reconstructing financial semantics. The Golden Statement
-write is one atomic `values.batchUpdate` request (expected serialized size:
-5,453,516 bytes, about 5.20 MiB), followed by readback. `ITEM` enriches only
-the proven item; `GROUP` persists Statement evidence without Invoice-item
-enrichment.
+Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_compile`, and `git diff --check` passed. UAT2 write delta and schema-migration delta were both zero. Current source tests protect the committed reader, payout-date filtering, missing-NAV block, shared identity, table/PDF rowset, and signed dashboard discount.
+
+## Persistence / Schema State
+
+- Cross/Weekly reporting work: **UAT2 write delta 0; schema migration delta 0**.
+- Do not create a Cross reporting persistence table or mutate committed UAT2 data without Product Owner approval.
+- The Statement writer remains a compact one-request logical atomic `values.batchUpdate` followed by readback; financial-component evidence must not be removed merely for storage convenience.
+
+## Important Git Checkpoints
+
+- `f989a8a` — restored Invoice validation and reconciliation workflow.
+- `451ce09` — introduced the database-backed Cross Platform Product Summary.
+- `d696ed5` — restored the shared barcode-table renderer dependency.
+- `8d79888` — hid the legacy Weekly Barcode PDF button.
+- `678cd06` — aligned Cross/Weekly canonical consolidation; pushed and current HEAD.
 
 ## Current Priorities
 
-1. Validate real persistence/readback with authoritative UAT data.
-2. Finance-test the committed-period Weekly Billing Product Summary MVP.
-3. Define the separate Statement-period Financial Summary, then database-backed Analysis.
-4. Consider storage optimization / PostgreSQL later; do not prematurely remove
-   financial evidence or introduce CN/accounting normalization.
+1. Preserve and verify real UAT2 persistence/readback and guarded Statement behavior.
+2. Finance-test committed-period Weekly Billing outputs.
+3. Inspect real source/data contracts before future platform work; reuse shared Product Summary policy only where evidence supports it. Shopee SG precedes Lazada where the confirmed priority requires it.
+4. Keep Billing readiness, broader Analysis, storage optimization, and PostgreSQL separately scoped.
 
-## Deferred / Guardrails
+## Approved / Pending
 
-- Weekly Billing Product Summary is implemented from committed Statement Order
-  population and persisted Invoice Items. UOM and Dis% remain intentionally
-  blank; the separate Statement-period Financial Summary is deferred.
-- Do not treat Statement release as bank receipt or conclude Shopee underpayment
-  without an unexplained, governed residual.
-- Do not fabricate GROUP allocation, fuzzy-match products, infer missing money,
-  widen tolerance, or silently overwrite source facts.
-- Do not change business rules, schemas, or source interpretation merely to
-  make a reconciliation green. Report the exact evidence and classify the
-  issue instead.
+- **APPROVED / PENDING IMPLEMENTATION:** billing readiness gate and later Billing Summary/Analysis layers beyond current committed-data reports.
+- **DEFERRED:** Cross adapters beyond committed Shopee scope; Product ID-to-Seller-SKU mapping; bank receipt reconciliation; final underpayment classification; revised Statement replacement/versioning; PostgreSQL/storage redesign.
+- **UNRESOLVED:** real-source contracts and Product Owner approval are required before new platform mappings, financial allocation, or schema changes.
+
+## Recent Execution History
+
+- Date: 2026-09-26; Task: Cross/Weekly canonical consolidation; State: COMMITTED / PUSHED; Outcome: shared `NAV + resolved SKU + historical PM Unit Price` grouping; Verification: 82 focused tests plus staged-import/compile/diff checks; Git: `678cd06`; UAT2 write delta: 0; Schema delta: 0.
+- Date: 2026-09-26; Task: Weekly legacy barcode control; State: COMMITTED / PUSHED; Outcome: old `Export Barcode PDF` hidden while Product Summary Barcode PDF remains; Git: `8d79888`; UAT2 write delta: 0; Schema delta: 0.
+- Date: 2026-09-28; Task: documentation reality reconstruction; State: IMPLEMENTED / UNCOMMITTED; Outcome: rebuilt this handoff from reachable code, focused tests, Git, and approved scope; Verification: documentation-only audit and targeted source/test review; Git: no stage/commit/push; UAT2 write delta: 0; Schema delta: 0; Next: Product Owner review.
