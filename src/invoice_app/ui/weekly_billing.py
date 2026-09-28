@@ -16,6 +16,13 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
 from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
+from src.invoice_app.services.market_context import (
+    MarketConfigurationUnavailable,
+    MarketContext,
+    MarketKey,
+    SHOPEE_MY,
+    resolve_market_context,
+)
 from src.invoice_app.services.product_master_source import (
     ProductMasterSourceError,
     load_configured_product_price_master,
@@ -53,13 +60,18 @@ PRODUCT_SUMMARY_COLUMNS = (
 
 
 @st.cache_data(ttl=45, show_spinner=False)
-def _load_weekly_billing_dataset() -> WeeklyBillingDataset:
-    settings = configured_uat2_data_settings()
+def _load_weekly_billing_dataset(
+    context: MarketContext | MarketKey | str = SHOPEE_MY,
+) -> WeeklyBillingDataset:
+    """Load exactly one market provider; unsupported SG never returns MY data."""
+    settings = configured_uat2_data_settings(resolve_market_context(context))
     return settings.create_weekly_billing_reader().load_dataset()
 
 
 def render_weekly_billing(
     dataset: WeeklyBillingDataset | None = None,
+    *,
+    market_context: MarketContext | MarketKey | str = SHOPEE_MY,
 ) -> None:
     """Render one committed-period report for preview and downloadable Excel."""
 
@@ -68,8 +80,12 @@ def render_weekly_billing(
         "Product and Financial Summary from one committed Shopee Statement period."
     )
     try:
-        source = dataset if dataset is not None else _load_weekly_billing_dataset()
-    except (HistoricalInvoiceStorageError, WeeklyBillingError) as error:
+        source = (
+            dataset
+            if dataset is not None
+            else _load_weekly_billing_dataset(resolve_market_context(market_context))
+        )
+    except (HistoricalInvoiceStorageError, MarketConfigurationUnavailable, WeeklyBillingError) as error:
         st.error(f"Weekly Billing is unavailable: {error}")
         return
     if not source.periods:

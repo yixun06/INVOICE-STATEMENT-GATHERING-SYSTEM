@@ -134,13 +134,22 @@ class _WriterSnapshot:
 
 
 class GoogleSheetsStatementWriter:
-    """Resolve exact persisted rows and submit all Statement mutations together."""
+    """Resolve exact persisted rows for one locked market and commit them together."""
 
-    def __init__(self, *, spreadsheet_id: str, gateway: GoogleStatementGateway) -> None:
+    def __init__(
+        self,
+        *,
+        spreadsheet_id: str,
+        gateway: GoogleStatementGateway,
+        persisted_platform: str = "Shopee",
+    ) -> None:
         if not spreadsheet_id.strip():
             raise ValueError("spreadsheet_id must not be blank.")
+        if not persisted_platform.strip():
+            raise ValueError("persisted_platform must not be blank.")
         self._spreadsheet_id = spreadsheet_id.strip()
         self._gateway = gateway
+        self._persisted_platform = persisted_platform.strip()
 
     def reload_commit_state(self) -> StatementCommitState:
         """Freshly read all authoritative tabs for guarded preflight."""
@@ -148,6 +157,7 @@ class GoogleSheetsStatementWriter:
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Build one complete batch and verify the deterministic final state."""
+        _validate_plan_market_identity(plan, self._persisted_platform)
         before = self._read_snapshot()
         reasons = validate_current_statement_state(
             plan, before.commit_state, sku_matching_is_current=True
@@ -180,6 +190,10 @@ class GoogleSheetsStatementWriter:
         self, event: CanonicalOrderAdjustment
     ) -> None:
         """Write only the approved optional PDF evidence fields on one event."""
+        if event.platform != self._persisted_platform:
+            raise StatementCommitBlocked(
+                "Order Adjustment platform does not match the locked writer market."
+            )
         before = self._read_snapshot()
         target = _order_adjustment_target(before, event)
         start = ORDER_ADJUSTMENTS_HEADERS.index("evidence_status")
@@ -273,13 +287,13 @@ class GoogleSheetsStatementWriter:
             orders={
                 order_id: target.order
                 for (platform, order_id), target in orders.items()
-                if platform == "Shopee"
+                if platform == self._persisted_platform
             },
             committed_statements=_committed_statement_references(persisted_statement_rows),
             items=tuple(
                 target.item
                 for (platform, _, _), target in items.items()
-                if platform == "Shopee"
+                if platform == self._persisted_platform
             ),
         )
         return _WriterSnapshot(
@@ -348,7 +362,7 @@ class GoogleSheetsStatementWriter:
             )
         seen_orders: set[tuple[str, str]] = set()
         for update in plan.invoice_order_updates:
-            key = ("Shopee", _text(update.order_id))
+            key = (self._persisted_platform, _text(update.order_id))
             if key in seen_orders:
                 raise StatementCommitBlocked(f"Statement plan duplicates Invoice_Orders target {key!r}.")
             seen_orders.add(key)
@@ -361,7 +375,7 @@ class GoogleSheetsStatementWriter:
 
         seen_items: set[tuple[str, str, int]] = set()
         for update in plan.invoice_item_updates:
-            key = ("Shopee", _text(update.order_id), update.item_index)
+            key = (self._persisted_platform, _text(update.order_id), update.item_index)
             if key in seen_items:
                 raise StatementCommitBlocked(f"Statement plan duplicates Invoice_Items target {key!r}.")
             seen_items.add(key)
@@ -371,7 +385,7 @@ class GoogleSheetsStatementWriter:
             data.append(
                 _item_update_value_range(INVOICE_ITEMS_TAB, target, update)
             )
-        _validate_group_protection(plan, snapshot, seen_items)
+        _validate_group_protection(plan, snapshot, seen_items, self._persisted_platform)
         return tuple(data)
 
     def _verify_after_write(
@@ -381,7 +395,7 @@ class GoogleSheetsStatementWriter:
             after = self._read_snapshot()
         except Exception:
             return StatementWriteVerification.MIXED
-        return _classify_write_result(plan, before, after)
+        return _classify_write_result(plan, before, after, self._persisted_platform)
 
 
 def write_google_statement_plan_if_current(
@@ -777,10 +791,11 @@ def _validate_group_protection(
     plan: StatementCommitPlan,
     snapshot: _WriterSnapshot,
     item_update_keys: set[tuple[str, str, int]],
+    persisted_platform: str,
 ) -> None:
     protected_keys: set[tuple[str, str, int]] = set()
     for protected in plan.protected_invoice_items:
-        key = ("Shopee", _text(protected.order_id), protected.item_index)
+        key = (persisted_platform, _text(protected.order_id), protected.item_index)
         if key in protected_keys:
             raise StatementCommitBlocked(
                 f"Statement plan duplicates GROUP protected target {key!r}."
@@ -895,6 +910,7 @@ def _classify_write_result(
     plan: StatementCommitPlan,
     before: _WriterSnapshot,
     after: _WriterSnapshot,
+    persisted_platform: str,
 ) -> StatementWriteVerification:
     expected_rows = Counter(plan.rows)
     after_rows = Counter(
@@ -940,7 +956,7 @@ def _classify_write_result(
         after_adjustments[row] == 0 for row in expected_adjustments
     )
 
-    expected_targets = _expected_target_values(plan)
+    expected_targets = _expected_target_values(plan, persisted_platform)
     all_enrichments = True
     no_enrichments = True
     for key, field_values in expected_targets.items():
@@ -949,7 +965,9 @@ def _classify_write_result(
         expected_values = tuple(value for _, value in field_values)
         all_enrichments = all_enrichments and after_values == expected_values
         no_enrichments = no_enrichments and after_values == before_values
-    protected_unchanged = _protected_items_unchanged(plan, before, after)
+    protected_unchanged = _protected_items_unchanged(
+        plan, before, after, persisted_platform
+    )
     if (
         all_statements
         and all_components
@@ -975,9 +993,10 @@ def _protected_items_unchanged(
     plan: StatementCommitPlan,
     before: _WriterSnapshot,
     after: _WriterSnapshot,
+    persisted_platform: str,
 ) -> bool:
     for protected in plan.protected_invoice_items:
-        key = ("Shopee", _text(protected.order_id), protected.item_index)
+        key = (persisted_platform, _text(protected.order_id), protected.item_index)
         before_target = before.items.get(key)
         after_target = after.items.get(key)
         if before_target is None or after_target is None:
@@ -993,21 +1012,59 @@ def _protected_items_unchanged(
 
 def _expected_target_values(
     plan: StatementCommitPlan,
+    persisted_platform: str,
 ) -> Mapping[tuple[str, str, str, int | None], tuple[tuple[str, str], ...]]:
     expected: dict[tuple[str, str, str, int | None], tuple[tuple[str, str], ...]] = {}
     for update in plan.invoice_order_updates:
-        expected[(INVOICE_ORDERS_TAB, "Shopee", update.order_id, None)] = (
+        expected[(INVOICE_ORDERS_TAB, persisted_platform, update.order_id, None)] = (
             ("payment_status", _serialize(update.payment_status)),
             ("payout_completed_date", _serialize(update.payout_completed_date)),
             ("difference", _serialize(update.difference)),
         )
     for update in plan.invoice_item_updates:
-        expected[(INVOICE_ITEMS_TAB, "Shopee", update.order_id, update.item_index)] = (
+        expected[(INVOICE_ITEMS_TAB, persisted_platform, update.order_id, update.item_index)] = (
             ("statement_product_price", _serialize(update.statement_product_price)),
             ("statement_refund_amount", _serialize(update.statement_refund_amount)),
             ("statement_net_selling_amount", _serialize(update.statement_net_selling_amount)),
         )
     return expected
+
+
+def _validate_plan_market_identity(
+    plan: StatementCommitPlan, persisted_platform: str
+) -> None:
+    """Reject a plan whose serialized facts belong to another market.
+
+    This check executes before the writer reads or writes the selected
+    spreadsheet. It prevents a future SG writer from accepting the current
+    MY-only Statement planner until an approved SG planner exists.
+    """
+
+    for row in plan.rows:
+        if len(row) <= STATEMENT_DATA_HEADERS.index("platform") or row[
+            STATEMENT_DATA_HEADERS.index("platform")
+        ] != persisted_platform:
+            raise StatementCommitBlocked(
+                "Statement plan platform does not match the locked writer market."
+            )
+    for row in plan.financial_component_rows:
+        if len(row) <= STATEMENT_FINANCIAL_COMPONENT_HEADERS.index("platform") or row[
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS.index("platform")
+        ] != persisted_platform:
+            raise StatementCommitBlocked(
+                "Statement financial-component platform does not match the locked writer market."
+            )
+    for row in plan.summary_rows:
+        if len(row) <= STATEMENT_SUMMARY_HEADERS.index("platform") or row[
+            STATEMENT_SUMMARY_HEADERS.index("platform")
+        ] != persisted_platform:
+            raise StatementCommitBlocked(
+                "Statement summary platform does not match the locked writer market."
+            )
+    if any(event.platform != persisted_platform for event in plan.order_adjustments):
+        raise StatementCommitBlocked(
+            "Statement adjustment platform does not match the locked writer market."
+        )
 
 
 def _target_values(

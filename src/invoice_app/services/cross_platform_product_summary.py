@@ -25,6 +25,7 @@ from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
     resolve_product_summary_identity,
 )
+from src.invoice_app.services.market_context import SHOPEE_MY
 from src.invoice_app.utils.normalize import (
     normalize_sku_text,
 )
@@ -32,6 +33,10 @@ from src.invoice_app.utils.normalize import (
 
 CENT = Decimal("0.01")
 PLATFORM_OPTIONS = ("All", "Shopee", "Lazada", "ZENXIN")
+# Cross Platform Summary is a MY/local reporting domain.  This allowlist is a
+# data-service boundary, so a future "Shopee SG" persisted row cannot enter the
+# snapshot merely because a UI option is changed.
+CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS = frozenset({SHOPEE_MY.persisted_platform})
 
 
 class CrossPlatformProductSummaryError(RuntimeError):
@@ -149,7 +154,7 @@ def build_cross_platform_reporting_snapshot(
                 f"{item.platform}/{item.order_id}/{item.item_index}."
             )
         item_identities.add(identity)
-        if item.platform != "Shopee":
+        if item.platform not in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS:
             continue
         order_identity = (item.platform, item.order_id)
         if order_identity not in orders:

@@ -4,7 +4,7 @@
 
 - Date: 2026-09-28
 - Branch: `feature/uat2-invoice-persistence-integration`
-- HEAD: `678cd06452d27b1ddf91af5c42b7cfdbe51379aa` — `fix: align cross platform product consolidation`
+- HEAD: `69b230299ab79ef39abe6f80fb283ce89a8dc3f6` — `docs: sync project status and memory protocol`
 - Remote: `origin/feature/uat2-invoice-persistence-integration` resolves to the same HEAD. **PUSHED**.
 - Remote deployment: a prior Weekly UI update was manually verified remotely; later checkpoints, including `678cd06`, are **not recorded as REMOTE DEPLOYMENT VERIFIED**.
 - Worktree: unrelated modified tests and untracked audit/asset/output artifacts were present before this documentation audit and remain untouched.
@@ -28,7 +28,7 @@ Visible workflow: `1. Select Source -> 2. Upload -> 3. Validate -> 4. Reconcile 
 - Native XLSX ingestion, internal validation, Reconciliation V2, and the Streamlit review path are implemented.
 - Each order carries independent `ITEM`/`GROUP`/`UNRESOLVED` identity, merchandise, allocation, and `EXACT`/`EXPLAINED`/`NONE` settlement evidence. `GROUP` is valid when physical allocation cannot be proven.
 - V2-aware commit fresh-reads Invoice data and Product Master under the shared lock, reruns V2, compares reviewed evidence, performs one logical atomic Google write, and verifies readback. Only `ITEM` may enrich a proven Invoice item; `GROUP` preserves Statement evidence without Item enrichment.
-- Current schema: `Invoice_Orders` 44 columns; `Invoice_Items` 22; `Statement_Data` 40; `Statement_Financial_Components` 17.
+- Current schema: `Invoice_Orders` 44 columns; `Invoice_Items` 23; `Statement_Data` 40; `Statement_Financial_Components` 17; `Statement_Summary` 14.
 
 The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2026-09-06: 296 orders / 442 SKU rows, 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE`, RM0.00 unexplained residual. It is not cross-week production proof.
 
@@ -49,6 +49,30 @@ The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2
 - Visible page: filters, dashboard, Product Summary, Cross Platform Barcode Table PDF. Old All Products, All Manual Review, Missing SKU, Excluded, and session-detail panels are not reachable.
 - Columns: No., SKU Code, NAV, Description, Qty, UOM, Unit Price, Original Sales, Disc Amt, Amount. UOM is `EA`; no columns are intentionally pinned.
 - Dashboard uses that exact final rowset: count, quantity, original sales, signed discount, and amount. Discount is neither absolute-valued nor clamped.
+
+### Shopee SG — Architecture Foundation IMPLEMENTED / READY FOR CHECKPOINT; Source Support APPROVED / PENDING REAL SOURCE + CONFIGURATION
+
+- One InvoiceGather application will use shared workflow/reporting engines plus market-specific configuration, adapters, providers, and data sources. Data Import will gain an internal market/platform selector while retaining the five-step workflow.
+- Existing persisted `platform = "Shopee"` remains Shopee MY; no rename migration is approved. New SG persistence uses a distinct `"Shopee SG"` identity.
+- **SG database resource: PROVISIONED.** `InvoiceGather SG Data` exists, but the application is not yet connected to it.
+- **SG core Phase 1 schema: READY.** `Invoice_Orders` has 44 columns; `Invoice_Items` 23; `Statement_Data` 40; `Statement_Financial_Components` 17; and `Statement_Summary` 14.
+- **SG application configuration/wiring: PENDING.** No application path is configured to use the provisioned database.
+- **SG Product Master tab/configuration: PENDING.** SG must fail closed and must never fall back to MY pricing/NAV.
+- **SG real Invoice/Statement source support: PENDING REAL SAMPLE.** MY parser/Statement engines are only provisionally reusable until real SG samples are reviewed.
+- Market context must bind repository/writer destination, commit lock, Statement population, Product Master source, currency, and reporting provider. MY↔SG reads, reconciliation, commits, and fallback are prohibited.
+- Product Master infrastructure is shared but tabs/data scopes are separate. SG Unit Price and NAV must come from the same resolved SG Product Master row.
+- Currency is MYR for MY and SGD for SG. No FX conversion, cross-currency aggregation, or combined financial totals are approved.
+- Shopee SG is permanently excluded from the existing Cross Platform Summary at service/data eligibility, including its filter, population, totals, table, and PDF.
+- SG Product Summary reuses `NAV + resolved Seller SKU + persisted historical Product Master Unit Price`; Product Name/Variation remain display-only, missing NAV blocks, and different NAV values remain separate.
+- Weekly Billing will evolve to a shared shell with market-specific providers for committed data, Statement population, currency, Product Master, Product Summary, and exports.
+- Current code audit found reusable platform-neutral repository/schema and Product Summary primitives, but MY coupling remains in parser output, historical bundle creation, Statement reconciliation/writer keys, Weekly Billing filters/UI currency, one UAT2 settings object, one Product Master source selection, and unscoped Streamlit workflow state.
+- **Blockers:** approved real SG Invoice and Statement samples; SG Product Listing; approved SG Product Master tab/configuration; application configuration/wiring.
+- **Next action after Product Owner review:** introduce a fail-closed immutable market registry/context and isolation tests before wiring any SG UI or parser path. Preserve MY behavior and data unchanged.
+- **Phase 1 foundation implemented (uncommitted):** immutable Shopee MY/SG market contexts provide persisted platform identity, MYR/SGD display metadata, Cross eligibility, state namespace, and capability availability. MY remains `"Shopee"`; SG is `"Shopee SG"` and permanently Cross-ineligible.
+- UAT2 and Product Master configuration factories now accept an explicit market context. MY no-argument callers retain the existing configuration path. SG requires an explicit market-specific configuration block and otherwise raises a clear unavailable error; it cannot inherit MY spreadsheet, credentials, Product Master, or cache identity.
+- Statement writer now binds spreadsheet and persisted-platform targets together, rejects a plan/adjustment for another platform before I/O, and continues to use `"Shopee"` for MY. SG Statement commit and Weekly Billing remain deliberately unavailable even if a future SG spreadsheet is configured.
+- Weekly Billing has a context/provider seam with the current MY path as its default; no SG selector or fake SG dataset exists. Cross source eligibility is now an explicit MY persisted-platform allowlist, not UI-only behavior.
+- Verification: 132 focused tests passed across the market foundation, existing UAT2 repository, Product Master, Statement writer, Cross Platform, Weekly Billing service/UI; `py_compile` passed. UAT2 writes 0; schema delta 0.
 
 ## Current Regression Controls
 
@@ -75,6 +99,7 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - `d696ed5` — restored the shared barcode-table renderer dependency.
 - `8d79888` — hid the legacy Weekly Barcode PDF button.
 - `678cd06` — aligned Cross/Weekly canonical consolidation; pushed and current HEAD.
+- `69b2302` — synchronized project status and durable memory protocol; committed and pushed.
 
 ## Current Priorities
 
@@ -88,9 +113,12 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **APPROVED / PENDING IMPLEMENTATION:** billing readiness gate and later Billing Summary/Analysis layers beyond current committed-data reports.
 - **DEFERRED:** Cross adapters beyond committed Shopee scope; Product ID-to-Seller-SKU mapping; bank receipt reconciliation; final underpayment classification; revised Statement replacement/versioning; PostgreSQL/storage redesign.
 - **UNRESOLVED:** real-source contracts and Product Owner approval are required before new platform mappings, financial allocation, or schema changes.
+- **SHOPEE SG PENDING EVIDENCE/CONFIGURATION:** the database resource is provisioned and the core Phase 1 schema is ready. Real SG Invoice/Statement samples, SG Product Listing, SG Product Master tab/configuration, and application wiring remain pending; the application is not connected to the SG spreadsheet.
 
 ## Recent Execution History
 
 - Date: 2026-09-26; Task: Cross/Weekly canonical consolidation; State: COMMITTED / PUSHED; Outcome: shared `NAV + resolved SKU + historical PM Unit Price` grouping; Verification: 82 focused tests plus staged-import/compile/diff checks; Git: `678cd06`; UAT2 write delta: 0; Schema delta: 0.
 - Date: 2026-09-26; Task: Weekly legacy barcode control; State: COMMITTED / PUSHED; Outcome: old `Export Barcode PDF` hidden while Product Summary Barcode PDF remains; Git: `8d79888`; UAT2 write delta: 0; Schema delta: 0.
-- Date: 2026-09-28; Task: documentation reality reconstruction; State: IMPLEMENTED / UNCOMMITTED; Outcome: rebuilt this handoff from reachable code, focused tests, Git, and approved scope; Verification: documentation-only audit and targeted source/test review; Git: no stage/commit/push; UAT2 write delta: 0; Schema delta: 0; Next: Product Owner review.
+- Date: 2026-09-28; Task: documentation reality reconstruction; State: COMMITTED / PUSHED; Outcome: rebuilt this handoff from reachable code, focused tests, Git, and approved scope; Verification: 15 focused regression tests, staged-diff check, and push confirmation; Git: `69b2302` (`docs: sync project status and memory protocol`); UAT2 write delta: 0; Schema delta: 0; Next: no automatic status-only follow-up commit.
+- Date: 2026-09-28; Task: Shopee SG architecture/data-contract audit; State: APPROVED / PENDING IMPLEMENTATION; Outcome: recorded one-app market-adapter direction, hard MY/SG persistence/Product Master/currency/session/report isolation, permanent Cross exclusion, and reusable shared boundaries; Verification: targeted current-code inspection and documentation diff checks only; Git operations: 0; application/test/data/schema changes: 0; Blockers: real SG Invoice/Statement/Product Listing, SG Product Master configuration, and application wiring; Next: Product Owner review, then market-context foundation and isolation tests.
+- Date: 2026-09-28; Task: Shopee SG Phase 1 market isolation foundation; State: IMPLEMENTED / UNCOMMITTED; Outcome: added immutable MY/SG market contexts, fail-closed market-bound UAT2/Product Master factories, market-bound Statement writer keys, scoped-state helpers, explicit Cross MY allowlist, and a Weekly provider seam; Verification: 132 focused tests and `py_compile` passed; Git: no stage/commit/push; UAT2 write delta: 0; Schema delta: 0; Decision required: none; Next: Product Owner review and real SG source/configuration before parser/UI/commit enablement.

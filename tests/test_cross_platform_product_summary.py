@@ -330,3 +330,43 @@ def test_cross_persisted_item_missing_nav_is_blocking():
         match=r"SHP-MISSING-NAV/0: missing persisted NAV",
     ):
         build_cross_platform_reporting_snapshot(tabs)
+
+
+def test_shopee_sg_persisted_rows_are_excluded_at_cross_service_boundary():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    tabs = {
+        INVOICE_ORDERS_TAB: [
+            list(INVOICE_ORDERS_HEADERS),
+            _sheet_row(
+                INVOICE_ORDERS_HEADERS,
+                platform="Shopee SG",
+                order_id="SG-PAYOUT",
+                payout_completed_date="2026-08-08",
+                first_imported_at="2026-08-08T10:00:00+00:00",
+            ),
+        ],
+        INVOICE_ITEMS_TAB: [
+            list(INVOICE_ITEMS_HEADERS),
+            _sheet_row(
+                INVOICE_ITEMS_HEADERS,
+                platform="Shopee SG",
+                order_id="SG-PAYOUT",
+                item_index="0",
+                seller_sku="SG-SKU",
+                nav="SG-NAV",
+                product_name="SG-only item",
+                quantity="1",
+                unit_price="10.00",
+                line_subtotal="10.00",
+            ),
+        ],
+    }
+
+    snapshot = build_cross_platform_reporting_snapshot(tabs)
+
+    assert CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS == frozenset({"Shopee"})
+    assert snapshot.eligible_items == ()

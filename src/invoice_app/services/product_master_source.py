@@ -8,6 +8,12 @@ import tomllib
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from ..config import SECRETS_PATH, SHOPEE_PRODUCT_MASTER_PATH
+from .market_context import (
+    MarketConfigurationUnavailable,
+    MarketContext,
+    MarketKey,
+    resolve_market_context,
+)
 from ..utils.normalize import normalize_sku_text, normalize_whitespace
 from .product_price_master import (
     ProductPriceMaster,
@@ -194,25 +200,46 @@ class ProductMasterSourceSettings:
         )
 
 
-def configured_product_master_source_settings() -> ProductMasterSourceSettings:
+def configured_product_master_source_settings(
+    context: MarketContext | MarketKey | str | None = None,
+) -> ProductMasterSourceSettings:
     """Read source settings from environment, then Streamlit secrets when available."""
-    values: dict[str, str] = {
-        "source": os.getenv("INV_PRODUCT_MASTER_SOURCE", "local_excel"),
-        "local_excel_path": os.getenv(
-            "INV_SHOPEE_PRODUCT_MASTER_PATH", str(SHOPEE_PRODUCT_MASTER_PATH)
-        ),
-        "google_credentials_path": os.getenv("INV_GOOGLE_CREDENTIALS_PATH", ""),
-        "google_spreadsheet_id": os.getenv("INV_GOOGLE_SPREADSHEET_ID", ""),
-        "google_worksheet_name": os.getenv("INV_GOOGLE_WORKSHEET_NAME", ""),
-    }
+    resolved = resolve_market_context(context)
+    if resolved.key is MarketKey.SHOPEE_MY:
+        values: dict[str, str] = {
+            "source": os.getenv("INV_PRODUCT_MASTER_SOURCE", "local_excel"),
+            "local_excel_path": os.getenv(
+                "INV_SHOPEE_PRODUCT_MASTER_PATH", str(SHOPEE_PRODUCT_MASTER_PATH)
+            ),
+            "google_credentials_path": os.getenv("INV_GOOGLE_CREDENTIALS_PATH", ""),
+            "google_spreadsheet_id": os.getenv("INV_GOOGLE_SPREADSHEET_ID", ""),
+            "google_worksheet_name": os.getenv("INV_GOOGLE_WORKSHEET_NAME", ""),
+        }
+        source_config = _configured_product_master_secret_mapping()
+    else:
+        values = {
+            "source": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", ""),
+            "local_excel_path": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_PATH", ""),
+            "google_credentials_path": os.getenv("INV_SHOPEE_SG_GOOGLE_CREDENTIALS_PATH", ""),
+            "google_spreadsheet_id": os.getenv("INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID", ""),
+            "google_worksheet_name": os.getenv("INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME", ""),
+        }
+        source_config = _configured_market_product_master_secret_mapping(resolved)
     google_service_account: GoogleServiceAccountInfo | None = None
-    source_config = _configured_product_master_secret_mapping()
     for key in values:
         if source_config.get(key):
             values[key] = str(source_config[key])
     configured_service_account = source_config.get("google_service_account")
     if isinstance(configured_service_account, Mapping) and configured_service_account:
         google_service_account = dict(configured_service_account)
+    if resolved.key is not MarketKey.SHOPEE_MY and not values["source"].strip():
+        raise MarketConfigurationUnavailable(
+            f"{resolved.display_name} Product Master is unavailable: no market-specific source is configured."
+        )
+    if resolved.key is not MarketKey.SHOPEE_MY and values["source"].strip().casefold() != "google_sheets":
+        raise MarketConfigurationUnavailable(
+            f"{resolved.display_name} Product Master must use its approved Google Sheets tab configuration."
+        )
     return ProductMasterSourceSettings(
         source=values["source"].strip().casefold(),
         local_excel_path=Path(values["local_excel_path"]),
@@ -250,15 +277,52 @@ def _configured_product_master_secret_mapping() -> Mapping[str, Any]:
     return source_config if isinstance(source_config, Mapping) else {}
 
 
-def load_configured_product_price_master() -> tuple[ProductPriceMaster, str]:
-    settings = configured_product_master_source_settings()
-    return _load_configured_product_price_master(settings)
+def _configured_market_product_master_secret_mapping(
+    context: MarketContext,
+) -> Mapping[str, Any]:
+    """Read only the selected market's Product Master block."""
+
+    try:
+        if SECRETS_PATH.is_file():
+            with SECRETS_PATH.open("rb") as handle:
+                secrets = tomllib.load(handle)
+        else:
+            import streamlit as st
+
+            secrets = st.secrets
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ProductMasterSourceError(
+            f"Market Product Master configuration could not be read: {error}"
+        ) from error
+    except Exception:
+        return {}
+    markets = secrets.get("markets", {}) if isinstance(secrets, Mapping) else {}
+    market = markets.get(context.key.value, {}) if isinstance(markets, Mapping) else {}
+    configured = market.get("product_master", {}) if isinstance(market, Mapping) else {}
+    return configured if isinstance(configured, Mapping) else {}
+
+
+def load_configured_product_price_master(
+    context: MarketContext | MarketKey | str | None = None,
+) -> tuple[ProductPriceMaster, str]:
+    resolved = resolve_market_context(context)
+    # Retain the no-argument MY seam used by existing UI/tests while explicit
+    # market callers always receive a market-bound configuration lookup.
+    settings = (
+        configured_product_master_source_settings()
+        if context is None
+        else configured_product_master_source_settings(resolved)
+    )
+    return _load_configured_product_price_master(resolved, settings)
 
 
 @lru_cache(maxsize=4)
 def _load_configured_product_price_master(
+    context: MarketContext,
     settings: ProductMasterSourceSettings,
 ) -> tuple[ProductPriceMaster, str]:
+    # `context` is intentionally part of the cache key even if future MY/SG
+    # settings happen to be textually equal; a market must never borrow rows.
     loaded = settings.create_source().load()
     return loaded.to_price_master(), loaded.source_label
 
