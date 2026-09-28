@@ -10,6 +10,7 @@ from streamlit.testing.v1 import AppTest
 from src.invoice_app.services.import_result_adapters import adapt_platform_orders_import_result
 from src.invoice_app.services.import_result_contract import RecoveryAction
 from src.invoice_app.services.validation_recovery import (
+    REMOVE_DUPLICATE,
     REMOVE_SOURCE,
     execute_current_batch_recovery,
 )
@@ -57,7 +58,13 @@ def _historical_signature(state):
     return sha256(repr((state.get("batch_id"), tuple(rows))).encode("utf-8")).hexdigest()
 
 
-def _platform_result(*, reviews=(), processing_errors=()):
+def _platform_result(
+    *,
+    reviews=(),
+    processing_errors=(),
+    duplicate_skipped=(),
+    unsupported_files=(),
+):
     return adapt_platform_orders_import_result(
         batch_id="projection-batch",
         orders=[
@@ -71,8 +78,8 @@ def _platform_result(*, reviews=(), processing_errors=()):
         products=[],
         reviews=reviews,
         processing_errors=processing_errors,
-        duplicate_skipped=[],
-        unsupported_files=[],
+        duplicate_skipped=duplicate_skipped,
+        unsupported_files=unsupported_files,
     )
 
 
@@ -192,6 +199,78 @@ def test_platform_non_manual_queue_does_not_duplicate_a_manual_review_source(
 
     assert captured["blockers"].items == ()
     assert captured["notes"].items == ()
+
+
+def test_platform_duplicate_is_non_blocking_but_keeps_optional_recovery(
+    monkeypatch,
+):
+    from src.invoice_app.ui import data_import
+
+    result = _platform_result(
+        duplicate_skipped=[
+            {
+                "source_pdf": "duplicate.pdf",
+                "platform": "Shopee",
+                "order_id": "SHP-DUPLICATE",
+                "status": "Duplicate Skipped",
+                "reason": "Duplicate Order",
+            }
+        ]
+    )
+    captured = {}
+    monkeypatch.setattr(
+        data_import,
+        "_render_actionable_blockers_and_notes",
+        lambda blockers, notes, **kwargs: captured.update(
+            blockers=blockers,
+            notes=notes,
+            **kwargs,
+        ),
+    )
+
+    data_import._render_platform_invoice_non_manual_issues(result)
+
+    assert result.commit_readiness.ready is True
+    assert captured["blockers"].items == ()
+    assert captured["blockers"].blocking_issue_count == 0
+    assert captured["secondary_heading"] == "Skipped / Non-blocking information"
+    assert len(captured["notes"].items) == 1
+    duplicate = captured["notes"].items[0]
+    assert duplicate.blocking is False
+    assert duplicate.summary == "Duplicate Order"
+    assert duplicate.action_hint == "Remove Duplicate"
+    assert REMOVE_DUPLICATE in {
+        action.action_type for action in duplicate.recovery_actions
+    }
+
+
+def test_platform_manual_review_remains_a_primary_blocker():
+    from src.invoice_app.ui import data_import
+
+    result = _platform_result(
+        reviews=[
+            {
+                "source_pdf": "reupload.pdf",
+                "platform": "Shopee",
+                "order_id": "SHP-REUPLOAD",
+                "status": "Manual Review",
+                "reason_code": INCOME_SOURCE_INCOMPLETE,
+                "reason": "Source is incomplete and requires re-upload.",
+            }
+        ]
+    )
+    blockers = data_import._platform_invoice_primary_blockers(result)
+
+    assert result.commit_readiness.ready is False
+    assert blockers == (
+        {
+            "owner": "manual_review",
+            "platform": "Shopee",
+            "order_id": "SHP-REUPLOAD",
+            "source": "reupload.pdf",
+            "reason": "Source is incomplete and requires re-upload.",
+        },
+    )
 
 
 def _platform_validate_unique_status_app() -> None:

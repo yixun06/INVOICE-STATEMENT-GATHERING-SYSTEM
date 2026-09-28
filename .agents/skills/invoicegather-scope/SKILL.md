@@ -54,6 +54,10 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
   source validation, Manual Review, supported source correction and complete
   revalidation, and re-upload/processing blockers. Manual Review is a hard
   Validate gate.
+- A recovery action does not itself make a fact Validate-blocking. Current-batch
+  duplicate/skipped evidence remains visible with any approved optional action,
+  but stays outside primary `Needs Attention` unless its explicit issue is
+  `blocking=True`.
 - **Reconcile** owns Product Master/NAV reconciliation and historical Invoice
   DB classification (`NEW`, `ALREADY_IMPORTED`, `SOURCE_CONFLICT`) plus safe
   removal from the current candidate batch only. It never deletes historical

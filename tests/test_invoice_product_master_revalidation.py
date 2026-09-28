@@ -433,6 +433,12 @@ def test_apptest_conflicting_master_returns_source_correction_to_validate(
         "load_configured_product_price_master",
         lambda: (conflicting_master, "Latest synthetic master"),
     )
+    reconcile_calls = []
+    monkeypatch.setattr(
+        data_import,
+        "_reconcile_historical_invoice_staging",
+        lambda: reconcile_calls.append("called"),
+    )
 
     app = AppTest.from_file(str(APP_PATH))
     _seed_reconcile_app(app)
@@ -440,17 +446,11 @@ def test_apptest_conflicting_master_returns_source_correction_to_validate(
 
     assert app.exception == []
     assert app.session_state.filtered_state["reviews"][0]["order_id"] == "SHP-1"
-    assert next(
-        item for item in app.button if item.label == "Continue to review & commit"
-    ).disabled
-    assert "Revalidate with latest Product Master" not in {
-        item.label for item in app.button
-    }
-
-    next(item for item in app.button if item.label == "Back").click().run(timeout=20)
-
-    assert app.exception == []
     assert app.session_state.filtered_state["data_import_step"] == 3
+    assert reconcile_calls == []
+    assert app.session_state.filtered_state[
+        "manual_review_active_section"
+    ] == "online_resolution"
     assert "Resolve Manual Review" in {item.value for item in app.subheader}
     assert "Seller SKU" in {item.label for item in app.text_input}
 

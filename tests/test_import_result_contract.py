@@ -70,6 +70,53 @@ def test_platform_without_blocking_or_review_is_ready_for_future_commit():
     assert result.commit_readiness.database_commit_available is False
 
 
+def test_platform_contract_projects_only_actual_manual_review_records():
+    manual_review = {
+        "source_pdf": "manual.pdf",
+        "platform": "Shopee",
+        "order_id": "SHP-MANUAL",
+        "status": "Manual Review",
+        "reason": "Source evidence needs correction.",
+    }
+    duplicate_record = {
+        "source_pdf": "duplicate.pdf",
+        "platform": "Shopee",
+        "order_id": "SHP-DUPLICATE",
+        "status": "Duplicate",
+        "reason": "Duplicate source in the current batch.",
+    }
+
+    result = _platform_result(reviews=[manual_review, duplicate_record])
+
+    assert result.source_specific_details["manual_review"] == (manual_review,)
+    assert result.source_summary.items[2].value == 1
+    assert result.commit_readiness.ready is False
+
+
+def test_platform_contract_current_reviews_override_stale_upload_summary_for_readiness():
+    result = _platform_result()
+
+    # ``upload_result_summary`` is intentionally not an adapter input.  A
+    # prior upload action may still display its audit count, while this result
+    # remains authoritative for the current accepted/reviewed session state.
+    assert result.source_summary.items[2].value == 0
+    assert result.commit_readiness.ready is True
+
+    blocked = _platform_result(
+        reviews=[
+            {
+                "source_pdf": "replacement-required.pdf",
+                "platform": "Shopee",
+                "order_id": "SHP-REUPLOAD",
+                "status": "Manual Review",
+                "reason": "Source is incomplete and requires re-upload.",
+            }
+        ]
+    )
+    assert blocked.commit_readiness.ready is False
+    assert blocked.commit_readiness.reasons == ("Manual Review records remain.",)
+
+
 def test_validation_severity_and_blocking_remain_independent_fields():
     issue = ValidationIssue(
         layer="presentation_test",
@@ -123,7 +170,10 @@ def test_data_import_validation_displays_platform_contract_summary(tmp_path, mon
     app.session_state["batch_id"] = "platform-batch"
     app.session_state["import_source_type"] = "Platform Orders"
     app.session_state["data_import_step"] = 3
-    app.session_state["upload_result_summary"] = {"pdfs_processed": 1}
+    app.session_state["upload_result_summary"] = {
+        "pdfs_processed": 1,
+        "manual_reviews": 9,
+    }
     app.session_state["orders"] = [{"platform": "Shopee", "order_id": "SHP-1"}]
     app.session_state["products"] = []
     app.session_state["reviews"] = []
@@ -136,6 +186,8 @@ def test_data_import_validation_displays_platform_contract_summary(tmp_path, mon
     assert app.exception == []
     assert ("Orders", "1") in {(metric.label, metric.value) for metric in app.metric}
     assert any(
-        "Ready" in success.value and "1 accepted order validated successfully" in success.value
+        "Ready" in success.value
+        and "current Platform Invoice batch passed validation" in success.value
         for success in app.success
     )
+    assert any("9 sent to Manual Review" in caption.value for caption in app.caption)

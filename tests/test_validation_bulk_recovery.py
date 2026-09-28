@@ -346,6 +346,13 @@ def test_validate_duplicate_only_source_offers_safe_removal_and_keeps_audit_expa
         app.session_state[key] = value
     app.run(timeout=20)
 
+    assert "Needs Attention" not in {item.value for item in app.subheader}
+    assert "Skipped / Non-blocking information" in {
+        item.value for item in app.subheader
+    }
+    assert next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    ).disabled is False
     assert "Original issue evidence" in {item.label for item in app.expander}
     next(
         button

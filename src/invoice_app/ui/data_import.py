@@ -966,6 +966,7 @@ def _render_platform_invoice_non_manual_issues(result: ImportResult) -> None:
         blockers,
         notes,
         key_prefix="invoice_non_manual_exception_queue",
+        secondary_heading="Skipped / Non-blocking information",
     )
 
 
@@ -1107,6 +1108,7 @@ def _render_actionable_blockers_and_notes(
     key_prefix: str,
     allow_recovery: bool = True,
     humanize_statement: bool = False,
+    secondary_heading: str | None = None,
 ) -> None:
     _render_needs_attention_queue(
         blockers,
@@ -1114,25 +1116,46 @@ def _render_actionable_blockers_and_notes(
         allow_recovery=allow_recovery,
         humanize_statement=humanize_statement,
     )
-    _render_exception_reconciliation_notes(notes)
+    if secondary_heading is None:
+        _render_exception_reconciliation_notes(
+            notes,
+            key_prefix=f"{key_prefix}_non_blocking",
+            allow_recovery=allow_recovery,
+        )
+    else:
+        _render_non_blocking_exception_queue(
+            notes,
+            key_prefix=f"{key_prefix}_non_blocking",
+            heading=secondary_heading,
+            allow_recovery=allow_recovery,
+        )
 
 
 def _partition_exception_work_queue(
     queue: ExceptionWorkQueue,
 ) -> tuple[ExceptionWorkQueue, ExceptionWorkQueue]:
-    """Split authoritative issue facts into primary blockers and secondary notes."""
+    """Split blockers from non-blocking facts without dropping safe actions."""
 
-    def requires_action(issue: Any) -> bool:
-        return issue.blocking or any(action.allowed for action in issue.recovery_actions)
-
-    def project(*, actionable: bool) -> ExceptionWorkQueue:
+    def project(*, blocking: bool) -> ExceptionWorkQueue:
         items: list[ExceptionPresentationItem] = []
         for item in queue.items:
             issues = tuple(
-                issue for issue in item.issues if requires_action(issue) is actionable
+                issue for issue in item.issues if issue.blocking is blocking
             )
             if not issues:
                 continue
+            actions = tuple(
+                dict.fromkeys(
+                    action
+                    for issue in issues
+                    for action in issue.recovery_actions
+                    if action.allowed
+                )
+            )
+            destructive_action = next(
+                (action for action in actions if action.destructive),
+                None,
+            )
             first_reason = issues[0].reason
             if item.order_id and first_reason.startswith(f"{item.order_id}:"):
                 first_reason = first_reason[len(item.order_id) + 1 :].strip()
@@ -1147,8 +1170,14 @@ def _partition_exception_work_queue(
                     summary=summary,
                     issues=issues,
                     blocking=any(issue.blocking for issue in issues),
-                    recovery_actions=item.recovery_actions if actionable else (),
-                    action_hint=item.action_hint if actionable else "View details",
+                    recovery_actions=actions,
+                    action_hint=(
+                        "Review form below"
+                        if any(issue.category == "manual_review" for issue in issues)
+                        else destructive_action.label
+                        if destructive_action is not None
+                        else "View details"
+                    ),
                 )
             )
         return ExceptionWorkQueue(
@@ -1156,7 +1185,24 @@ def _partition_exception_work_queue(
             source_issue_count=sum(item.issue_count for item in items),
         )
 
-    return project(actionable=True), project(actionable=False)
+    return project(blocking=True), project(blocking=False)
+
+
+def _render_non_blocking_exception_queue(
+    queue: ExceptionWorkQueue,
+    *,
+    key_prefix: str,
+    heading: str,
+    allow_recovery: bool,
+) -> None:
+    """Show preserved non-blocking evidence and any optional safe action."""
+
+    _render_needs_attention_queue(
+        queue,
+        key_prefix=key_prefix,
+        allow_recovery=allow_recovery,
+        heading=heading,
+    )
 
 
 def _render_needs_attention_queue(
@@ -1382,14 +1428,30 @@ def _render_missing_invoice_exception_details(
 
     with st.expander("Missing Invoice details", expanded=False):
         _render_secondary_exception_items(missing_items)
-    _render_exception_reconciliation_notes(notes)
+    _render_exception_reconciliation_notes(
+        notes,
+        key_prefix=f"{key_prefix}_notes",
+    )
 
 
-def _render_exception_reconciliation_notes(queue: ExceptionWorkQueue) -> None:
+def _render_exception_reconciliation_notes(
+    queue: ExceptionWorkQueue,
+    *,
+    key_prefix: str = "exception_reconciliation_notes",
+    allow_recovery: bool = True,
+) -> None:
     if not queue.items:
         return
     with st.expander("Reconciliation notes", expanded=False):
         _render_secondary_exception_items(queue.items)
+        if not allow_recovery:
+            return
+        for item in queue.items:
+            categories = {issue.category for issue in item.issues}
+            if categories == {"duplicate"}:
+                _render_duplicate_queue_actions(item, key_prefix=key_prefix)
+            else:
+                _render_queue_recovery_actions(item, key_prefix=key_prefix)
 
 
 def _render_secondary_exception_items(
@@ -2113,7 +2175,7 @@ def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
     st.rerun()
 
 
-def _surface_reconciliation_product_identity_reviews() -> None:
+def _surface_reconciliation_product_identity_reviews() -> int:
     """Surface Product Master identity ambiguity during Reconcile.
 
     This is a read-only Product Master lookup and changes current session
@@ -2123,12 +2185,42 @@ def _surface_reconciliation_product_identity_reviews() -> None:
     try:
         master, _ = load_configured_product_price_master()
     except ProductMasterSourceError:
-        return
+        return 0
     created = surface_product_identity_reviews(st.session_state, price_master=master)
-    if created:
-        st.session_state.manual_resolution_notice = (
-            f"{created} Product Master identity issue(s) require source correction in Validate."
+    return created
+
+
+def _return_product_identity_reviews_to_validate(created: int) -> None:
+    """Return Reconcile-discovered identity work to its Validate owner.
+
+    ``surface_product_identity_reviews`` appends exactly the newly created
+    records to the current session review list.  Keep the selected tab/key as
+    presentation state only; the review list remains the sole workflow
+    authority.
+    """
+    new_reviews = list(st.session_state.get("reviews", ()))[-created:]
+    online_review = next(
+        (
+            review
+            for review in new_reviews
+            if isinstance(review, Mapping) and resolution_plan(review) is not None
+        ),
+        None,
+    )
+    st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
+    if online_review is not None:
+        st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = review_presentation_key(
+            online_review
         )
+    else:
+        st.session_state.pop(_MANUAL_REVIEW_ACTIVE_KEY, None)
+    st.session_state.pop(_MANUAL_REVIEW_TAB_WIDGET, None)
+    st.session_state.manual_resolution_notice = (
+        f"Reconcile found {created} Product Master identity issue(s). "
+        "Resolve them in Validate, then return to Reconcile."
+    )
+    _set_step(3)
+    st.rerun()
 
 
 def _render_product_identity_resolution_form(key: str, review: dict[str, Any]) -> None:
@@ -2692,7 +2784,10 @@ def _render_reconciliation_step() -> None:
         if not eligibility.eligible:
             _render_blocked_invoice_destination(5)
             return
-        _surface_reconciliation_product_identity_reviews()
+        created_identity_reviews = _surface_reconciliation_product_identity_reviews()
+        if created_identity_reviews:
+            _return_product_identity_reviews_to_validate(created_identity_reviews)
+            return
         entries = _reconcile_historical_invoice_staging()
         historical_validation_blocker = st.session_state.get(
             "historical_validation_blocker"

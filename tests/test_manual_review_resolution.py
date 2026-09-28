@@ -145,7 +145,14 @@ def _identity_state():
         "variation": "Pumpkin Seed Seaweed", "quantity": 1, "unit_price": "5.90",
         "line_total": "5.90", "line_subtotal": "5.90", "source_line_subtotal": "5.90",
     }
-    return {"orders": [order], "products": [product], "reviews": []}
+    return {
+        "orders": [order],
+        "products": [product],
+        "reviews": [],
+        "uat2_historical_commit_entries": ("stale",),
+        "uat2_historical_commit_refresh_required": True,
+        "uat2_historical_commit_signature": "stale-signature",
+    }
 
 
 def test_source_damaged_same_price_identity_moves_to_validate_and_requires_source_correction():
@@ -155,6 +162,11 @@ def test_source_damaged_same_price_identity_moves_to_validate_and_requires_sourc
     assert surface_product_identity_reviews(state, price_master=master) == 1
     assert state["orders"] == []
     assert state["products"] == []
+    assert not {
+        "uat2_historical_commit_entries",
+        "uat2_historical_commit_refresh_required",
+        "uat2_historical_commit_signature",
+    } & state.keys()
     review = state["reviews"][0]
     assert review["reason_code"] == PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED
     assert review["product_identity_affected"] == [{

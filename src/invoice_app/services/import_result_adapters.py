@@ -183,7 +183,7 @@ def adapt_platform_orders_import_result(
     source_details = {
         "orders": tuple(orders),
         "products": tuple(products),
-        "manual_review": tuple(reviews),
+        "manual_review": manual_reviews,
         "processing_errors": tuple(processing_errors),
         "duplicate_skipped": tuple(duplicate_skipped),
         "unsupported_files": tuple(unsupported_files),
