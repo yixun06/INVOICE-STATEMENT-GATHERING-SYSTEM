@@ -93,6 +93,10 @@ from src.invoice_app.ui.weekly_billing import (
     WEEKLY_BILLING_PAGE,
     render_weekly_billing,
 )
+from src.invoice_app.ui.monthly_billing import (
+    MONTHLY_BILLING_PAGE,
+    render_monthly_billing,
+)
 from src.invoice_app.ui.cross_platform_product_summary import (
     render_cross_platform_product_summary,
 )
@@ -200,11 +204,12 @@ DATE_COLUMNS = {
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 REPORT_NAVIGATION_PAGES = ["Dashboard", "Cross Platform Summary", *PLATFORMS]
-UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE]
+UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE, MONTHLY_BILLING_PAGE]
 DEVELOPMENT_NAVIGATION_PAGES: list[str] = []
 NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
     WEEKLY_BILLING_PAGE: "calendar_month",
+    MONTHLY_BILLING_PAGE: "calendar_view_month",
     "Dashboard": "dashboard",
     "Cross Platform Summary": "inventory_2",
     "Shopee": "storefront",
@@ -785,7 +790,7 @@ def show_sidebar(pdf_count: int) -> str:
                 )
 
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
-        render_navigation_section("WEEKLY BILLING", UAT2_NAVIGATION_PAGES)
+        render_navigation_section("BILLING & ACCOUNTING", UAT2_NAVIGATION_PAGES)
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
 
         st.html('<p class="sidebar-section-label">Product Master</p>')
@@ -1951,6 +1956,8 @@ if selected_page == DATA_IMPORT_PAGE:
     )
 elif selected_page == WEEKLY_BILLING_PAGE:
     render_weekly_billing()
+elif selected_page == MONTHLY_BILLING_PAGE:
+    render_monthly_billing()
 elif selected_page == "Dashboard":
     st.title("Dashboard")
     st.caption("Current active-batch reporting view. Import and validation remain in Data Import.")

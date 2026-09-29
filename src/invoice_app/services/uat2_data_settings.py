@@ -24,6 +24,9 @@ from src.invoice_app.services.google_sheets_monthly_statement_writer import (
 from src.invoice_app.services.weekly_billing import (
     GoogleSheetsWeeklyBillingReader,
 )
+from src.invoice_app.services.monthly_billing import (
+    GoogleSheetsMonthlyBillingReader,
+)
 from src.invoice_app.services.cross_platform_product_summary import (
     GoogleSheetsCrossPlatformProductSummaryReader,
 )
@@ -74,6 +77,14 @@ class UAT2DataSettings:
     def create_weekly_billing_reader(self) -> GoogleSheetsWeeklyBillingReader:
         require_capability(self.market_context, "weekly_billing")
         return GoogleSheetsWeeklyBillingReader(
+            spreadsheet_id=self.google_spreadsheet_id,
+            gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+        )
+
+    def create_monthly_billing_reader(self) -> GoogleSheetsMonthlyBillingReader:
+        """Bind Monthly Billing to the configured MY source without SG fallback."""
+        require_capability(self.market_context, "weekly_billing")
+        return GoogleSheetsMonthlyBillingReader(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )

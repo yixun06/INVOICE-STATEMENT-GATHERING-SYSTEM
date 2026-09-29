@@ -47,6 +47,15 @@ The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2
 - **Hidden:** the old `Export Barcode PDF` button (`8d79888`).
 - Barcode output preserves final-row order. Valid EAN-13 renders vector barcode plus digits; an invalid SKU remains verbatim with `Barcode unavailable` and is never guessed or omitted.
 
+### Monthly Billing — APPROVED / IMPLEMENTED / UNCOMMITTED
+
+- Architecture: **CONSERVATIVE MONTHLY ADAPTER**. Weekly Billing remains unchanged as the operational/debug path; Monthly is a distinct committed full-calendar-month projection. Cross Platform remains unchanged and payout-completed-date based.
+- Source: reads exactly `Invoice_Orders`, `Invoice_Items`, `Monthly_Statement_Data`, `Monthly_Statement_Financial_Components`, and `Monthly_Statement_Summary`; Monthly schemas remain **34 / 17 / 14 / UNCHANGED**. No Weekly Statement tab is read for Monthly Billing.
+- Shared stable business behavior: canonical Product Summary identity, promotion allocation, Shopee MY Staging Data, Financial Summary controls, three-sheet workbook, and final-row barcode rules. Weekly core/service/UI/domain/Staging/export entry points remain unchanged.
+- UI: separate `Monthly Billing` navigation, `monthly_billing_*` widget/session namespace, isolated cache keyed by market, spreadsheet identity, and Monthly source contract; the on-page Staging Data section is intentionally hidden while the unchanged Excel workbook retains its Staging Data worksheet; Excel uses `Monthly_Billing_YYYY-MM.xlsx`; Barcode PDF names and source wording are Monthly-specific.
+- August Monthly: **BUILD VERIFIED**. After the Product Owner's external UAT2 repair, a read-only 2026-09-29 snapshot finds exactly one Shopee `Invoice_Orders` row and one canonical `Invoice_Items` row for `260823596770U3`; the committed August Statement still has its `ORDER` and `SKU` rows. The adapter resolves the target and builds 2,775 Orders / 4,010 Items / 320 Product Summary rows with all four native financial controls passed. No application rule changed and no incomplete preview or inferred Invoice fact was used. **Monthly Statement referential-integrity commit gate = FOLLOW-UP AUDIT REQUIRED**; it is outside this Billing implementation.
+- Monthly revision/superseding policy: **UNRESOLVED / FAIL CLOSED** for distinct committed sources in one month. SG Monthly: **OUT OF SCOPE / FAIL CLOSED**. Deployment: **NOT VERIFIED**.
+
 ### Cross Platform Summary — COMMITTED, LIVE, READ-ONLY
 
 - Live report over one snapshot of committed `Invoice_Orders` and `Invoice_Items`; it creates no Cross reporting table and makes no UAT2/schema writes.

@@ -179,6 +179,42 @@ The old `Export Barcode PDF` control is hidden. Both barcode exports consume
 their applicable final summary rowset and must not reparse, regroup, change
 Excel, or write UAT2 data.
 
+### Monthly Billing — Implemented Conservative Monthly Adapter
+
+Monthly Billing is a separate Shopee MY read-only projection over one committed
+full-calendar-month Monthly Statement. Weekly Billing remains the primary
+operational/debug Billing path; Cross Platform Summary remains the independent
+payout-completed-date projection. Their outputs serve distinct business users
+and are not required to be numerically identical merely because they use
+overlapping committed evidence.
+
+- Monthly reads exactly `Invoice_Orders`, `Invoice_Items`,
+  `Monthly_Statement_Data`, `Monthly_Statement_Financial_Components`, and
+  `Monthly_Statement_Summary`. It never reads the corresponding Weekly
+  Statement tabs for a Monthly request.
+- The Monthly adapter validates the locked 34 / 17 / 14 source schemas, only
+  discovers `PASSED` + `COMMITTED` full-calendar-month Shopee MY batches, and
+  adapts them to the stable Weekly-named in-memory report contract. The stable
+  Weekly core is not broadly refactored or renamed for this purpose.
+- Monthly reuses the canonical Product Summary identity, promotion allocation,
+  Staging Data mapping, native Financial Summary controls, Excel workbook
+  calculation, and final-row barcode behavior. Product Master price is never
+  live re-resolved for the Product Summary.
+- Monthly UI/cache/session keys use the independent `monthly_billing_*`
+  namespace. Cache identity includes market, spreadsheet identity, and the
+  Monthly five-tab contract; no Monthly request may reuse Weekly cached rows.
+- The on-page Monthly view intentionally omits Staging Data. Its existing
+  Staging worksheet remains part of the unchanged Monthly Excel workbook.
+- Missing required Invoice Order or Item evidence blocks the complete Monthly
+  report. Do not fabricate an incomplete preview or infer Invoice facts from a
+  Monthly Statement; the missing-evidence gate remains fail-closed.
+- Multiple distinct committed Monthly batches/files for one calendar month
+  fail closed. Do not choose, merge, or supersede a source until a Product
+  Owner-approved revision/versioning policy exists.
+- Shopee SG Monthly remains out of scope and fail closed. This MY-only adapter
+  does not decide future SG Billing architecture, resource binding, currency,
+  Product Master, or source behavior.
+
 ## Mandatory PROJECT_STATUS Sync
 
 `PROJECT_STATUS.md` is InvoiceGather's living derived current-state handoff.
