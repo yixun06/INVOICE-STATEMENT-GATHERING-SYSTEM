@@ -818,6 +818,77 @@ def test_product_count_manual_review_renders_session_draft_without_derived_field
     assert "Promotion Group ID" not in labels
 
 
+def test_manual_review_count_summary_updates_without_changing_tab_labels(tmp_path, monkeypatch):
+    """Current review counts stay simultaneously visible outside stable tab labels."""
+    monkeypatch.chdir(tmp_path)
+    reupload_reviews = [
+        {
+            "batch_id": "stable-tabs-batch",
+            "platform": "Shopee",
+            "order_id": f"SHP-REUPLOAD-{index}",
+            "source_pdf": f"reupload-{index}.pdf",
+            "status": "Manual Review",
+            "reason_code": INCOME_SOURCE_INCOMPLETE,
+            "reason": "Income Completion Anchor Missing: Source Document Is Incomplete.",
+        }
+        for index in range(1, 7)
+    ]
+    online_review = {
+        "batch_id": "stable-tabs-batch",
+        "platform": "Shopee",
+        "order_id": "SHP-ONLINE-1",
+        "source_pdf": "online-1.pdf",
+        "status": "Manual Review",
+        "reason_code": PRODUCT_COUNT_MISMATCH,
+        "reason": "Product Count Mismatch: source declares 2 products, but 1 product anchors were extracted.",
+        "order_payload": {"platform": "Shopee", "order_id": "SHP-ONLINE-1"},
+        "product_payloads": [{"seller_sku": "SKU-1", "product_name": "First", "quantity": 1}],
+    }
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "stable-tabs-batch",
+        "import_source_type": "Platform Orders",
+        "data_import_step": 3,
+        "upload_result_summary": {"pdfs_processed": 7},
+        "orders": [],
+        "products": [],
+        "processing_errors": [],
+        "duplicate_skipped": [],
+        "unsupported_files": [],
+        "reviews": [*reupload_reviews, online_review],
+        "manual_review_active_section": "online_resolution",
+        "manual_review_active_key": review_presentation_key(online_review),
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert [tab.label for tab in app.tabs] == [
+        "Requires Re-upload",
+        "Online Resolution",
+    ]
+    assert "⚠️ Requires Re-upload: 6    📝 Online Resolution: 1" in {
+        caption.value for caption in app.caption
+    }
+
+    app.session_state["reviews"] = reupload_reviews
+    for _ in range(10):
+        app.run(timeout=20)
+
+    assert app.exception == []
+    assert [tab.label for tab in app.tabs] == [
+        "Requires Re-upload",
+        "Online Resolution",
+    ]
+    assert len(app.tabs) == 2
+    assert "⚠️ Requires Re-upload: 6    📝 Online Resolution: 0" in {
+        caption.value for caption in app.caption
+    }
+
+
 def test_manual_review_revalidation_keeps_the_same_online_source_focused(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     review = {

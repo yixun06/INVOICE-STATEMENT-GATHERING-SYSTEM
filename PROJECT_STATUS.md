@@ -93,7 +93,8 @@ The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2
 
 ### Global Faded / Ghost Streamlit UI â€” AUDITED / ROOT CAUSE NOT YET PROVEN
 
-- No implementation was attempted. Current routing and AppTest evidence do not emit old and new interfaces in one completed server run; browser DOM/hard-refresh evidence and deployed Streamlit version remain unavailable. Dynamic keyed Manual Review tab labels remain under runtime investigation; no dependency, tab, session-clearing, sleep, or reload behavior changed.
+- **Manual Review count visibility: RUNTIME/PRESENTATION ADJUSTMENT IMPLEMENTED.** Stable tab labels remain `Requires Re-upload` and `Online Resolution`; one compact caption immediately above the tabs shows both counts from the authoritative current `reviews` partition.
+- **Ghost UI: PAUSED / ROOT CAUSE NOT PROVEN.** This count-visibility adjustment does not claim to remediate the ghost; the current root-cause classification remains **INSUFFICIENT EVIDENCE**.
 
 ### Shopee MY Pending Return/Refund Financial Layout — IMPLEMENTED / UNCOMMITTED
 

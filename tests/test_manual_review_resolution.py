@@ -1408,8 +1408,10 @@ def test_financial_manual_review_ui_prefills_formula_fields_and_focuses_visible_
     app.run(timeout=20)
 
     assert app.exception == []
-    assert any(tab.label.endswith("Requires Re-upload (1)") for tab in app.tabs)
-    assert any(tab.label.endswith("Online Resolution (4)") for tab in app.tabs)
+    assert [tab.label for tab in app.tabs] == ["Requires Re-upload", "Online Resolution"]
+    assert "⚠️ Requires Re-upload: 1    📝 Online Resolution: 4" in {
+        caption.value for caption in app.caption
+    }
     label_values = [(field.label, field.value) for field in app.text_input]
     assert ("Merchandise Subtotal", "10.00") in label_values
     assert ("Product Price", "10.00") in label_values
@@ -1544,10 +1546,11 @@ def test_fixable_promotion_routes_to_online_resolution_tab_with_source_evidence(
 
     assert app.exception == []
     assert {tab.label for tab in app.tabs} == {
-        "⚠️ Requires Re-upload (1)",
-        "📝 Online Resolution (1)",
+        "Requires Re-upload",
+        "Online Resolution",
     }
     captions = {caption.value for caption in app.caption}
+    assert "⚠️ Requires Re-upload: 1    📝 Online Resolution: 1" in captions
     assert "Promotion: Any 2 at RM20.00" in captions
     assert "Source subtotal: Not extracted" in captions
     assert "Source-visible promotion amount: RM20.00" in captions

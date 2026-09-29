@@ -1927,8 +1927,12 @@ def _render_manual_review_resolution() -> None:
             key="download_all_manual_reviews_csv",
         )
 
-    reupload_tab_label = f"⚠️ Requires Re-upload ({len(unfixable_reviews)})"
-    online_tab_label = f"📝 Online Resolution ({len(fixable_reviews)})"
+    st.caption(
+        f"⚠️ Requires Re-upload: {len(unfixable_reviews)}    "
+        f"📝 Online Resolution: {len(fixable_reviews)}"
+    )
+    reupload_tab_label = "Requires Re-upload"
+    online_tab_label = "Online Resolution"
     active_section = st.session_state.get(_MANUAL_REVIEW_ACTIVE_SECTION)
     tab_unfixable, tab_fixable = st.tabs(
         [reupload_tab_label, online_tab_label],

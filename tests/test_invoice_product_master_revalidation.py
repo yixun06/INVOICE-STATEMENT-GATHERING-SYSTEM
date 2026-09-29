@@ -452,6 +452,9 @@ def test_apptest_conflicting_master_returns_source_correction_to_validate(
         "manual_review_active_section"
     ] == "online_resolution"
     assert "Resolve Manual Review" in {item.value for item in app.subheader}
+    assert "⚠️ Requires Re-upload: 0    📝 Online Resolution: 1" in {
+        item.value for item in app.caption
+    }
     assert "Seller SKU" in {item.label for item in app.text_input}
 
 
