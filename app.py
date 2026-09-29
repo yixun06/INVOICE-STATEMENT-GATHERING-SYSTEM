@@ -785,7 +785,7 @@ def show_sidebar(pdf_count: int) -> str:
                 )
 
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
-        render_navigation_section("UAT2", UAT2_NAVIGATION_PAGES)
+        render_navigation_section("WEEKLY BILLING", UAT2_NAVIGATION_PAGES)
         render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
 
         st.html('<p class="sidebar-section-label">Product Master</p>')
