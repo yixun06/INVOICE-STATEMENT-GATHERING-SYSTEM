@@ -555,8 +555,17 @@ def process_pdf_file(
     source_pdf: str,
     pdf_path: str | Path,
     batch_id: str,
+    *,
+    expected_platform: str | None = None,
+    selected_platform_label: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    result = process_pdf_file_with_outcome(source_pdf, pdf_path, batch_id)
+    result = process_pdf_file_with_outcome(
+        source_pdf,
+        pdf_path,
+        batch_id,
+        expected_platform=expected_platform,
+        selected_platform_label=selected_platform_label,
+    )
     return result.orders, result.products, result.reviews
 
 
@@ -564,20 +573,39 @@ def process_pdf_file_with_outcome(
     source_pdf: str,
     pdf_path: str | Path,
     batch_id: str,
+    *,
+    expected_platform: str | None = None,
+    selected_platform_label: str | None = None,
 ) -> PdfProcessingResult:
     document = read_pdf_document_selective_words(
         pdf_path,
         should_include_words=lambda text: detect_platform(text) == "Shopee",
     )
-    return _process_pdf_content_with_outcome(source_pdf, document.text, batch_id, document=document)
+    return _process_pdf_content_with_outcome(
+        source_pdf,
+        document.text,
+        batch_id,
+        document=document,
+        expected_platform=expected_platform,
+        selected_platform_label=selected_platform_label,
+    )
 
 
 def process_pdf_text(
     source_pdf: str,
     text: str,
     batch_id: str,
+    *,
+    expected_platform: str | None = None,
+    selected_platform_label: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    result = process_pdf_text_with_outcome(source_pdf, text, batch_id)
+    result = process_pdf_text_with_outcome(
+        source_pdf,
+        text,
+        batch_id,
+        expected_platform=expected_platform,
+        selected_platform_label=selected_platform_label,
+    )
     return result.orders, result.products, result.reviews
 
 
@@ -585,8 +613,18 @@ def process_pdf_text_with_outcome(
     source_pdf: str,
     text: str,
     batch_id: str,
+    *,
+    expected_platform: str | None = None,
+    selected_platform_label: str | None = None,
 ) -> PdfProcessingResult:
-    return _process_pdf_content_with_outcome(source_pdf, text, batch_id, document=None)
+    return _process_pdf_content_with_outcome(
+        source_pdf,
+        text,
+        batch_id,
+        document=None,
+        expected_platform=expected_platform,
+        selected_platform_label=selected_platform_label,
+    )
 
 
 def _process_pdf_content_with_outcome(
@@ -594,6 +632,8 @@ def _process_pdf_content_with_outcome(
     text: str,
     batch_id: str,
     document: PdfDocument | None,
+    expected_platform: str | None = None,
+    selected_platform_label: str | None = None,
 ) -> PdfProcessingResult:
     platform = detect_platform(text)
     if platform is None:
@@ -606,6 +646,25 @@ def _process_pdf_content_with_outcome(
                     source_pdf=source_pdf,
                     status="Unsupported",
                     message="Not recognized as a supported invoice.",
+                )
+            ],
+            processing_errors=[],
+        )
+
+    if expected_platform is not None and platform != expected_platform:
+        return PdfProcessingResult(
+            orders=[],
+            products=[],
+            reviews=[],
+            unsupported_files=[
+                create_file_outcome_record(
+                    source_pdf=source_pdf,
+                    status="PLATFORM MISMATCH",
+                    message=(
+                        f"Selected platform: {selected_platform_label or expected_platform}. "
+                        f"Detected platform: {platform}. Upload the selected platform's source "
+                        "or go Back and choose the matching platform."
+                    ),
                 )
             ],
             processing_errors=[],

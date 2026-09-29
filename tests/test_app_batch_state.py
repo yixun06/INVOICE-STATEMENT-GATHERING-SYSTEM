@@ -57,6 +57,8 @@ def test_clear_current_batch_resets_state_before_a_fresh_batch(tmp_path, monkeyp
     app.session_state["duplicate_skipped"] = [{"order_id": "DUP-1"}]
     app.session_state["unsupported_files"] = [{"filename": "notes.pdf"}]
     app.session_state["processing_errors"] = [{"filename": "broken.pdf"}]
+    app.session_state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] = "shopee_my"
+    app.session_state["data_import.active_market"] = "shopee_my"
     app.run(timeout=20)
 
     app.session_state["pending_batch_discard_confirmation"] = True
@@ -78,6 +80,8 @@ def test_clear_current_batch_resets_state_before_a_fresh_batch(tmp_path, monkeyp
         "duplicate_skipped",
         "unsupported_files",
         "processing_errors",
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY,
+        "data_import.active_market",
     ):
         assert key not in cleared
     assert not any(key.startswith("pdf_uploader_") and key != "pdf_uploader_8" for key in cleared)
@@ -830,10 +834,13 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
 
     app.run(timeout=20)
 
+    next(button for button in app.button if button.label == "Enter Shopee MY").click().run(timeout=20)
+
     assert app.exception == []
-    assert "Data Import" in {title.value for title in app.title}
+    assert "Shopee MY · Data Import" in {title.value for title in app.title}
     stepper = {element.value for element in app.markdown if "badge[" in element.value}
     assert len(stepper) == 5
+    assert any("4. Reconcile" in item for item in stepper)
     assert any("1. Select Source" in item and "Current" in item for item in stepper)
     assert any("5. Review & Commit" in item and "Pending" in item for item in stepper)
     assert app.get("progress") == []
@@ -844,10 +851,10 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
     )
     assert source_type.options == [
         "Invoice Import",
-        "Shopee Weekly Statement",
-        "Shopee Monthly Statement",
+        "Weekly Statement",
+        "Monthly Statement",
     ]
-    source_type.set_value("Shopee Weekly Statement").run(timeout=20)
+    source_type.set_value("Weekly Statement").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
 
     assert app.exception == []
@@ -866,12 +873,13 @@ def test_data_import_exposes_distinct_monthly_statement_workflow(tmp_path, monke
     app.session_state["navigation"] = "Data Import"
 
     app.run(timeout=20)
+    next(button for button in app.button if button.label == "Enter Shopee MY").click().run(timeout=20)
     source_type = next(
         control
         for control in app.get("button_group")
         if control.label == "Import workflow"
     )
-    source_type.set_value("Shopee Monthly Statement").run(timeout=20)
+    source_type.set_value("Monthly Statement").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
 
     assert app.exception == []

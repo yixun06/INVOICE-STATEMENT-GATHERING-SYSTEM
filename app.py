@@ -78,9 +78,12 @@ from src.invoice_app.services.exporter import (
 )
 from src.invoice_app.ui.data_import import (
     DATA_IMPORT_PAGE,
+    DataImportPlatform,
+    POST_DISCARD_PLATFORM_SWITCH_KEY,
     PLATFORM_ORDERS,
     SHOPEE_WEEKLY_STATEMENT,
     clear_invoice_upload_attempt,
+    bind_active_import_platform,
     initialize_data_import_state,
     mark_invoice_upload_attempt,
     render_data_import,
@@ -541,6 +544,7 @@ def _render_batch_discard_dialog() -> None:
             st.rerun()
         if st.button("Cancel", key="cancel_discard_current_batch"):
             st.session_state.pop("pending_batch_discard_confirmation", None)
+            st.session_state.pop(POST_DISCARD_PLATFORM_SWITCH_KEY, None)
             st.rerun()
 
 
@@ -1016,7 +1020,7 @@ def show_current_batch_validation_data() -> None:
         st.caption("No accepted orders are available in the current batch.")
 
 
-def show_upload_panel() -> list[Any] | None:
+def show_upload_panel(platform: DataImportPlatform) -> list[Any] | None:
     if "uploader_version" not in st.session_state:
         st.session_state.uploader_version = 0
 
@@ -1027,7 +1031,10 @@ def show_upload_panel() -> list[Any] | None:
 
     with st.container(border=True):
         st.subheader("Upload PDF or ZIP")
-        st.caption("Upload mixed invoices. InvoiceGather detects each supported platform automatically.")
+        st.caption(
+            f"Upload {platform.display_name} invoices. Source detection confirms the selected platform "
+            "before any file enters this batch."
+        )
         uploaded_files = st.file_uploader(
             "Upload PDF or ZIP files",
             type=["pdf", "zip"],
@@ -1061,7 +1068,7 @@ def show_upload_panel() -> list[Any] | None:
             mark_invoice_upload_attempt(st.session_state, "processing")
             begin_workflow_activity(st.session_state, "Processing")
             try:
-                process_uploads(uploaded_files)
+                process_uploads(uploaded_files, platform)
             except Exception:
                 mark_invoice_upload_attempt(st.session_state, "failed")
                 raise
@@ -1075,7 +1082,8 @@ def show_upload_panel() -> list[Any] | None:
     return uploaded_files
 
 
-def process_uploads(uploaded_files: list[Any]) -> None:
+def process_uploads(uploaded_files: list[Any], platform: DataImportPlatform) -> None:
+    bind_active_import_platform(st.session_state, platform)
     batch_id = st.session_state.get("batch_id") or create_batch_id()
     st.session_state.batch_id = batch_id
     existing_orders = st.session_state.get("orders", [])
@@ -1117,6 +1125,8 @@ def process_uploads(uploaded_files: list[Any]) -> None:
                         archived_pdf.source_pdf,
                         archived_pdf.archive_path,
                         batch_id,
+                        expected_platform=platform.expected_platform,
+                        selected_platform_label=platform.display_name,
                     )
                 except Exception as exc:
                     processing_errors.append(

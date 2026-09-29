@@ -8,7 +8,7 @@ persistence rules.
 from __future__ import annotations
 
 import csv
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from hashlib import sha256
 import io
@@ -24,6 +24,14 @@ from .data_import_components import (
 )
 
 from ..services.batch_service import create_batch_id
+from ..services.market_context import (
+    ACTIVE_IMPORT_MARKET_KEY,
+    MarketContext,
+    MarketStateIsolationError,
+    SHOPEE_MY,
+    SHOPEE_SG,
+    bind_active_import_market,
+)
 from ..services.import_result_adapters import (
     adapt_platform_orders_import_result,
     adapt_shopee_weekly_statement_import_result,
@@ -145,6 +153,58 @@ PLATFORM_ORDERS = "Platform Orders"
 SHOPEE_WEEKLY_STATEMENT = "Shopee Weekly Statement"
 SHOPEE_MONTHLY_STATEMENT = "Shopee Monthly Statement"
 
+
+@dataclass(frozen=True)
+class DataImportPlatform:
+    key: str
+    display_name: str
+    subtitle: str
+    expected_platform: str | None
+    supported_source_types: frozenset[str]
+    market_context: MarketContext | None = None
+
+
+_ALL_SOURCE_TYPES = frozenset(
+    {PLATFORM_ORDERS, SHOPEE_WEEKLY_STATEMENT, SHOPEE_MONTHLY_STATEMENT}
+)
+DATA_IMPORT_PLATFORMS = (
+    DataImportPlatform(
+        key="shopee_my",
+        display_name="Shopee MY",
+        subtitle="Import Malaysian marketplace invoices and statements.",
+        expected_platform="Shopee",
+        supported_source_types=_ALL_SOURCE_TYPES,
+        market_context=SHOPEE_MY,
+    ),
+    DataImportPlatform(
+        key="shopee_sg",
+        display_name="Shopee SG",
+        subtitle="Singapore marketplace import workspace.",
+        expected_platform=None,
+        supported_source_types=frozenset(),
+        market_context=SHOPEE_SG,
+    ),
+    DataImportPlatform(
+        key="lazada",
+        display_name="Lazada",
+        subtitle="Import Lazada marketplace invoices.",
+        expected_platform="Lazada",
+        supported_source_types=frozenset({PLATFORM_ORDERS}),
+    ),
+    DataImportPlatform(
+        key="zenxin_website",
+        display_name="Zenxin Website",
+        subtitle="Import Zenxin Website invoice documents.",
+        expected_platform="ZENXIN",
+        supported_source_types=frozenset({PLATFORM_ORDERS}),
+    ),
+)
+_DATA_IMPORT_PLATFORM_BY_KEY = {platform.key: platform for platform in DATA_IMPORT_PLATFORMS}
+ACTIVE_IMPORT_PLATFORM_KEY = "data_import.active_platform"
+SHOW_PLATFORM_SELECTOR_KEY = "data_import.show_platform_selector"
+PENDING_PLATFORM_SWITCH_KEY = "data_import.pending_platform_switch"
+POST_DISCARD_PLATFORM_SWITCH_KEY = "data_import.platform_after_discard"
+
 WIZARD_STEPS = (
     "Select Source",
     "Upload",
@@ -152,13 +212,11 @@ WIZARD_STEPS = (
     "Reconcile",
     "Review & Commit",
 )
-MONTHLY_WIZARD_STEPS = (
-    "Select Source",
-    "Upload",
-    "Validate",
-    "Review & Commit",
-)
+MONTHLY_WIZARD_STEPS = WIZARD_STEPS
 _WORKFLOW_KEYS = (
+    ACTIVE_IMPORT_PLATFORM_KEY,
+    SHOW_PLATFORM_SELECTOR_KEY,
+    PENDING_PLATFORM_SWITCH_KEY,
     "data_import_step",
     "import_source_type",
     "invoice_upload_attempt",
@@ -222,12 +280,20 @@ def initialize_data_import_state() -> None:
     st.session_state.setdefault("import_source_type", None)
     st.session_state.setdefault("weekly_statement_uploader_version", 0)
     st.session_state.setdefault("monthly_statement_uploader_version", 0)
+    st.session_state.setdefault(
+        SHOW_PLATFORM_SELECTOR_KEY,
+        not bool(
+            st.session_state.get(ACTIVE_IMPORT_PLATFORM_KEY)
+            or st.session_state.get("batch_id")
+        ),
+    )
 
 
 def reset_data_import_state() -> None:
     """Remove UI-only workflow state when the active batch is cleared."""
     for key in _WORKFLOW_KEYS:
         st.session_state.pop(key, None)
+    st.session_state.pop(ACTIVE_IMPORT_MARKET_KEY, None)
     for key in tuple(st.session_state):
         if isinstance(key, str) and (
             key.startswith("weekly_statement_uploader_")
@@ -287,7 +353,7 @@ def invoice_upload_presentation_state(state: MutableMapping[str, Any]) -> str:
 
 def render_data_import(
     *,
-    render_platform_orders_upload: Callable[[], Any],
+    render_platform_orders_upload: Callable[[DataImportPlatform], Any],
     render_platform_orders_outcomes: Callable[[], Any],
     render_platform_orders_summary: Callable[[], Any],
     render_platform_orders_validation_data: Callable[[], Any],
@@ -296,10 +362,22 @@ def render_data_import(
     """Render the sequential import workspace over the existing services."""
     initialize_data_import_state()
     _adopt_legacy_platform_batch()
+    _complete_platform_switch_after_discard()
+    platform = active_data_import_platform(st.session_state)
+    if st.session_state.get(SHOW_PLATFORM_SELECTOR_KEY, platform is None) or platform is None:
+        _render_platform_selection(discard_current_batch)
+        return
     step = _current_step()
-    st.title("Data Import")
+    if st.button("Back", icon=":material/arrow_back:", key="data_import_platform_back"):
+        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = True
+        st.rerun()
+    st.title(f"{platform.display_name} · Data Import")
     st.caption("Use the active-batch workflow to stage, validate, reconcile, and review source data.")
     _render_wizard_progress(step)
+    source_type = st.session_state.get("import_source_type")
+    if source_type and not platform_supports_source(platform, source_type):
+        _render_unavailable_capability(platform, source_type)
+        return
     if (
         step >= 3
         and st.session_state.get("import_source_type") == PLATFORM_ORDERS
@@ -323,7 +401,7 @@ def render_data_import(
     if step == 1:
         _render_source_selection(discard_current_batch)
     elif step == 2:
-        _render_upload_step(render_platform_orders_upload)
+        _render_upload_step(render_platform_orders_upload, platform)
     elif step == 3:
         _render_validation_step(
             render_platform_orders_outcomes,
@@ -345,12 +423,109 @@ def _adopt_legacy_platform_batch() -> None:
     if st.session_state.get("batch_id") and not st.session_state.get("import_source_type"):
         st.session_state.import_source_type = PLATFORM_ORDERS
         st.session_state.data_import_step = max(int(st.session_state.get("data_import_step", 1)), 3)
+    if (
+        st.session_state.get("import_source_type")
+        and active_data_import_platform(st.session_state) is None
+    ):
+        st.session_state[ACTIVE_IMPORT_PLATFORM_KEY] = SHOPEE_MY.key.value
+        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
     _normalize_step_for_source(st.session_state)
 
 
+def _complete_platform_switch_after_discard() -> None:
+    """Enter the requested platform only after the shared discard lifecycle cleared state."""
+    if st.session_state.get("batch_id"):
+        return
+    pending_key = st.session_state.pop(POST_DISCARD_PLATFORM_SWITCH_KEY, None)
+    pending = _DATA_IMPORT_PLATFORM_BY_KEY.get(str(pending_key))
+    if pending is not None:
+        bind_active_import_platform(st.session_state, pending)
+        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
+
+
+def active_data_import_platform(state: Mapping[str, Any]) -> DataImportPlatform | None:
+    value = state.get(ACTIVE_IMPORT_PLATFORM_KEY)
+    if value in (None, ""):
+        return None
+    return _DATA_IMPORT_PLATFORM_BY_KEY.get(str(value))
+
+
+def bind_active_import_platform(
+    state: MutableMapping[str, Any], platform: DataImportPlatform
+) -> DataImportPlatform:
+    current = active_data_import_platform(state)
+    if current is not None and current.key != platform.key and state.get("batch_id"):
+        raise MarketStateIsolationError(
+            "The active import batch belongs to another platform; finish or discard it before switching."
+        )
+    state[ACTIVE_IMPORT_PLATFORM_KEY] = platform.key
+    if platform.market_context is not None:
+        bind_active_import_market(state, platform.market_context)
+    else:
+        state.pop(ACTIVE_IMPORT_MARKET_KEY, None)
+    return platform
+
+
+def platform_supports_source(platform: DataImportPlatform, source_type: str) -> bool:
+    return source_type in platform.supported_source_types
+
+
+def _render_platform_selection(discard_current_batch: Callable[[], None]) -> None:
+    st.title("Choose a platform")
+    st.caption("Select the source workspace for this import.")
+    pending_key = st.session_state.get(PENDING_PLATFORM_SWITCH_KEY)
+    current = active_data_import_platform(st.session_state)
+    if pending_key:
+        pending = _DATA_IMPORT_PLATFORM_BY_KEY.get(str(pending_key))
+        if pending is not None and current is not None:
+            with st.container(border=True):
+                st.subheader("Current import is still active")
+                st.write(
+                    f"Finish or discard the current **{current.display_name}** import before entering "
+                    f"**{pending.display_name}**."
+                )
+                with st.container(horizontal=True):
+                    if st.button(
+                        f"Continue {current.display_name} import",
+                        type="primary",
+                        icon=":material/play_arrow:",
+                    ):
+                        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
+                        st.session_state.pop(PENDING_PLATFORM_SWITCH_KEY, None)
+                        st.rerun()
+                    if st.button(
+                        f"Discard current import and switch to {pending.display_name}",
+                        icon=":material/restart_alt:",
+                    ):
+                        st.session_state[POST_DISCARD_PLATFORM_SWITCH_KEY] = pending.key
+                        discard_current_batch()
+                        st.session_state.pop(PENDING_PLATFORM_SWITCH_KEY, None)
+                        st.rerun()
+            return
+        st.session_state.pop(PENDING_PLATFORM_SWITCH_KEY, None)
+
+    for row in (DATA_IMPORT_PLATFORMS[:2], DATA_IMPORT_PLATFORMS[2:]):
+        columns = st.columns(2)
+        for column, platform in zip(columns, row):
+            with column:
+                with st.container(border=True):
+                    st.subheader(platform.display_name)
+                    st.caption(platform.subtitle)
+                    if st.button(
+                        f"Enter {platform.display_name}",
+                        key=f"data_import_enter_{platform.key}",
+                        icon=":material/arrow_forward:",
+                        width="stretch",
+                    ):
+                        if current is not None and current.key != platform.key and st.session_state.get("batch_id"):
+                            st.session_state[PENDING_PLATFORM_SWITCH_KEY] = platform.key
+                        else:
+                            bind_active_import_platform(st.session_state, platform)
+                            st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
+                        st.rerun()
+
+
 def _workflow_steps_for_source(source_type: Any) -> tuple[str, ...]:
-    if source_type == SHOPEE_MONTHLY_STATEMENT:
-        return MONTHLY_WIZARD_STEPS
     return WIZARD_STEPS
 
 
@@ -385,10 +560,6 @@ def _set_step(step: int) -> None:
 
 
 def _render_wizard_progress(current_step: int) -> None:
-    if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
-        monthly_step = 4 if current_step == 5 else current_step
-        render_workflow_stepper(MONTHLY_WIZARD_STEPS, monthly_step)
-        return
     render_workflow_stepper(
         _workflow_steps_for_source(st.session_state.get("import_source_type")),
         current_step,
@@ -396,6 +567,11 @@ def _render_wizard_progress(current_step: int) -> None:
 
 
 def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
+    platform = active_data_import_platform(st.session_state)
+    if platform is None:
+        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = True
+        st.rerun()
+        return
     active_source = st.session_state.get("import_source_type") if st.session_state.get("batch_id") else None
     if active_source:
         with st.container(border=True):
@@ -416,19 +592,19 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             "Import workflow",
             (
                 "Invoice Import",
-                SHOPEE_WEEKLY_STATEMENT,
-                SHOPEE_MONTHLY_STATEMENT,
+                "Weekly Statement",
+                "Monthly Statement",
             ),
             key="weekly_statement_selected_source",
             default="Invoice Import",
         )
         source_type = {
             "Invoice Import": PLATFORM_ORDERS,
-            SHOPEE_WEEKLY_STATEMENT: SHOPEE_WEEKLY_STATEMENT,
-            SHOPEE_MONTHLY_STATEMENT: SHOPEE_MONTHLY_STATEMENT,
+            "Weekly Statement": SHOPEE_WEEKLY_STATEMENT,
+            "Monthly Statement": SHOPEE_MONTHLY_STATEMENT,
         }[source_label]
         st.caption(
-            "PDF or ZIP order documents for Shopee, Lazada, and ZENXIN."
+            f"PDF or ZIP order documents for {platform.display_name}."
             if source_type == PLATFORM_ORDERS
             else (
                 "Native Shopee Weekly Statement settlement export (.xlsx)."
@@ -436,11 +612,36 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
                 else "Native Shopee full-calendar-month Statement export (.xlsx)."
             )
         )
-        if st.button("Continue to upload", type="primary", icon=":material/arrow_forward:"):
+        available = platform_supports_source(platform, source_type)
+        if not available:
+            _render_unavailable_capability(platform, source_type)
+        if st.button(
+            "Continue to upload",
+            type="primary",
+            icon=":material/arrow_forward:",
+            disabled=not available,
+        ):
             st.session_state.import_source_type = source_type
             _set_step(2)
             st.rerun()
-def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> None:
+
+
+def _render_unavailable_capability(platform: DataImportPlatform, source_type: str) -> None:
+    source_label = {
+        PLATFORM_ORDERS: "Invoice Import",
+        SHOPEE_WEEKLY_STATEMENT: "Weekly Statement",
+        SHOPEE_MONTHLY_STATEMENT: "Monthly Statement",
+    }[source_type]
+    if platform.key == "shopee_sg":
+        st.info(f"This import workflow is not available for {platform.display_name} yet.")
+    else:
+        st.info(f"{source_label} import is not available for {platform.display_name} yet.")
+
+
+def _render_upload_step(
+    render_platform_orders_upload: Callable[[DataImportPlatform], Any],
+    platform: DataImportPlatform,
+) -> None:
     _render_recovery_notice()
     if _has_pending_recovery():
         _render_recovery_confirmation()
@@ -448,7 +649,7 @@ def _render_upload_step(render_platform_orders_upload: Callable[[], Any]) -> Non
     if source_type == PLATFORM_ORDERS:
         st.subheader("Upload platform order files")
         st.caption("Upload PDF or ZIP order documents for the active batch.")
-        render_platform_orders_upload()
+        render_platform_orders_upload(platform)
         presentation_state = invoice_upload_presentation_state(st.session_state)
         if presentation_state == _INVOICE_UPLOAD_RESOLVED:
             _render_next_step(

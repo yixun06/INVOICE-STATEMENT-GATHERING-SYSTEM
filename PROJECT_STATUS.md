@@ -13,6 +13,14 @@ InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived
 
 ## Current System State
 
+### Data Import Platform Entry — IMPLEMENTED / UNCOMMITTED
+
+- `Data Import` now opens a native 2×2 platform chooser for Shopee MY, Shopee SG, Lazada, and Zenxin Website, then renders one shared five-step Data Import shell. Shopee market labels are text-only with no flag icon or Unicode flag. Back is left-aligned above the platform title as secondary navigation.
+- All platform contexts expose Invoice Import, Weekly Statement, and Monthly Statement. Shopee MY retains its existing three workflows; Lazada and Zenxin Website admit only Invoice Import; Shopee SG has no enabled source path. Unsupported combinations remain visible and fail closed before Upload.
+- Invoice uploads now carry an explicit expected platform while retaining automatic detector validation. A detected mismatch becomes `PLATFORM MISMATCH`, reports selected and detected platforms, and contributes no order/product/review records to the active batch. New mixed-platform batches are not admitted.
+- One active batch remains the contract. Back preserves it; choosing another platform presents Continue or the existing confirmed Discard lifecycle. The target context binds only after discard reset, which clears both `data_import.active_platform` and `data_import.active_market`.
+- Shopee SG remains UI-visible but cannot reach MY parsing, persistence, Product Master, or Statement workflows. UAT2 write delta: 0; SG business-data write delta: 0; Product Master write delta: 0; schema delta: 0; deployment: NOT VERIFIED.
+
 ### Platform Invoice — COMMITTED
 
 Visible workflow: `1. Select Source -> 2. Upload -> 3. Validate -> 4. Reconcile -> 5. Review & Commit`.
