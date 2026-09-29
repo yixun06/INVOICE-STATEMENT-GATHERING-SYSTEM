@@ -850,14 +850,14 @@ def _order_adjustment_events(
     statement: ParsedShopeeWeeklyStatement,
     audit: StatementBatchAudit,
 ) -> tuple[CanonicalOrderAdjustment, ...]:
-    """Create only the exact V1 Statement adjustment event; retain other rows in Statement_Data."""
+    """Create canonical events for usable source descriptions; retain every raw row."""
     events: list[CanonicalOrderAdjustment] = []
     for adjustment in statement.adjustments:
         if supported_adjustment_type(adjustment.adjustment_type) is None:
             continue
         if adjustment.adjustment_complete_date is None or adjustment.adjustment_amount is None:
             raise StatementCommitBlocked(
-                "Supported Statement Adjustment lacks required date or amount."
+                "Canonical Statement Adjustment lacks required date or amount."
             )
         try:
             event = make_statement_adjustment(

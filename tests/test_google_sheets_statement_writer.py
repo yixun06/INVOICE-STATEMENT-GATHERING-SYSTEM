@@ -368,6 +368,39 @@ def test_statement_commit_appends_supported_adjustment_in_the_same_values_batch(
     assert row[positions["invoice_evidence_amount"]] == ""
 
 
+def test_statement_writer_round_trips_generic_source_driven_adjustment_type():
+    adjustment = SettlementAdjustment(
+        sequence_no="8",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_type="Return Refund Adjustment/Compensation",
+        adjustment_reason="Adjustment/Compensation",
+        adjustment_amount=Decimal("137.24"),
+        linked_order_id="26082480BKAV7A",
+        payout_completed_date=date(2026, 9, 3),
+        source_row_number=88,
+    )
+    statement = replace(
+        _statement(),
+        adjustments=(adjustment,),
+        adjustment_control_total=Decimal("137.24"),
+    )
+    plan = _plan(statement=statement)
+    gateway = InMemoryStatementGateway()
+
+    assert len(plan.order_adjustments) == 1
+    result = _commit(gateway, plan)
+    row = gateway.tabs[ORDER_ADJUSTMENTS_TAB][1]
+    positions = {header: index for index, header in enumerate(ORDER_ADJUSTMENTS_HEADERS)}
+
+    assert result.committed is True
+    assert len(row) == len(ORDER_ADJUSTMENTS_HEADERS) == 21
+    assert row[positions["linked_order_id"]] == "26082480BKAV7A"
+    assert row[positions["adjustment_type"]] == "RETURN_REFUND_ADJUSTMENT_COMPENSATION"
+    assert row[positions["adjustment_description"]] == "Return Refund Adjustment/Compensation"
+    assert row[positions["adjustment_reason"]] == "Adjustment/Compensation"
+    assert row[positions["adjustment_amount"]] == "137.24"
+
+
 def test_pdf_evidence_writer_updates_only_existing_adjustment_evidence_fields():
     adjustment = SettlementAdjustment(
         sequence_no="9", adjustment_complete_date=date(2026, 8, 6),

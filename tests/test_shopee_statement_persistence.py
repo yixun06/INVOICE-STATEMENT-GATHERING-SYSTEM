@@ -181,14 +181,14 @@ def test_no_adjustment_statement_writes_no_adjustment_rows_or_events():
     assert plan.order_adjustments == ()
 
 
-def test_open_ended_adjustment_text_is_preserved_in_raw_rows_without_operational_inference():
+def test_source_driven_adjustment_typing_preserves_raw_rows_and_builds_canonical_events():
     adjustments = (
         SettlementAdjustment(
-            sequence_no="8", adjustment_complete_date=date(2026, 4, 30),
-            adjustment_type="New source description",
+            sequence_no="8", adjustment_complete_date=date(2026, 9, 2),
+            adjustment_type="Return Refund Adjustment/Compensation",
             adjustment_reason="Adjustment/Compensation",
-            adjustment_amount=Decimal("137.24"), linked_order_id="ORDER-X",
-            payout_completed_date=date(2026, 4, 30), source_row_number=88,
+            adjustment_amount=Decimal("137.24"), linked_order_id="26082480BKAV7A",
+            payout_completed_date=date(2026, 9, 3), source_row_number=88,
         ),
         SettlementAdjustment(
             sequence_no="9", adjustment_complete_date=date(2026, 4, 30),
@@ -208,9 +208,44 @@ def test_open_ended_adjustment_text_is_preserved_in_raw_rows_without_operational
 
     assert len(raw) == 2
     assert sum(Decimal(row[positions["adjustment_amount"]]) for row in raw) == Decimal("122.20")
-    assert raw[0][positions["adjustment_type"]] == "New source description"
+    assert raw[0][positions["adjustment_type"]] == "Return Refund Adjustment/Compensation"
     assert raw[0][positions["adjustment_reason"]] == "Adjustment/Compensation"
-    assert len(plan.order_adjustments) == 1
+    assert [(event.linked_order_id, event.adjustment_type, event.adjustment_description, event.adjustment_reason, event.adjustment_amount) for event in plan.order_adjustments] == [
+        (
+            "26082480BKAV7A",
+            "RETURN_REFUND_ADJUSTMENT_COMPENSATION",
+            "Return Refund Adjustment/Compensation",
+            "Adjustment/Compensation",
+            Decimal("137.24"),
+        ),
+        (
+            "ORDER-Y",
+            "RETURN_REFUND_AFTER_ORDER_COMPLETED",
+            "Return Refund Adjustment After Order Completed",
+            "Return Refund Adjustment After Order Completed",
+            Decimal("-15.04"),
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("linked_order_id", "", "linked_order_id is required"),
+        ("adjustment_complete_date", None, "required date or amount"),
+        ("adjustment_amount", None, "required date or amount"),
+    ),
+)
+def test_generic_adjustment_keeps_required_statement_evidence_fail_closed(field, value, message):
+    adjustment = replace(
+        _statement().adjustments[0],
+        adjustment_type="New source description",
+        **{field: value},
+    )
+    statement = replace(_statement(), adjustments=(adjustment,))
+
+    with pytest.raises(StatementCommitBlocked, match=message):
+        _plan(statement=statement)
 
 
 def test_adjustment_evidence_never_rewrites_original_invoice_business_facts():

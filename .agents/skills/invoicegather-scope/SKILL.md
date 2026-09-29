@@ -67,6 +67,35 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
 
 Do not restore or document the rejected four-step workflow.
 
+## Shopee Statement Adjustment source-driven canonical typing - Approved
+
+Statement `Adjustment Type | Description` is the authoritative source for a
+canonical `Order_Adjustments.adjustment_type`. It is a machine-readable source
+representation, not a semantic business classification.
+
+- The published historical description `Return Refund Adjustment After Order
+  Completed` remains permanently mapped to the immutable
+  `RETURN_REFUND_AFTER_ORDER_COMPLETED` ID.
+- Every other structurally valid nonblank Description is mechanically normalized:
+  trim surrounding whitespace, uppercase, replace each run outside ASCII
+  `A-Z`/`0-9` with `_`, collapse runs, then trim leading/trailing `_`. A blank
+  result has no invented `UNKNOWN`/`OTHER` type and follows the existing safe
+  no-canonical-event path.
+- Do not use AI, fuzzy matching, keywords, amount sign, or Adjustment Reason to
+  classify a type. Sign remains signed financial evidence; Description and
+  Reason remain separate, raw source facts in `Statement_Data` and the event.
+- Linked Order ID, Adjustment Complete Date, Adjustment Amount, and Statement
+  provenance remain structurally required and fail closed. Valid new wording no
+  longer requires a whitelist; account-level Adjustment support is not added.
+- `Order_Adjustments` remains a 21-column independent post-order event ledger.
+  Its fingerprint structure is unchanged and must not rewrite Invoice facts,
+  Product Summary, reporting, or original financial layout. No historical
+  backfill is implied.
+- The real `Return Refund Adjustment/Compensation` `+137.24` source linked to
+  `26082480BKAV7A` is uncommitted pre-commit regression evidence only. Its
+  canonical type is `RETURN_REFUND_ADJUSTMENT_COMPENSATION`; do not write or
+  backfill it to UAT2 merely because this behavior is supported.
+
 ## Current Cross Platform Summary — Locked
 
 Cross Platform Summary is an implemented, **live read-only database-backed

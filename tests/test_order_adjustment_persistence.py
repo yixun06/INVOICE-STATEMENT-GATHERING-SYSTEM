@@ -13,6 +13,7 @@ from src.invoice_app.domain.historical_invoice import (
 from src.invoice_app.domain.order_adjustment import (
     AdjustmentImportStatus,
     EvidenceStatus,
+    canonical_adjustment_type,
     make_statement_adjustment,
 )
 from src.invoice_app.repositories.order_adjustment_repository import (
@@ -52,6 +53,109 @@ def _event(*, amount="-43.61", complete_date=date(2026, 8, 6), sequence="1", fil
     )
     assert event is not None
     return event
+
+
+def _generic_event(
+    *,
+    description="Return Refund Adjustment/Compensation",
+    reason="Separate source reason",
+    amount="137.24",
+    complete_date=date(2026, 9, 2),
+    sequence="8",
+    file_hash="statement-generic",
+):
+    event = make_statement_adjustment(
+        linked_order_id="26082480BKAV7A",
+        adjustment_description=description,
+        adjustment_reason=reason,
+        adjustment_complete_date=complete_date,
+        adjustment_amount=Decimal(amount),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="batch-generic",
+        statement_sequence_no=sequence,
+        statement_source_filename="statement-generic.xlsx",
+        statement_file_hash=file_hash,
+        first_observed_at=NOW,
+    )
+    assert event is not None
+    return event
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    (
+        ("Return Refund Adjustment After Order Completed", "RETURN_REFUND_AFTER_ORDER_COMPLETED"),
+        ("Return Refund Adjustment/Compensation", "RETURN_REFUND_ADJUSTMENT_COMPENSATION"),
+        ("Lost-parcel compensation", "LOST_PARCEL_COMPENSATION"),
+        ("  Voucher / Promotion Adjustment  ", "VOUCHER_PROMOTION_ADJUSTMENT"),
+        ("***Voucher___Promotion///Adjustment***", "VOUCHER_PROMOTION_ADJUSTMENT"),
+        ("lost-PARCEL compensation", "LOST_PARCEL_COMPENSATION"),
+        ("\t \n", None),
+        ("---", None),
+    ),
+)
+def test_canonical_adjustment_type_mechanically_normalizes_source_description(description, expected):
+    assert canonical_adjustment_type(description) == expected
+
+
+def test_generic_adjustment_preserves_raw_source_text_and_ignores_amount_sign_for_type():
+    positive = _generic_event(amount="137.24")
+    negative = _generic_event(amount="-137.24")
+    zero = _generic_event(amount="0.00")
+
+    assert {event.adjustment_type for event in (positive, negative, zero)} == {
+        "RETURN_REFUND_ADJUSTMENT_COMPENSATION"
+    }
+    assert positive.adjustment_description == "Return Refund Adjustment/Compensation"
+    assert positive.adjustment_reason == "Separate source reason"
+    assert positive.adjustment_amount == Decimal("137.24")
+
+
+def test_generic_adjustment_fingerprint_is_stable_and_separates_real_event_facts():
+    generic = _generic_event()
+    repeat = _generic_event(sequence="99", file_hash="statement-reimport")
+    different_description = _generic_event(description="Lost-parcel compensation")
+    different_amount = _generic_event(amount="137.25")
+    different_date = _generic_event(complete_date=date(2026, 9, 3))
+    historical = _event()
+    repository = InMemoryOrderAdjustmentRepository()
+
+    result = repository.insert_new((generic, repeat, different_description, different_amount, different_date))
+
+    assert historical.adjustment_type == "RETURN_REFUND_AFTER_ORDER_COMPLETED"
+    assert historical.adjustment_event_fingerprint == "721c45211ddc46d3a0e32c6e741a5eec9e1163726fe8d0cb015205ec33a682da"
+    assert generic.adjustment_event_fingerprint == repeat.adjustment_event_fingerprint
+    assert len({
+        generic.adjustment_event_fingerprint,
+        different_description.adjustment_event_fingerprint,
+        different_amount.adjustment_event_fingerprint,
+        different_date.adjustment_event_fingerprint,
+    }) == 4
+    assert [entry.status for entry in result] == [
+        AdjustmentImportStatus.NEW,
+        AdjustmentImportStatus.ALREADY_IMPORTED,
+        AdjustmentImportStatus.NEW,
+        AdjustmentImportStatus.NEW,
+        AdjustmentImportStatus.NEW,
+    ]
+    assert len(repository.read_by_linked_order_id("26082480BKAV7A")) == 4
+
+
+def test_generic_adjustment_keeps_linked_order_id_required():
+    with pytest.raises(ValueError, match="linked_order_id is required"):
+        make_statement_adjustment(
+            linked_order_id="",
+            adjustment_description="Return Refund Adjustment/Compensation",
+            adjustment_reason="Separate source reason",
+            adjustment_complete_date=date(2026, 9, 2),
+            adjustment_amount=Decimal("137.24"),
+            payout_completed_date=date(2026, 9, 3),
+            statement_batch_id="batch-generic",
+            statement_sequence_no="8",
+            statement_source_filename="statement-generic.xlsx",
+            statement_file_hash="statement-generic",
+            first_observed_at=NOW,
+        )
 
 
 def _pdf_entry(*, amount="-43.61", complete_date="06/08/2026"):

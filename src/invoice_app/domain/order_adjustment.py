@@ -87,12 +87,19 @@ class OrderAdjustmentImportResult:
 
 
 def supported_adjustment_type(description: str) -> str | None:
-    """Map only the exact V1 Statement description; future values stay unsupported."""
-    return (
-        RETURN_REFUND_AFTER_ORDER_COMPLETED
-        if _normalize_text(description) == _normalize_text(RETURN_REFUND_DESCRIPTION)
-        else None
-    )
+    """Compatibility wrapper for deterministic source-driven canonical typing."""
+    return canonical_adjustment_type(description)
+
+
+def canonical_adjustment_type(description: str) -> str | None:
+    """Return the immutable historic ID or a mechanical ASCII source-text type."""
+    source_text = _optional_text(description)
+    if source_text is None:
+        return None
+    if _normalize_text(source_text) == _normalize_text(RETURN_REFUND_DESCRIPTION):
+        return RETURN_REFUND_AFTER_ORDER_COMPLETED
+    canonical_type = re.sub(r"[^A-Z0-9]+", "_", source_text.upper()).strip("_")
+    return canonical_type or None
 
 
 def adjustment_event_fingerprint(
@@ -133,7 +140,7 @@ def make_statement_adjustment(
     statement_file_hash: str,
     first_observed_at: datetime,
 ) -> CanonicalOrderAdjustment | None:
-    """Build one persistable V1 event or retain an unsupported Statement type."""
+    """Build one persistable source-driven Statement event when its type is usable."""
     adjustment_type = supported_adjustment_type(adjustment_description)
     if adjustment_type is None:
         return None

@@ -32,6 +32,13 @@ Visible workflow: `1. Select Source -> 2. Upload -> 3. Validate -> 4. Reconcile 
 
 The only complete end-to-end Statement acceptance corpus remains 2026-08-31 to 2026-09-06: 296 orders / 442 SKU rows, 138 `EXACT`, 158 `EXPLAINED`, 0 `NONE`, RM0.00 unexplained residual. It is not cross-week production proof.
 
+### Shopee Statement Adjustment Source-Driven Canonical Typing - APPROVED / IMPLEMENTED / UNCOMMITTED
+
+- `Adjustment Type | Description` is now the deterministic source of canonical `adjustment_type`. Published `Return Refund Adjustment After Order Completed` retains the immutable `RETURN_REFUND_AFTER_ORDER_COMPLETED`; every other usable nonblank source description uses mechanical ASCII normalization only, never AI/fuzzy/keyword/sign/reason semantics.
+- Raw `adjustment_description` and `adjustment_reason` remain separate source facts. `Statement_Data` retains every raw ADJUSTMENT row, while a structurally valid linked Adjustment also creates a canonical independent `Order_Adjustments` event. Linked order, complete date, amount, and Statement provenance remain fail closed.
+- Real `26082480BKAV7A` evidence is `Return Refund Adjustment/Compensation`, `+137.24`, linked order `26082480BKAV7A`; dry-run commit-plan regression creates `RETURN_REFUND_ADJUSTMENT_COMPENSATION` and preserves its raw row. It is **REAL SOURCE / NOT COMMITTED / PRE-COMMIT REGRESSION VERIFIED**; no historical backfill is required.
+- `Order_Adjustments` schema: **UNCHANGED / 21 COLUMNS**. Invoice facts, Product Summary, reporting, settlement authority, UAT2, SG, and Product Master are unchanged; write delta is 0 for each. Ghost UI remains **PAUSED / ROOT CAUSE NOT PROVEN**.
+
 ### Weekly Billing — COMMITTED
 
 - Committed-data Shopee Statement-period report with Product Summary, Financial Summary, and Excel export.
