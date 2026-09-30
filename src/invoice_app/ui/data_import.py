@@ -423,12 +423,19 @@ def _adopt_legacy_platform_batch() -> None:
     if st.session_state.get("batch_id") and not st.session_state.get("import_source_type"):
         st.session_state.import_source_type = PLATFORM_ORDERS
         st.session_state.data_import_step = max(int(st.session_state.get("data_import_step", 1)), 3)
-    if (
-        st.session_state.get("import_source_type")
-        and active_data_import_platform(st.session_state) is None
-    ):
-        st.session_state[ACTIVE_IMPORT_PLATFORM_KEY] = SHOPEE_MY.key.value
-        st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
+    if st.session_state.get("batch_id"):
+        market_platform = _platform_for_active_market(st.session_state)
+        if market_platform is not None:
+            # The market binding is the existing batch owner.  Repair only the
+            # UI platform key to that owner; never bind a newly selected target
+            # or override an already-rendered Back-to-chooser request.
+            st.session_state[ACTIVE_IMPORT_PLATFORM_KEY] = market_platform.key
+        elif (
+            st.session_state.get("import_source_type")
+            and active_data_import_platform(st.session_state) is None
+        ):
+            st.session_state[ACTIVE_IMPORT_PLATFORM_KEY] = SHOPEE_MY.key.value
+            st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
     _normalize_step_for_source(st.session_state)
 
 
@@ -448,6 +455,22 @@ def active_data_import_platform(state: Mapping[str, Any]) -> DataImportPlatform 
     if value in (None, ""):
         return None
     return _DATA_IMPORT_PLATFORM_BY_KEY.get(str(value))
+
+
+def _platform_for_active_market(state: Mapping[str, Any]) -> DataImportPlatform | None:
+    """Return the platform already owned by the active market binding, if any."""
+    active_market = state.get(ACTIVE_IMPORT_MARKET_KEY)
+    if active_market in (None, ""):
+        return None
+    return next(
+        (
+            platform
+            for platform in DATA_IMPORT_PLATFORMS
+            if platform.market_context is not None
+            and platform.market_context.key.value == str(active_market)
+        ),
+        None,
+    )
 
 
 def bind_active_import_platform(
@@ -474,7 +497,11 @@ def _render_platform_selection(discard_current_batch: Callable[[], None]) -> Non
     st.title("Choose a platform")
     st.caption("Select the source workspace for this import.")
     pending_key = st.session_state.get(PENDING_PLATFORM_SWITCH_KEY)
-    current = active_data_import_platform(st.session_state)
+    # A bound market is the authoritative owner of an active batch.  It must
+    # win over any stale UI platform key before a platform card can be entered.
+    current = _platform_for_active_market(st.session_state) or active_data_import_platform(
+        st.session_state
+    )
     if pending_key:
         pending = _DATA_IMPORT_PLATFORM_BY_KEY.get(str(pending_key))
         if pending is not None and current is not None:

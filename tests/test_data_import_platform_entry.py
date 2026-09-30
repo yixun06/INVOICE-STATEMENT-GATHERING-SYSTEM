@@ -190,6 +190,146 @@ def test_back_returns_to_chooser_without_discarding_the_active_batch(tmp_path, m
     assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "shopee_my"
 
 
+@pytest.mark.parametrize(
+    ("current_platform", "current_market", "target_platform"),
+    (
+        ("shopee_my", "shopee_my", "Shopee SG"),
+        ("shopee_sg", "shopee_sg", "Shopee MY"),
+        ("shopee_my", "shopee_my", "Lazada"),
+        ("lazada", None, "Zenxin Website"),
+    ),
+)
+def test_active_batch_platform_switch_renders_controlled_conflict(
+    tmp_path, monkeypatch, current_platform, current_market, target_platform
+):
+    app = AppTest.from_file(str(APP_PATH))
+    state_values = {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "active-batch",
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "data_import_step": 2,
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: current_platform,
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: True,
+    }
+    if current_market is not None:
+        state_values[ACTIVE_IMPORT_MARKET_KEY] = current_market
+    for key, value in state_values.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+    app.run(timeout=20)
+
+    next(button for button in app.button if button.label == f"Enter {target_platform}").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    current_name = data_import._DATA_IMPORT_PLATFORM_BY_KEY[current_platform].display_name
+    assert app.exception == []
+    assert "Current import is still active" in {item.value for item in app.subheader}
+    assert any(button.label == f"Continue {current_name} import" for button in app.button)
+    assert any(
+        button.label == f"Discard current import and switch to {target_platform}"
+        for button in app.button
+    )
+    assert state["batch_id"] == "active-batch"
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == current_platform
+
+
+def test_my_to_sg_market_bound_switch_does_not_bind_target_before_discard(tmp_path, monkeypatch):
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "my-active-batch",
+        "orders": [{"platform": "Shopee", "order_id": "SHP-1"}],
+        "products": [],
+        "reviews": [],
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "data_import_step": 2,
+        # Reproduces the runtime failure: stale UI platform says SG while the
+        # active batch remains market-bound to MY.
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: "shopee_sg",
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: True,
+        ACTIVE_IMPORT_MARKET_KEY: "shopee_my",
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+    app.run(timeout=20)
+
+    next(button for button in app.button if button.label == "Enter Shopee SG").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert "Current import is still active" in {item.value for item in app.subheader}
+    assert state["batch_id"] == "my-active-batch"
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "shopee_my"
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_my"
+
+    next(
+        button
+        for button in app.button
+        if button.label == "Discard current import and switch to Shopee SG"
+    ).click().run(timeout=20)
+    next(button for button in app.button if button.key == "cancel_discard_current_batch").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert state["batch_id"] == "my-active-batch"
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "shopee_my"
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_my"
+
+    next(button for button in app.button if button.label == "Enter Shopee SG").click().run(timeout=20)
+    next(
+        button
+        for button in app.button
+        if button.label == "Discard current import and switch to Shopee SG"
+    ).click().run(timeout=20)
+    next(button for button in app.button if button.key == "confirm_discard_current_batch").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert any(
+        "Shopee SG" in title.value and "Data Import" in title.value
+        for title in app.title
+    )
+    assert "batch_id" not in state
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "shopee_sg"
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_sg"
+
+
+def test_active_platform_reentering_its_own_shell_preserves_the_batch(tmp_path, monkeypatch):
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "my-active-batch",
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "data_import_step": 2,
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: "shopee_my",
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: True,
+        ACTIVE_IMPORT_MARKET_KEY: "shopee_my",
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+    app.run(timeout=20)
+
+    next(button for button in app.button if button.label == "Enter Shopee MY").click().run(timeout=20)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert any(
+        "Shopee MY" in title.value and "Data Import" in title.value
+        for title in app.title
+    )
+    assert state["batch_id"] == "my-active-batch"
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_my"
+
+
 def test_active_batch_blocks_switch_until_safe_discard_then_enters_target(tmp_path, monkeypatch):
     app = AppTest.from_file(str(APP_PATH))
     for key, value in {
