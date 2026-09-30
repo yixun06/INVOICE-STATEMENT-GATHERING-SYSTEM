@@ -148,6 +148,7 @@ class StatementCommitState:
     orders: Mapping[str, CanonicalInvoiceOrder]
     committed_statements: Sequence[CommittedStatementReference]
     items: tuple[CanonicalInvoiceItem, ...] = ()
+    order_adjustments: tuple[CanonicalOrderAdjustment, ...] = ()
 
 
 @dataclass(frozen=True)

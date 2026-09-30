@@ -18,7 +18,11 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
-from src.invoice_app.domain.order_adjustment import supported_adjustment_type
+from src.invoice_app.domain.order_adjustment import (
+    CanonicalOrderAdjustment,
+    EvidenceStatus,
+    supported_adjustment_type,
+)
 from src.invoice_app.domain.statement_reconciliation_v2 import (
     CompatibleEdgeEvidence,
     CoverageEvidence,
@@ -60,7 +64,7 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 from src.invoice_app.utils.normalize import normalize_sku_text
 
 
-RULE_VERSION = "SHOPEE_RECONCILIATION_V2_4"
+RULE_VERSION = "SHOPEE_RECONCILIATION_V2_5"
 
 _SHIPPING_COMPONENTS = (
     "Shipping Fee Paid by Buyer (excl. SST)",
@@ -113,6 +117,7 @@ def evaluate_statement_reconciliation(
     *,
     product_families: ProductFamilyResolver,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
+    canonical_adjustments: Iterable[CanonicalOrderAdjustment] = (),
     tolerance: Decimal = MONEY_TOLERANCE,
 ) -> StatementReconciliationBatch:
     """Evaluate one parsed Statement against persisted Invoice-derived facts.
@@ -135,6 +140,7 @@ def evaluate_statement_reconciliation(
         for issue in validate_shopee_weekly_statement(statement)
     )
     repairs = tuple(verified_artifact_repairs)
+    persisted_adjustments = tuple(canonical_adjustments)
     family_cache: dict[str, tuple[ProductFamilyCandidate, ...]] = {}
     contexts_by_order: dict[str, list[_RowContext]] = defaultdict(list)
     for row in statement.sku_rows:
@@ -178,6 +184,8 @@ def evaluate_statement_reconciliation(
             order,
             order_rows.get(order_id),
             statement.adjustments,
+            persisted_adjustments,
+            statement_file_hash=statement.file_hash,
             tolerance=tolerance,
         )
         refund = _refund_evidence(order, order_rows.get(order_id), contexts, identities)
@@ -1132,7 +1140,9 @@ def _evaluate_settlement(
     order: CanonicalInvoiceOrder | None,
     order_row: SettlementIncomeRow | None,
     adjustments: Sequence[SettlementAdjustment],
+    canonical_adjustments: Sequence[CanonicalOrderAdjustment],
     *,
+    statement_file_hash: str,
     tolerance: Decimal,
 ) -> SettlementEvidence:
     source_state = (order.income_type or "").strip() if order is not None else ""
@@ -1146,11 +1156,13 @@ def _evaluate_settlement(
     adjustment_effects = _post_order_adjustment_effects(
         order,
         adjustments,
-        tolerance,
+        canonical_adjustments,
+        statement_file_hash=statement_file_hash,
+        tolerance=tolerance,
     )
-    if source_state.casefold() == "final" and order.final_amount is not None:
+    if order.final_amount is not None:
         if (
-            abs(order.final_amount - order.order_income) > tolerance
+            order.final_amount != order.order_income
             and adjustment_effects is None
         ):
             return _empty_settlement(order, order_row, tolerance, source_state)
@@ -1228,9 +1240,36 @@ def _evaluate_settlement(
 def _post_order_adjustment_effects(
     order: CanonicalInvoiceOrder,
     adjustments: Sequence[SettlementAdjustment],
+    canonical_adjustments: Sequence[CanonicalOrderAdjustment],
+    *,
+    statement_file_hash: str,
     tolerance: Decimal,
 ) -> tuple[str, ...] | None:
-    """Validate linked Statement adjustments without folding them into settlement."""
+    """Validate separate current or committed cross-period adjustment evidence."""
+
+    if order.final_amount is None or order.order_income is None:
+        return ()
+    if order.final_amount == order.order_income:
+        return ()
+
+    current_effects = _current_statement_adjustment_effects(
+        order, adjustments, tolerance
+    )
+    if current_effects is not None:
+        return current_effects
+    return _canonical_cross_period_adjustment_effects(
+        order,
+        canonical_adjustments,
+        statement_file_hash=statement_file_hash,
+    )
+
+
+def _current_statement_adjustment_effects(
+    order: CanonicalInvoiceOrder,
+    adjustments: Sequence[SettlementAdjustment],
+    tolerance: Decimal,
+) -> tuple[str, ...] | None:
+    """Retain the existing current-Statement source-evidence behavior."""
 
     linked = tuple(
         adjustment
@@ -1248,8 +1287,6 @@ def _post_order_adjustment_effects(
         return None
 
     effects = ["POST_ORDER_ADJUSTMENT_STATEMENT_ONLY"]
-    if order.final_amount is None or order.order_income is None:
-        return tuple(effects)
     adjustment_total = sum(
         (
             adjustment.adjustment_amount
@@ -1262,6 +1299,56 @@ def _post_order_adjustment_effects(
         return None
     effects.append("POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT")
     return tuple(effects)
+
+
+def _canonical_cross_period_adjustment_effects(
+    order: CanonicalInvoiceOrder,
+    canonical_adjustments: Sequence[CanonicalOrderAdjustment],
+    *,
+    statement_file_hash: str,
+) -> tuple[str, ...] | None:
+    """Use only exact, persisted other-Statement adjustment evidence.
+
+    These events explain the Invoice final/order-income delta only.  They never
+    become a current Statement financial component or alter its period totals.
+    """
+
+    linked = tuple(
+        event
+        for event in canonical_adjustments
+        if event.platform == "Shopee"
+        and event.linked_order_id == order.order_id
+        and event.statement_file_hash != statement_file_hash
+    )
+    if not linked:
+        return None
+    fingerprints = tuple(event.adjustment_event_fingerprint for event in linked)
+    if (
+        any(not fingerprint for fingerprint in fingerprints)
+        or len(set(fingerprints)) != len(fingerprints)
+        or any(
+            event.evidence_status is EvidenceStatus.EVIDENCE_CONFLICT
+            or not event.adjustment_type
+            or not event.adjustment_description
+            or event.adjustment_complete_date is None
+            or event.adjustment_amount is None
+            or not event.statement_batch_id
+            or not event.statement_source_filename
+            or not event.statement_file_hash
+            for event in linked
+        )
+    ):
+        return None
+    expected_post_order_delta = order.final_amount - order.order_income
+    adjustment_total = sum(
+        (event.adjustment_amount for event in linked), Decimal("0")
+    )
+    if adjustment_total != expected_post_order_delta:
+        return None
+    return (
+        "POST_ORDER_ADJUSTMENT_CANONICAL_CROSS_PERIOD",
+        "POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT",
+    )
 
 
 def _empty_settlement(

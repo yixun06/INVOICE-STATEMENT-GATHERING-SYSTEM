@@ -9,6 +9,7 @@ import pytest
 from openpyxl.utils.cell import range_boundaries
 
 from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem, CanonicalInvoiceOrder
+from src.invoice_app.domain.order_adjustment import make_statement_adjustment
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     ParsedShopeeWeeklyStatement,
     SettlementAdjustment,
@@ -41,6 +42,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitBlocked,
     ProtectedInvoiceItemStatementFields,
     prepare_statement_commit_plan,
+    serialize_order_adjustment,
 )
 from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_HEADERS,
@@ -399,6 +401,33 @@ def test_statement_writer_round_trips_generic_source_driven_adjustment_type():
     assert row[positions["adjustment_description"]] == "Return Refund Adjustment/Compensation"
     assert row[positions["adjustment_reason"]] == "Adjustment/Compensation"
     assert row[positions["adjustment_amount"]] == "137.24"
+
+
+def test_reload_commit_state_reads_canonical_order_adjustment_evidence():
+    event = make_statement_adjustment(
+        linked_order_id="ORDER-1",
+        adjustment_description="Return Refund Adjustment/Compensation",
+        adjustment_reason="Compensation",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_amount=Decimal("137.24"),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="later-committed-batch",
+        statement_sequence_no="A1",
+        statement_source_filename="later-statement.xlsx",
+        statement_file_hash="later-committed-statement-hash",
+        first_observed_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+    )
+    assert event is not None
+    gateway = InMemoryStatementGateway()
+    gateway.tabs[ORDER_ADJUSTMENTS_TAB].append(
+        list(serialize_order_adjustment(event))
+    )
+
+    state = GoogleSheetsStatementWriter(
+        spreadsheet_id="synthetic-sheet", gateway=gateway
+    ).reload_commit_state()
+
+    assert state.order_adjustments == (event,)
 
 
 def test_pdf_evidence_writer_updates_only_existing_adjustment_evidence_fields():

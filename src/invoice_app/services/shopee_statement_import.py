@@ -23,6 +23,7 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
+from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment
 from src.invoice_app.domain.statement_reconciliation_v2 import (
     IdentityScope,
     SettlementBasis,
@@ -86,6 +87,7 @@ class StatementReviewEvidenceVersion:
     statement_file_hash: str
     invoice_snapshot_sha256: str
     product_family_snapshot_sha256: str
+    order_adjustment_snapshot_sha256: str
     rule_version: str
     reconciliation_sha256: str
 
@@ -163,6 +165,9 @@ def review_statement_upload(
         uploaded_by=uploaded_by,
         invoice_orders=tuple(state.orders.values()),
         invoice_items=_state_statement_items(stage.statement, state.items),
+        canonical_adjustments=_cross_period_order_adjustments(
+            stage.statement, state.order_adjustments
+        ),
         product_master=product_master,
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
@@ -197,6 +202,9 @@ def refresh_statement_review(
         uploaded_by=review.uploaded_by,
         invoice_orders=tuple(state.orders.values()),
         invoice_items=_state_statement_items(stage.statement, state.items),
+        canonical_adjustments=_cross_period_order_adjustments(
+            stage.statement, state.order_adjustments
+        ),
         product_master=product_master,
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
@@ -262,6 +270,9 @@ def commit_statement_review(
         )
         if not current_coverage.complete:
             return StatementCommitAttempt(False, (INVOICE_COVERAGE_INCOMPLETE,))
+        current_adjustments = _cross_period_order_adjustments(
+            statement, state.order_adjustments
+        )
         current_reconciliation = evaluate_statement_reconciliation(
             statement,
             current_orders,
@@ -270,12 +281,14 @@ def commit_statement_review(
                 load_product_master()
             ),
             verified_artifact_repairs=repairs,
+            canonical_adjustments=current_adjustments,
         )
         current_version = _evidence_version(
             statement,
             current_orders,
             current_items,
             current_reconciliation,
+            current_adjustments,
         )
         changed = _changed_evidence(review.evidence_version, current_version)
         if changed:
@@ -331,18 +344,23 @@ def check_statement_review_currency(
     state = writer.reload_commit_state()
     current_items = _state_statement_items(statement, state.items)
     current_orders = _statement_orders(statement, state.orders.values())
+    current_adjustments = _cross_period_order_adjustments(
+        statement, state.order_adjustments
+    )
     current_reconciliation = evaluate_statement_reconciliation(
         statement,
         current_orders,
         current_items,
         product_families=product_family_resolver_from_price_master(product_master),
         verified_artifact_repairs=tuple(verified_artifact_repairs),
+        canonical_adjustments=current_adjustments,
     )
     current = _evidence_version(
         statement,
         current_orders,
         current_items,
         current_reconciliation,
+        current_adjustments,
     )
     changed = _changed_evidence(review.evidence_version, current)
     return StatementReviewCurrency(not changed, changed)
@@ -356,6 +374,7 @@ def _build_review(
     uploaded_by: str,
     invoice_orders: Iterable[CanonicalInvoiceOrder],
     invoice_items: Iterable[CanonicalInvoiceItem],
+    canonical_adjustments: Iterable[CanonicalOrderAdjustment],
     product_master: ProductPriceMaster,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair],
     now: Callable[[], datetime],
@@ -398,6 +417,7 @@ def _build_review(
         )
 
     invoice_items = tuple(invoice_items)
+    canonical_adjustments = tuple(canonical_adjustments)
     invoice_orders = _statement_orders(statement, invoice_orders)
     invoice_coverage = classify_statement_invoice_coverage(
         statement,
@@ -434,6 +454,7 @@ def _build_review(
         invoice_items,
         product_families=product_families,
         verified_artifact_repairs=repairs,
+        canonical_adjustments=canonical_adjustments,
     )
     sku_matches = match_statement_sku_rows(
         statement.sku_rows,
@@ -492,6 +513,7 @@ def _build_review(
             invoice_orders,
             invoice_items,
             reconciliation_v2,
+            canonical_adjustments,
         ),
         sku_matches=sku_matches,
         plan=plan,
@@ -580,6 +602,24 @@ def _statement_orders(
     )
 
 
+def _cross_period_order_adjustments(
+    statement: ParsedShopeeWeeklyStatement | None,
+    adjustments: Iterable[CanonicalOrderAdjustment],
+) -> tuple[CanonicalOrderAdjustment, ...]:
+    """Return only persisted other-Statement events for current target orders."""
+
+    if statement is None:
+        return ()
+    order_ids = {row.order_id for row in statement.order_rows}
+    return tuple(
+        event
+        for event in adjustments
+        if event.platform == "Shopee"
+        and event.linked_order_id in order_ids
+        and event.statement_file_hash != statement.file_hash
+    )
+
+
 def _v2_blockers(
     batch: StatementReconciliationBatch,
     covered_order_ids: set[str],
@@ -646,6 +686,7 @@ def _evidence_version(
     invoice_orders: Iterable[CanonicalInvoiceOrder],
     invoice_items: Iterable[CanonicalInvoiceItem],
     reconciliation: StatementReconciliationBatch,
+    canonical_adjustments: Iterable[CanonicalOrderAdjustment],
 ) -> StatementReviewEvidenceVersion:
     invoice_hash = invoice_snapshot_sha256(invoice_orders, invoice_items)
     return StatementReviewEvidenceVersion(
@@ -653,6 +694,9 @@ def _evidence_version(
         invoice_snapshot_sha256=invoice_hash,
         product_family_snapshot_sha256=(
             reconciliation.product_family_snapshot.sha256
+        ),
+        order_adjustment_snapshot_sha256=_stable_hash(
+            tuple(asdict(event) for event in canonical_adjustments)
         ),
         rule_version=reconciliation.rule_version,
         reconciliation_sha256=_stable_hash(asdict(reconciliation)),
@@ -675,6 +719,11 @@ def _changed_evidence(
         != previous.product_family_snapshot_sha256
     ):
         changed.append("PRODUCT_MASTER_SNAPSHOT_CHANGED")
+    if (
+        current.order_adjustment_snapshot_sha256
+        != previous.order_adjustment_snapshot_sha256
+    ):
+        changed.append("ORDER_ADJUSTMENT_SNAPSHOT_CHANGED")
     if current.rule_version != previous.rule_version:
         changed.append("RECONCILIATION_RULE_CHANGED")
     if current.reconciliation_sha256 != previous.reconciliation_sha256:

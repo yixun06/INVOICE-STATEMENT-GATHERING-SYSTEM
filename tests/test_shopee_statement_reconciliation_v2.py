@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -9,6 +9,11 @@ import pytest
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
+)
+from src.invoice_app.domain.order_adjustment import (
+    CanonicalOrderAdjustment,
+    EvidenceStatus,
+    make_statement_adjustment,
 )
 from src.invoice_app.domain.statement_reconciliation_v2 import (
     IdentityScope,
@@ -238,6 +243,7 @@ def _evaluate(
     order_components: dict[str, Decimal] | None = None,
     repairs: tuple[VerifiedArtifactRepair, ...] = (),
     adjustments: tuple[SettlementAdjustment, ...] = (),
+    canonical_adjustments: tuple[CanonicalOrderAdjustment, ...] = (),
 ):
     order = order or _order()
     return evaluate_statement_reconciliation(
@@ -246,6 +252,7 @@ def _evaluate(
         items,
         product_families=resolver or _resolver(_family()),
         verified_artifact_repairs=repairs,
+        canonical_adjustments=canonical_adjustments,
     )
 
 
@@ -266,6 +273,31 @@ def _completed_adjustment(
         payout_completed_date=date(2026, 8, 11),
         source_row_number=20,
     )
+
+
+def _canonical_adjustment(
+    *,
+    order_id: str,
+    amount: str,
+    sequence: str = "1",
+    file_hash: str = "committed-later-statement-hash",
+    evidence_status: EvidenceStatus = EvidenceStatus.STATEMENT_ONLY,
+) -> CanonicalOrderAdjustment:
+    event = make_statement_adjustment(
+        linked_order_id=order_id,
+        adjustment_description="Return Refund Adjustment/Compensation",
+        adjustment_reason="Compensation",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_amount=Decimal(amount),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="committed-later-batch",
+        statement_sequence_no=sequence,
+        statement_source_filename="later-statement.xlsx",
+        statement_file_hash=file_hash,
+        first_observed_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+    )
+    assert event is not None
+    return replace(event, evidence_status=evidence_status)
 
 
 def test_unique_strong_identity_with_verified_name_artifact_is_item():
@@ -843,6 +875,151 @@ def test_multiple_adjustment_events_remain_distinct_during_consistency_check():
         Decimal("-15.00"),
         Decimal("-3.00"),
     )
+
+
+def test_current_statement_exact_settlement_with_no_final_delta_is_unchanged():
+    result = _evaluate((_sku_row(),), (_item(0),)).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.EXACT
+    assert result.evidence.settlement.invoice_basis == Decimal("10.00")
+    assert result.evidence.settlement.statement_total == Decimal("10.00")
+    assert result.evidence.settlement.internal_effects == ()
+
+
+def test_cross_period_canonical_adjustment_exactly_explains_final_amount_delta():
+    order_id = "26082480BKAV7A"
+    order = _order(
+        order_id=order_id,
+        product="-6.88",
+        income="-6.88",
+        final_amount="130.36",
+    )
+    result = _evaluate(
+        (_sku_row(order_id=order_id, components=_components(product="-6.88")),),
+        (_item(0, order_id=order_id, subtotal="-6.88"),),
+        order=order,
+        canonical_adjustments=(
+            _canonical_adjustment(order_id=order_id, amount="137.24"),
+        ),
+    )
+    settlement = result.orders[0].evidence.settlement
+
+    assert result.orders[0].summary.settlement_basis is SettlementBasis.EXACT
+    assert settlement.invoice_basis == Decimal("-6.88")
+    assert settlement.statement_total == Decimal("-6.88")
+    assert settlement.raw_difference == ZERO
+    assert result.statement_adjustment_total == ZERO
+    assert settlement.internal_effects == (
+        "POST_ORDER_ADJUSTMENT_CANONICAL_CROSS_PERIOD",
+        "POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT",
+    )
+
+
+@pytest.mark.parametrize(
+    "adjustments",
+    (
+        (),
+        (replace(
+            _canonical_adjustment(order_id="26082480BKAV7A", amount="137.24"),
+            platform="Shopee SG",
+        ),),
+        (_canonical_adjustment(order_id="OTHER-ORDER", amount="137.24"),),
+        (_canonical_adjustment(order_id="26082480BKAV7A", amount="137.23"),),
+    ),
+)
+def test_cross_period_adjustment_requires_exact_canonical_link_and_amount(
+    adjustments: tuple[CanonicalOrderAdjustment, ...],
+):
+    order_id = "26082480BKAV7A"
+    result = _evaluate(
+        (_sku_row(order_id=order_id, components=_components(product="-6.88")),),
+        (_item(0, order_id=order_id, subtotal="-6.88"),),
+        order=_order(
+            order_id=order_id,
+            product="-6.88",
+            income="-6.88",
+            final_amount="130.36",
+        ),
+        canonical_adjustments=adjustments,
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.NONE
+    assert result.evidence.settlement.raw_difference is None
+
+
+def test_multiple_cross_period_canonical_events_may_exactly_explain_final_delta():
+    order_id = "26082480BKAV7A"
+    result = _evaluate(
+        (_sku_row(order_id=order_id, components=_components(product="-6.88")),),
+        (_item(0, order_id=order_id, subtotal="-6.88"),),
+        order=_order(
+            order_id=order_id,
+            product="-6.88",
+            income="-6.88",
+            final_amount="130.36",
+        ),
+        canonical_adjustments=(
+            _canonical_adjustment(order_id=order_id, amount="100.00", sequence="1"),
+            _canonical_adjustment(order_id=order_id, amount="37.24", sequence="2"),
+        ),
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.EXACT
+    assert (
+        "POST_ORDER_ADJUSTMENT_CANONICAL_CROSS_PERIOD"
+        in result.evidence.settlement.internal_effects
+    )
+
+
+def test_duplicate_or_conflicted_canonical_cross_period_event_fails_closed():
+    order_id = "26082480BKAV7A"
+    event = _canonical_adjustment(order_id=order_id, amount="137.24")
+    for adjustments in (
+        (event, event),
+        (
+            _canonical_adjustment(
+                order_id=order_id,
+                amount="137.24",
+                evidence_status=EvidenceStatus.EVIDENCE_CONFLICT,
+            ),
+        ),
+    ):
+        result = _evaluate(
+            (_sku_row(order_id=order_id, components=_components(product="-6.88")),),
+            (_item(0, order_id=order_id, subtotal="-6.88"),),
+            order=_order(
+                order_id=order_id,
+                product="-6.88",
+                income="-6.88",
+                final_amount="130.36",
+            ),
+            canonical_adjustments=adjustments,
+        ).orders[0]
+
+        assert result.summary.settlement_basis is SettlementBasis.NONE
+
+
+def test_current_statement_canonical_event_is_not_cross_period_evidence():
+    order_id = "26082480BKAV7A"
+    result = _evaluate(
+        (_sku_row(order_id=order_id, components=_components(product="-6.88")),),
+        (_item(0, order_id=order_id, subtotal="-6.88"),),
+        order=_order(
+            order_id=order_id,
+            product="-6.88",
+            income="-6.88",
+            final_amount="130.36",
+        ),
+        canonical_adjustments=(
+            _canonical_adjustment(
+                order_id=order_id,
+                amount="137.24",
+                file_hash="f" * 64,
+            ),
+        ),
+    ).orders[0]
+
+    assert result.summary.settlement_basis is SettlementBasis.NONE
 
 
 def test_statement_quantity_absence_does_not_fail_reconciliation_or_claim_match():

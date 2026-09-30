@@ -91,6 +91,14 @@ representation, not a semantic business classification.
   Its fingerprint structure is unchanged and must not rewrite Invoice facts,
   Product Summary, reporting, or original financial layout. No historical
   backfill is implied.
+- During Shopee Statement reconciliation, committed canonical `Order_Adjustments`
+  from other Statement periods may be referenced solely to explain the exact
+  Invoice `final_amount - order_income` delta. Current-Statement settlement
+  remains independently reconciled to `order_income` under its existing
+  component rules; cross-period events never alter current released totals,
+  components, period ownership, source facts, or batch contents. Exact linked
+  platform/order identity and exact, non-duplicated canonical-event closure are
+  required; missing, conflicted, ambiguous, or non-exact evidence fails closed.
 - The real `Return Refund Adjustment/Compensation` `+137.24` source linked to
   `26082480BKAV7A` is uncommitted pre-commit regression evidence only. Its
   canonical type is `RETURN_REFUND_ADJUSTMENT_COMPENSATION`; do not write or

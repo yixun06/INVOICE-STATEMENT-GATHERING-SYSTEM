@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
-from decimal import Decimal
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import json
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -14,7 +14,12 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
-from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment
+from src.invoice_app.domain.order_adjustment import (
+    CanonicalOrderAdjustment,
+    EvidenceStatus,
+    adjustment_event_fingerprint,
+    canonical_adjustment_type,
+)
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     HistoricalInvoiceStorageError,
     _deserialize_item,
@@ -259,6 +264,18 @@ class GoogleSheetsStatementWriter:
         order_adjustment_rows = _rows_with_positions(
             tabs, ORDER_ADJUSTMENTS_TAB, ORDER_ADJUSTMENTS_HEADERS
         )
+        canonical_order_adjustments = tuple(
+            _deserialize_order_adjustment(values, row_index + 1)
+            for row_index, values in order_adjustment_rows
+        )
+        adjustment_fingerprints = tuple(
+            event.adjustment_event_fingerprint
+            for event in canonical_order_adjustments
+        )
+        if len(set(adjustment_fingerprints)) != len(adjustment_fingerprints):
+            raise StatementCommitBlocked(
+                "Order_Adjustments contains duplicate event fingerprints."
+            )
 
         orders: dict[tuple[str, str], _OrderTarget] = {}
         for row_index, values in order_rows:
@@ -294,6 +311,11 @@ class GoogleSheetsStatementWriter:
                 target.item
                 for (platform, _, _), target in items.items()
                 if platform == self._persisted_platform
+            ),
+            order_adjustments=tuple(
+                event
+                for event in canonical_order_adjustments
+                if event.platform == self._persisted_platform
             ),
         )
         return _WriterSnapshot(
@@ -611,6 +633,178 @@ def _new_order_adjustment_rows(
         seen.add(fingerprint)
         new_rows.append(row)
     return tuple(new_rows)
+
+
+def _deserialize_order_adjustment(
+    row: Sequence[Any], row_number: int
+) -> CanonicalOrderAdjustment:
+    """Read one canonical adjustment row with its immutable identity intact."""
+
+    values = dict(zip(ORDER_ADJUSTMENTS_HEADERS, row))
+    try:
+        description = _adjustment_required_text(
+            values["adjustment_description"], "adjustment_description", row_number
+        )
+        adjustment_type = _adjustment_required_text(
+            values["adjustment_type"], "adjustment_type", row_number
+        )
+        if canonical_adjustment_type(description) != adjustment_type:
+            raise StatementCommitBlocked(
+                f"Order_Adjustments row {row_number} has an invalid canonical adjustment type."
+            )
+        event = CanonicalOrderAdjustment(
+            platform=_adjustment_required_text(
+                values["platform"], "platform", row_number
+            ),
+            linked_order_id=_adjustment_required_text(
+                values["linked_order_id"], "linked_order_id", row_number
+            ),
+            adjustment_type=adjustment_type,
+            adjustment_description=description,
+            adjustment_reason=_optional_adjustment_text(values["adjustment_reason"]),
+            adjustment_complete_date=_adjustment_required_date(
+                values["adjustment_complete_date"], "adjustment_complete_date", row_number
+            ),
+            adjustment_amount=_adjustment_required_decimal(
+                values["adjustment_amount"], "adjustment_amount", row_number
+            ),
+            payout_completed_date=_optional_adjustment_date(
+                values["payout_completed_date"], "payout_completed_date", row_number
+            ),
+            statement_batch_id=_adjustment_required_text(
+                values["statement_batch_id"], "statement_batch_id", row_number
+            ),
+            statement_sequence_no=_adjustment_required_text(
+                values["statement_sequence_no"], "statement_sequence_no", row_number
+            ),
+            statement_source_filename=_adjustment_required_text(
+                values["statement_source_filename"], "statement_source_filename", row_number
+            ),
+            statement_file_hash=_adjustment_required_text(
+                values["statement_file_hash"], "statement_file_hash", row_number
+            ),
+            adjustment_event_fingerprint=_adjustment_required_text(
+                values["adjustment_event_fingerprint"],
+                "adjustment_event_fingerprint",
+                row_number,
+            ),
+            evidence_status=EvidenceStatus(_adjustment_required_text(
+                values["evidence_status"], "evidence_status", row_number
+            )),
+            invoice_evidence_date=_optional_adjustment_date(
+                values["invoice_evidence_date"], "invoice_evidence_date", row_number
+            ),
+            invoice_evidence_amount=_optional_adjustment_decimal(
+                values["invoice_evidence_amount"], "invoice_evidence_amount", row_number
+            ),
+            invoice_evidence_final_amount=_optional_adjustment_decimal(
+                values["invoice_evidence_final_amount"],
+                "invoice_evidence_final_amount",
+                row_number,
+            ),
+            invoice_evidence_reason=_optional_adjustment_text(
+                values["invoice_evidence_reason"]
+            ),
+            invoice_source_pdf=_optional_adjustment_text(values["invoice_source_pdf"]),
+            invoice_source_hash=_optional_adjustment_text(values["invoice_source_hash"]),
+            first_observed_at=_adjustment_required_datetime(
+                values["first_observed_at"], "first_observed_at", row_number
+            ),
+        )
+    except (KeyError, ValueError) as error:
+        if isinstance(error, StatementCommitBlocked):
+            raise
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} is malformed."
+        ) from error
+    expected_fingerprint = adjustment_event_fingerprint(
+        platform=event.platform,
+        linked_order_id=event.linked_order_id,
+        adjustment_type=event.adjustment_type,
+        adjustment_description=event.adjustment_description,
+        adjustment_reason=event.adjustment_reason,
+        adjustment_complete_date=event.adjustment_complete_date,
+        adjustment_amount=event.adjustment_amount,
+    )
+    if event.adjustment_event_fingerprint != expected_fingerprint:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} fingerprint does not match immutable event facts."
+        )
+    return event
+
+
+def _adjustment_required_text(value: Any, field: str, row_number: int) -> str:
+    text = _text(value)
+    if not text:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has blank {field}."
+        )
+    return text
+
+
+def _optional_adjustment_text(value: Any) -> str | None:
+    return _text(value) or None
+
+
+def _adjustment_required_date(value: Any, field: str, row_number: int) -> date:
+    parsed = _optional_adjustment_date(value, field, row_number)
+    if parsed is None:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has blank {field}."
+        )
+    return parsed
+
+
+def _optional_adjustment_date(
+    value: Any, field: str, row_number: int
+) -> date | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as error:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has invalid {field}."
+        ) from error
+
+
+def _adjustment_required_decimal(value: Any, field: str, row_number: int) -> Decimal:
+    parsed = _optional_adjustment_decimal(value, field, row_number)
+    if parsed is None:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has blank {field}."
+        )
+    return parsed
+
+
+def _optional_adjustment_decimal(
+    value: Any, field: str, row_number: int
+) -> Decimal | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError) as error:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has invalid {field}."
+        ) from error
+
+
+def _adjustment_required_datetime(value: Any, field: str, row_number: int) -> datetime:
+    text = _adjustment_required_text(value, field, row_number)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as error:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} has invalid {field}."
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise StatementCommitBlocked(
+            f"Order_Adjustments row {row_number} {field} must include timezone information."
+        )
+    return parsed
 
 
 def _order_adjustment_target(

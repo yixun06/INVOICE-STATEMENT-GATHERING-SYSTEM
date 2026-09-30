@@ -10,6 +10,7 @@ from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
 )
+from src.invoice_app.domain.order_adjustment import make_statement_adjustment
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
@@ -253,10 +254,13 @@ class _Repository(InMemoryHistoricalInvoiceRepository):
 
 
 class _Writer:
-    def __init__(self, order=None, items=(_item(),), committed_statements=()):
+    def __init__(
+        self, order=None, items=(_item(),), committed_statements=(), order_adjustments=()
+    ):
         self.order = order
         self.items = tuple(items)
         self.committed_statements = tuple(committed_statements)
+        self.order_adjustments = tuple(order_adjustments)
         self.writes = 0
 
     def reload_commit_state(self):
@@ -265,6 +269,7 @@ class _Writer:
             orders=orders,
             committed_statements=self.committed_statements,
             items=self.items,
+            order_adjustments=self.order_adjustments,
         )
 
     def write_statement_batch(self, plan):
@@ -278,6 +283,7 @@ def _review(
     items=(_item(),),
     statement=None,
     product_master=None,
+    order_adjustments=(),
 ):
     statement = statement or _statement()
     monkeypatch.setattr(
@@ -294,6 +300,7 @@ def _review(
     writer = _Writer(
         _order() if order is _DEFAULT_ORDER else order,
         items,
+        order_adjustments=order_adjustments,
     )
     review = review_statement_upload(
         b"synthetic",
@@ -1061,6 +1068,84 @@ def test_statement_adjustment_remains_separate_from_original_settlement(monkeypa
     assert review.reconciliation_v2.statement_adjustment_total == Decimal("122.20")
     assert order.summary.settlement_basis.value == "EXACT"
     assert order.evidence.settlement.statement_total == Decimal("10.00")
+
+
+def test_review_uses_committed_cross_period_canonical_adjustment_without_changing_settlement(monkeypatch):
+    adjustment = make_statement_adjustment(
+        linked_order_id="ORDER-1",
+        adjustment_description="Return Refund Adjustment/Compensation",
+        adjustment_reason="Compensation",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_amount=Decimal("137.24"),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="later-committed-batch",
+        statement_sequence_no="A1",
+        statement_source_filename="later-statement.xlsx",
+        statement_file_hash="later-committed-statement-hash",
+        first_observed_at=NOW,
+    )
+    assert adjustment is not None
+    review, _, _ = _review(
+        monkeypatch,
+        order=_order("130.36", income="-6.88", product="-6.88"),
+        items=(_item(subtotal="-6.88"),),
+        statement=_statement(sku_rows=(_income("Sku", 3, product="-6.88"),)),
+        order_adjustments=(adjustment,),
+    )
+    settlement = review.reconciliation_v2.orders[0].evidence.settlement
+
+    assert review.ready is True, review.blockers
+    assert settlement.invoice_basis == Decimal("-6.88")
+    assert settlement.statement_total == Decimal("-6.88")
+    assert review.reconciliation_v2.statement_adjustment_total == Decimal("0.00")
+    assert settlement.internal_effects == (
+        "POST_ORDER_ADJUSTMENT_CANONICAL_CROSS_PERIOD",
+        "POST_ORDER_ADJUSTMENT_FINAL_CONSISTENT",
+    )
+
+
+def test_cross_period_adjustment_change_marks_review_stale_without_writing(monkeypatch):
+    adjustment = make_statement_adjustment(
+        linked_order_id="ORDER-1",
+        adjustment_description="Return Refund Adjustment/Compensation",
+        adjustment_reason="Compensation",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_amount=Decimal("137.24"),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="later-committed-batch",
+        statement_sequence_no="A1",
+        statement_source_filename="later-statement.xlsx",
+        statement_file_hash="later-committed-statement-hash",
+        first_observed_at=NOW,
+    )
+    assert adjustment is not None
+    review, repository, writer = _review(
+        monkeypatch,
+        order=_order("130.36", income="-6.88", product="-6.88"),
+        items=(_item(subtotal="-6.88"),),
+        statement=_statement(sku_rows=(_income("Sku", 3, product="-6.88"),)),
+        order_adjustments=(adjustment,),
+    )
+    writer.order_adjustments = ()
+
+    stale = check_statement_review_currency(
+        review,
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+    )
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert stale.is_current is False
+    assert "ORDER_ADJUSTMENT_SNAPSHOT_CHANGED" in stale.changed_evidence
+    assert attempt.committed is False
+    assert "STALE_REVIEW:ORDER_ADJUSTMENT_SNAPSHOT_CHANGED" in attempt.reasons
+    assert writer.writes == 0
 
 
 def test_statement_quantity_absence_is_a_nonblocking_source_limitation(monkeypatch):
