@@ -3,7 +3,7 @@ name: invoicegather-scope
 description: Long-term system consensus, business rules, data semantics, architecture guardrails, import/commit workflow, validation/reconciliation boundaries, UI/UX direction, and development constraints for InvoiceGather V2. Use whenever developing, debugging, reviewing requirements, architecture, parsers, validation, reconciliation, Streamlit UI, reporting, persistence, database, settlement, shipment, roles, or Excel export. Preserve stable extraction behavior, separate batch validation from pre-commit database validation, preserve source facts, and ask before locking uncertain business rules.
 ---
 
-# InvoiceGather Scope & Development Guardrails — V2.6 (UAT2)
+# InvoiceGather Scope & Development Guardrails — V2.7 (UAT2)
 
 ## 0. How to use this skill
 
@@ -36,11 +36,98 @@ Current Confirmed Requirement > Historical Intermediate Design
 
 ---
 
-# V2.6 Current Handoff, Cross Reporting, and Project-Memory Protocol
+# V2.7 Current Handoff, Shopee SG Direction, Cross Reporting, and Project-Memory Protocol
 
-This V2.6 handoff is authoritative over conflicting older V2.5, V2.4, and
+This V2.7 handoff is authoritative over conflicting older V2.6, V2.5, V2.4, and
 V2.3 wording. Older sections remain useful only for non-conflicting parser,
 source-safety, Statement, and historical rationale.
+
+## Shopee SG architecture direction — Approved / Pending Implementation
+
+Shopee MY and Shopee SG remain in one InvoiceGather application. The approved
+long-term shape is shared workflow/reporting engines with market-specific
+configuration, adapters, providers, and data sources. Data Import will gain an
+internal market/platform selector and retain the five-step workflow:
+
+```text
+Select Source / Market -> Upload -> Validate -> Reconcile -> Review & Commit
+```
+
+The following rules are locked for future implementation:
+
+- Existing persisted `platform = "Shopee"` means Shopee MY and must not be
+  migrated merely for naming. New SG records use a distinct persisted identity,
+  currently approved as `"Shopee SG"`. Audit literal categories; never bulk
+  replace `"Shopee"`.
+- Shopee MY and SG use separate Google spreadsheets/databases. SG should
+  initially mirror the applicable current MY tabs and schemas, but SG-specific
+  evidence may later justify additive SG-only fields. Do not rewrite MY storage.
+- Market selection must bind the Invoice repository, Statement repository and
+  writer, commit lock, Product Master source, reporting reader, and currency as
+  one immutable context. Cross-market reads, reconciliation, commits, and stale
+  provider reuse are prohibited.
+- Product Master infrastructure is shared, but MY and SG use different tabs/data
+  scopes. The SG tab name/schema/data are not yet supplied and must not be
+  invented. Missing SG configuration fails closed; SG must never fall back to
+  MY rows, prices, or NAV.
+- NAV and Unit Price must come from the same resolved market-specific Product
+  Master row. Although both markets share the ERP NAV identity system, SG NAV
+  must not be copied from MY data.
+- Shopee MY is MYR; Shopee SG is SGD. Do not convert FX, aggregate currencies,
+  or combine platform financial totals without later explicit approval.
+- Shopee SG is permanently excluded from the existing Cross Platform Summary at
+  the service/data-eligibility layer, not only hidden in UI.
+- SG Product Summary reuses the canonical identity `NAV + resolved Seller SKU +
+  persisted historical Product Master Unit Price`; names/variation are display
+  only, missing NAV blocks, and differing NAV values remain separate.
+- SG Invoice and Statement compatibility with MY is a provisional implementation
+  assumption only. Real approved SG Invoice, Statement, and Product Listing
+  samples must be compared before claiming support. Reuse proven format engines;
+  introduce the smallest SG-specific normalization only when evidence requires
+  it, without changing correct MY parsing.
+- Weekly Billing will become a shared shell with a market/platform selector and
+  market-specific committed source, Statement population, currency, Product
+  Master, dataset builder, and exports. It must not combine cross-currency totals.
+- Shopee SG is additive. Preserve current Shopee MY behavior by default; share
+  only behavior proven identical and keep differing SG behavior in explicit
+  extension points.
+
+Current blockers are real SG Invoice/Statement samples, the SG Product Listing,
+the approved SG Product Master tab/configuration, and the SG spreadsheet. Do not
+create or infer any of them during architecture work.
+
+## Data Import platform entry — Approved / Implemented
+
+`Data Import` begins with explicit platform selection: Shopee MY, Shopee SG,
+Lazada, or Zenxin Website. It then enters one shared five-step shell:
+
+```text
+Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
+```
+
+- Every platform shows the same stable source interface: Invoice Import, Weekly
+  Statement, and Monthly Statement. An unavailable source remains visible but
+  fails closed before Upload; the shared shell is not duplicated per platform.
+- Current capability matrix: Shopee MY supports all three existing workflows;
+  Lazada and Zenxin Website support Invoice Import only; Shopee SG supports no
+  source yet. This does not authorize new Lazada/Zenxin persistence or an SG
+  parser/persistence path.
+- Invoice Upload is strict expected-platform intake: the selected platform is
+  the expected source and the existing detector remains the actual-source
+  safeguard. A mismatch is reported as `PLATFORM MISMATCH`, admits no order,
+  product, or review record, and is never silently rerouted. New mixed-platform
+  batches are prohibited.
+- There is one active batch. Back returns to platform selection without
+  discarding it. Entering another platform while work is active requires the
+  existing explicit safe-discard lifecycle; only after that reset may the target
+  platform bind. Reset clears both platform and market session bindings.
+- Shopee SG remains fail closed: it must not invoke Shopee MY parsing,
+  persistence, Product Master, or Statement paths, and it never falls back to
+  MY configuration or data.
+- Shopee MY and Shopee SG use text-only labels in the chooser and platform
+  title; no flag icon or Unicode flag is rendered. The secondary Back control
+  is left-aligned above the platform Data Import title, rather than competing
+  with it in a horizontal title row.
 
 ## Current Platform Invoice workflow — Locked
 
