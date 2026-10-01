@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
+    is_cancelled_invoice_order,
 )
 from src.invoice_app.domain.weekly_billing import (
     ActualSellingAmountBasis,
@@ -175,11 +176,15 @@ def build_weekly_billing_summary(
             + ", ".join(missing_orders[:10])
         )
 
-    wanted_orders = set(order_ids)
+    wanted_orders = {
+        order_id
+        for order_id in order_ids
+        if not is_cancelled_invoice_order(dataset.orders[order_id])
+    }
     qualifying = tuple(
         item for item in dataset.items if item.order_id in wanted_orders
     )
-    by_order = {order_id: 0 for order_id in order_ids}
+    by_order = {order_id: 0 for order_id in wanted_orders}
     for item in qualifying:
         by_order[item.order_id] += 1
     empty_orders = [order_id for order_id, count in by_order.items() if count == 0]

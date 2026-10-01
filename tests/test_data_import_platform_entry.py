@@ -108,6 +108,38 @@ def test_shopee_my_keeps_all_three_current_source_workflows_available(tmp_path, 
         assert continue_button.disabled is False
 
 
+def test_shopee_cancelled_order_v1_real_pdf_completes_data_import_ui(tmp_path, monkeypatch):
+    pdf_path = Path(r"D:\download material\cancel pdf.pdf")
+    if not pdf_path.exists():
+        pytest.skip("Local approved Shopee cancelled-order PDF is unavailable.")
+
+    app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee MY")
+    next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
+    app.file_uploader[0].set_value((pdf_path.name, pdf_path.read_bytes(), "application/pdf")).run(
+        timeout=60
+    )
+    next(button for button in app.button if button.label == "Process files").click().run(timeout=90)
+
+    state = app.session_state.filtered_state
+    assert app.exception == []
+    assert state["upload_result_summary"] == {
+        "pdfs_processed": 1,
+        "orders_imported": 1,
+        "manual_reviews": 0,
+        "duplicate_orders": 0,
+        "unsupported_files": 0,
+        "processing_errors": 0,
+    }
+    assert state["reviews"] == []
+    assert len(state["products"]) == 3
+    assert len(state["orders"]) == 1
+    order = state["orders"][0]
+    assert order["order_id"] == "260908G952UC0W"
+    assert order["status"] == "Accepted"
+    assert order["order_status"] == "Cancelled"
+    assert order["invoice_financial_layout"] == "CANCELLED_ORDER"
+
+
 @pytest.mark.parametrize(
     ("platform_name", "source", "message"),
     (

@@ -8,7 +8,11 @@ from datetime import date
 from decimal import Decimal, ROUND_FLOOR
 from typing import Any, Mapping, Protocol, Sequence
 
-from src.invoice_app.domain.historical_invoice import CanonicalInvoiceItem
+from src.invoice_app.domain.historical_invoice import (
+    CanonicalInvoiceItem,
+    CanonicalInvoiceOrder,
+    is_cancelled_invoice_order,
+)
 from src.invoice_app.domain.weekly_billing import ProductSummaryRow
 from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
     HistoricalInvoiceStorageError,
@@ -133,7 +137,7 @@ def build_cross_platform_reporting_snapshot(
     order_rows = _tab_rows(tabs, INVOICE_ORDERS_TAB, INVOICE_ORDERS_HEADERS)
     item_rows = _tab_rows(tabs, INVOICE_ITEMS_TAB, INVOICE_ITEMS_HEADERS)
 
-    orders: dict[tuple[str, str], date | None] = {}
+    orders: dict[tuple[str, str], CanonicalInvoiceOrder] = {}
     for row_number, row in order_rows:
         order = _deserialize_order(row, row_number)
         identity = (order.platform, order.order_id)
@@ -141,7 +145,7 @@ def build_cross_platform_reporting_snapshot(
             raise CrossPlatformProductSummaryError(
                 f"Invoice_Orders duplicates committed order {order.platform}/{order.order_id}."
             )
-        orders[identity] = order.payout_completed_date
+        orders[identity] = order
 
     eligible: list[CommittedReportingItem] = []
     item_identities: set[tuple[str, str, int]] = set()
@@ -161,7 +165,10 @@ def build_cross_platform_reporting_snapshot(
             raise CrossPlatformProductSummaryError(
                 f"Shopee Invoice item {item.order_id}/{item.item_index} has no committed order."
             )
-        payout_date = orders[order_identity]
+        order = orders[order_identity]
+        if is_cancelled_invoice_order(order):
+            continue
+        payout_date = order.payout_completed_date
         if payout_date is None:
             continue
         eligible.append(_reporting_item(item, payout_date))

@@ -87,6 +87,15 @@ class CanonicalInvoiceItem:
     source_hash: str | None = None
 
 
+def is_cancelled_invoice_order(order: CanonicalInvoiceOrder) -> bool:
+    """Return the defensive reporting exclusion for a persisted cancellation."""
+    return (
+        str(order.order_status or "").strip().casefold() in {"cancelled", "canceled"}
+        or str(order.invoice_financial_layout or "").strip().upper()
+        == "CANCELLED_ORDER"
+    )
+
+
 @dataclass(frozen=True)
 class InvoiceBundle:
     order: CanonicalInvoiceOrder

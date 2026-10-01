@@ -12,6 +12,7 @@ from ..utils.normalize import normalize_whitespace
 from ..utils.order_dates import shopee_order_date_from_id
 from .shopee_financial_parser import (
     classify_invoice_financial_layout,
+    extract_cancelled_amount,
     extract_invoice_adjustment_evidence,
     legacy_invoice_adjustment_projection,
     extract_refund_amount,
@@ -59,6 +60,7 @@ class ShopeeExtractedData:
     final_amount_source_state: str
     product_items: tuple[dict[str, Any], ...]
     refund_amount: Decimal | None
+    cancelled_amount: Decimal | None
     invoice_adjustments: tuple[InvoiceAdjustmentEvidence, ...]
     post_order_adjustment_observed: bool
     post_order_adjustment_type: str | None
@@ -79,6 +81,7 @@ def extract_shopee_data(
 ) -> ShopeeExtractedData:
     normalized_text = normalize_pdf_text(text)
     order_id = extract_order_id(normalized_text, source_pdf)
+    order_status = extract_order_status(normalized_text)
     income = parse_income_details(normalized_text, document=document)
     label_presence = income_label_presence(normalized_text)
     product_items = reconcile_product_candidates(
@@ -108,13 +111,14 @@ def extract_shopee_data(
             )
         ),
         order_id=order_id,
-        order_status=extract_order_status(normalized_text),
+        order_status=order_status,
         order_created_date=extract_order_date(normalized_text, order_id),
         delivered_date=extract_delivered_date(normalized_text),
         completed_date=extract_completed_date(normalized_text),
         fund_transfer_date=extract_fund_transfer_date(normalized_text),
         invoice_financial_layout=classify_invoice_financial_layout(
             normalized_text,
+            order_status=order_status,
             label_presence=label_presence,
             product_items=product_items,
         ),
@@ -122,6 +126,7 @@ def extract_shopee_data(
         final_amount_source_state=("parsed" if income.get("final_amount") != "N/A" else "unparsed" if final_amount_label_present(normalized_text) else "absent"),
         product_items=tuple(product_items),
         refund_amount=refund_amount,
+        cancelled_amount=extract_cancelled_amount(normalized_text),
         invoice_adjustments=invoice_adjustments,
         post_order_adjustment_observed=bool(invoice_adjustments),
         post_order_adjustment_type=post_order_adjustment_type,
@@ -193,7 +198,8 @@ def _order_date_from_order_id_prefix(order_id: str) -> str:
 
 def extract_order_status(text: str) -> str:
     prefix = text.split("Order ID", 1)[0][:1800]
-    alternatives = "|".join(re.escape(status) for status in SHOPEE_ORDER_STATUSES)
+    source_statuses = (*SHOPEE_ORDER_STATUSES, "Canceled")
+    alternatives = "|".join(re.escape(status) for status in source_statuses)
     labelled = re.search(
         rf"(?:^|\n)\s*({alternatives})\s+Add a Note",
         prefix,
@@ -201,12 +207,14 @@ def extract_order_status(text: str) -> str:
     )
     if labelled:
         value = normalize_whitespace(labelled.group(1)).lower()
-        return next(status for status in SHOPEE_ORDER_STATUSES if status.lower() == value)
-    for status in SHOPEE_ORDER_STATUSES:
+        return "Cancelled" if value in {"cancelled", "canceled"} else next(
+            status for status in SHOPEE_ORDER_STATUSES if status.lower() == value
+        )
+    for status in source_statuses:
         if status == "New Order":
             continue
         if re.search(rf"(?<![A-Za-z]){re.escape(status)}(?![A-Za-z])", prefix, flags=re.IGNORECASE):
-            return status
+            return "Cancelled" if status in {"Cancelled", "Canceled"} else status
     return ""
 
 

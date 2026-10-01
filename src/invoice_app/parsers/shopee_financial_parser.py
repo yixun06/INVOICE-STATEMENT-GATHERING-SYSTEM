@@ -20,6 +20,7 @@ MONEY_PATTERN = r"[-+]?\s*RM\s*[-+]?\s*[\d,]+(?:\.\d+)?"
 MISSING_FINANCIAL_VALUE = "N/A"
 NORMAL_ORDER = "NORMAL_ORDER"
 RETURN_REFUND = "RETURN_REFUND"
+CANCELLED_ORDER = "CANCELLED_ORDER"
 UNKNOWN_OR_MIXED = "UNKNOWN_OR_MIXED"
 RETURN_REFUND_AFTER_ORDER_COMPLETED = "RETURN_REFUND_AFTER_ORDER_COMPLETED"
 
@@ -146,6 +147,16 @@ def extract_refund_amount(text: str) -> Decimal | None:
     """Return only the amount explicitly labelled ``Refund Amount`` in the source."""
     match = re.search(
         rf"\bRefund\s+Amount\b(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return parse_decimal(match.group(1)).quantize(Decimal("0.01")) if match else None
+
+
+def extract_cancelled_amount(text: str) -> Decimal | None:
+    """Return only the amount explicitly labelled ``Cancelled Amount``."""
+    match = re.search(
+        rf"\bCancelled\s+Amount\b(?:\s*\([^\n)]*\))?\s*:?\s*({MONEY_PATTERN})",
         text,
         flags=re.IGNORECASE,
     )
@@ -333,10 +344,13 @@ def income_label_presence(text: str) -> frozenset[str]:
 def classify_invoice_financial_layout(
     text: str,
     *,
+    order_status: str | None = None,
     label_presence: frozenset[str] | None = None,
     product_items: Iterable[Mapping[str, Any]] | None = None,
 ) -> str:
-    """Classify only from independent, source-visible refund signals."""
+    """Classify from explicit cancellation status or independent refund signals."""
+    if is_cancelled_order_status(order_status):
+        return CANCELLED_ORDER
     labels = label_presence if label_presence is not None else income_label_presence(text)
     return classify_invoice_financial_layout_from_signals(
         invoice_financial_layout_signals(
@@ -345,6 +359,10 @@ def classify_invoice_financial_layout(
             product_items=product_items,
         )
     )
+
+
+def is_cancelled_order_status(value: Any) -> bool:
+    return str(value or "").strip().casefold() in {"cancelled", "canceled"}
 
 
 def invoice_financial_layout_signals(

@@ -238,6 +238,48 @@ def validate_shopee_financial_reconciliation(
     return None
 
 
+def validate_shopee_cancelled_order_amounts(
+    items: list[dict[str, Any]],
+    income: Mapping[str, Any],
+    cancelled_amount: Any,
+) -> str | None:
+    """Validate only the source-backed Shopee cancellation layout approved for V1."""
+    cancelled = _decimal_value(cancelled_amount)
+    if cancelled is None:
+        return "Cancelled Order Reconciliation Failed: Cancelled Amount is missing."
+    if cancelled >= 0:
+        return (
+            "Cancelled Order Reconciliation Failed: Cancelled Amount must be a "
+            "source-visible negative amount."
+        )
+
+    product_error = validate_shopee_product_amounts(
+        items,
+        income.get("merchandise_subtotal"),
+        cancelled,
+        product_price=income.get("product_price"),
+    )
+    if product_error:
+        return product_error
+
+    zero_fields = (
+        ("Merchandise Subtotal", income.get("merchandise_subtotal")),
+        ("Estimated Order Income or Order Income", income.get("order_income")),
+        ("Final Amount", income.get("final_amount")),
+    )
+    for label, value in zero_fields:
+        parsed = _decimal_value(value)
+        if parsed is None:
+            return f"Cancelled Order Reconciliation Failed: {label} is missing."
+        if abs(parsed) > MONEY_TOLERANCE:
+            return (
+                "Cancelled Order Reconciliation Failed: "
+                f"{label} must be 0.00 for the supported cancellation layout, "
+                f"but source value is {parsed:.2f}."
+            )
+    return None
+
+
 def validate_shopee_final_amount_adjustment(
     income: Mapping[str, Any],
     *,

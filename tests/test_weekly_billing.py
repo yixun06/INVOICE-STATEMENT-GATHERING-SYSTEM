@@ -220,6 +220,42 @@ def test_selected_statement_orders_define_complete_source_population():
     assert summary.total_amount == Decimal("16.00")
 
 
+def test_product_summary_excludes_cancelled_parent_orders_by_status_or_layout():
+    normal = _item("ORDER-NORMAL", 0, quantity=2, subtotal="16.00")
+    cancelled_by_status = _item("ORDER-CANCELLED-STATUS", 0, subtotal="50.00")
+    cancelled_by_layout = _item("ORDER-CANCELLED-LAYOUT", 0, subtotal="60.00")
+    order_ids = (
+        "ORDER-NORMAL",
+        "ORDER-CANCELLED-STATUS",
+        "ORDER-CANCELLED-LAYOUT",
+    )
+    dataset = WeeklyBillingDataset(
+        periods=(PERIOD,),
+        order_ids_by_batch={PERIOD.statement_batch_id: order_ids},
+        orders={
+            "ORDER-NORMAL": _order("ORDER-NORMAL"),
+            "ORDER-CANCELLED-STATUS": replace(
+                _order("ORDER-CANCELLED-STATUS"), order_status="Cancelled"
+            ),
+            "ORDER-CANCELLED-LAYOUT": replace(
+                _order("ORDER-CANCELLED-LAYOUT"),
+                invoice_financial_layout="CANCELLED_ORDER",
+            ),
+        },
+        items=(normal, cancelled_by_status, cancelled_by_layout),
+    )
+
+    summary = build_weekly_billing_summary(dataset, PERIOD)
+
+    assert summary.order_count == 3
+    assert summary.invoice_item_count == 1
+    assert [(item.order_id, item.item_index) for item in summary.source_items] == [
+        ("ORDER-NORMAL", 0)
+    ]
+    assert summary.total_quantity == 2
+    assert summary.total_amount == Decimal("16.00")
+
+
 def test_normal_items_with_different_seller_skus_remain_separate():
     summary = build_weekly_billing_summary(
         _dataset(

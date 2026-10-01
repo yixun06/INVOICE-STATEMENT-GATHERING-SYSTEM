@@ -12,8 +12,9 @@ from src.invoice_app.domain.historical_invoice import (
     InvoiceBundle,
     map_accepted_shopee_invoice,
 )
-from src.invoice_app.parsers.shopee_extractor import extract_shopee_data
+from src.invoice_app.parsers.shopee_extractor import extract_order_status, extract_shopee_data
 from src.invoice_app.parsers.shopee_financial_parser import (
+    CANCELLED_ORDER,
     NORMAL_ORDER,
     RETURN_REFUND,
     UNKNOWN_OR_MIXED,
@@ -103,6 +104,27 @@ Reverse Shipping Fee SST -RM0.29
 Order Income -RM10.38
 """
 
+CANCELLED_TEXT = """
+Cancelled Add a Note
+Order ID: SHP-CANCELLED-A1
+SHP-CANCELLED-A1 07/08/2026
+Hide Income Details
+No. Product(s) Unit Price Quantity Subtotal
+Test Product
+1 Variation: Original 25.00 1 25.00
+SKU: SKU-1
+Total 1 products
+Merchandise Subtotal RM0.00
+Product Price RM25.00
+Cancelled Amount -RM25.00
+Shipping Subtotal RM0.00
+Shipping Fee Paid by Buyer RM0.00
+Shipping Fee Charged by Logistic Provider RM0.00
+Seller Paid Shipping Fee SST RM0.00
+Estimated Order Income RM0.00
+Final Amount RM0.00
+"""
+
 
 def _bundle() -> InvoiceBundle:
     order = CanonicalInvoiceOrder(
@@ -172,6 +194,48 @@ def test_layout_requires_two_independent_refund_signals():
     assert classify_invoice_financial_layout(REFUND_TEXT) == RETURN_REFUND
 
 
+@pytest.mark.parametrize("source_status", ("Cancelled", "Canceled"))
+def test_cancelled_status_spelling_is_canonical_and_drives_layout(source_status: str):
+    text = CANCELLED_TEXT.replace("Cancelled Add a Note", f"{source_status} Add a Note")
+
+    extracted = extract_shopee_data(text, "cancelled.pdf")
+
+    assert extract_order_status(text) == "Cancelled"
+    assert extracted.order_status == "Cancelled"
+    assert extracted.invoice_financial_layout == CANCELLED_ORDER
+    assert extracted.cancelled_amount == Decimal("-25.00")
+    assert find_shopee_review_issue(extracted) is None
+
+
+def test_unknown_status_and_cancelled_amount_alone_do_not_infer_cancellation():
+    text = CANCELLED_TEXT.replace("Cancelled Add a Note", "Voided Add a Note")
+
+    extracted = extract_shopee_data(text, "unknown-status.pdf")
+
+    assert extracted.order_status == ""
+    assert extracted.invoice_financial_layout == NORMAL_ORDER
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        ("Cancelled Amount -RM25.00\n", "", "Cancelled Amount is missing"),
+        ("Cancelled Amount -RM25.00", "Cancelled Amount RM25.00", "must be a source-visible negative"),
+        ("Final Amount RM0.00", "Final Amount RM1.00", "Final Amount must be 0.00"),
+    ),
+)
+def test_cancelled_layout_fails_closed_on_incomplete_or_conflicting_evidence(
+    old: str, new: str, message: str
+):
+    extracted = extract_shopee_data(CANCELLED_TEXT.replace(old, new), "cancelled.pdf")
+
+    issue = find_shopee_review_issue(extracted)
+
+    assert issue is not None
+    assert message in issue.reason
+    assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
+
+
 @pytest.mark.parametrize(
     ("signals", "expected"),
     (
@@ -214,6 +278,25 @@ def test_marker_only_pending_return_revalidates_as_normal_without_layout_review(
     assert order["_financial_layout_signals"] == ("return_refund_marker",)
     result = revalidate_shopee_invoice(order, products, price_master=master)
     assert result.invoice_financial_layout == NORMAL_ORDER
+    assert result.error is None
+
+
+def test_cancelled_layout_survives_complete_manual_review_revalidation():
+    extracted = extract_shopee_data(CANCELLED_TEXT, "cancelled.pdf")
+    order, products = map_shopee_records(extracted, "cancelled-revalidation")
+    master = ProductPriceMaster.from_rows([
+        {
+            "seller_sku": "SKU-1",
+            "product_name": "Test Product",
+            "variation_name": "Original",
+            "unit_selling_price": "25.00",
+            "nav_code": "NAV-1",
+        }
+    ])
+
+    result = revalidate_shopee_invoice(order, products, price_master=master)
+
+    assert result.invoice_financial_layout == CANCELLED_ORDER
     assert result.error is None
 
 

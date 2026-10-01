@@ -106,6 +106,57 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
     ]
 
 
+def test_cross_product_summary_excludes_cancelled_parent_by_status_or_layout():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        build_cross_platform_reporting_snapshot,
+    )
+
+    order_ids = ("SHP-NORMAL", "SHP-CANCELLED-STATUS", "SHP-CANCELLED-LAYOUT")
+    tabs = {
+        INVOICE_ORDERS_TAB: [
+            list(INVOICE_ORDERS_HEADERS),
+            *[
+                _sheet_row(
+                    INVOICE_ORDERS_HEADERS,
+                    platform="Shopee",
+                    order_id=order_id,
+                    order_status=("Cancelled" if order_id.endswith("STATUS") else "Completed"),
+                    invoice_financial_layout=(
+                        "CANCELLED_ORDER" if order_id.endswith("LAYOUT") else "NORMAL_ORDER"
+                    ),
+                    payout_completed_date="2026-08-08",
+                    first_imported_at="2026-08-08T10:00:00+00:00",
+                )
+                for order_id in order_ids
+            ],
+        ],
+        INVOICE_ITEMS_TAB: [
+            list(INVOICE_ITEMS_HEADERS),
+            *[
+                _sheet_row(
+                    INVOICE_ITEMS_HEADERS,
+                    platform="Shopee",
+                    order_id=order_id,
+                    item_index="0",
+                    seller_sku=f"SKU-{index}",
+                    nav=f"NAV-{index}",
+                    product_name=f"Product {index}",
+                    quantity="1",
+                    unit_price="10.00",
+                    line_subtotal="10.00",
+                )
+                for index, order_id in enumerate(order_ids, start=1)
+            ],
+        ],
+    }
+
+    snapshot = build_cross_platform_reporting_snapshot(tabs)
+
+    assert [(item.order_id, item.item_index) for item in snapshot.eligible_items] == [
+        ("SHP-NORMAL", 0)
+    ]
+
+
 def _item(
     *,
     order_id,

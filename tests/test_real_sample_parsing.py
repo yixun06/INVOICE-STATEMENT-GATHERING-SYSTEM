@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from src.invoice_app.pdf_document import read_pdf_document
 from src.invoice_app.parsers.shopee_extractor import extract_shopee_data
+from src.invoice_app.parsers.shopee_financial_parser import CANCELLED_ORDER
 from src.invoice_app.parsers.shopee_parser import ShopeeParser
 from src.invoice_app.parsers.shopee_product_parser import parse_positioned_products
 from src.invoice_app.parsers.shopee_review_policy import find_shopee_review_issue
@@ -290,6 +291,30 @@ def test_parse_real_shopee_final_amount_with_overlapping_page_advertisement():
     assert reviews == []
     assert orders[0]["order_id"] == "260828J0XTYX28"
     assert orders[0]["final_amount"] == "27.48"
+
+
+def test_parse_real_shopee_cancelled_order_v1_regression():
+    pdf_path = Path(r"D:\download material\cancel pdf.pdf")
+    if not pdf_path.exists():
+        pytest.skip("Local approved Shopee cancelled-order PDF is unavailable.")
+
+    orders, products, reviews = process_pdf_file(
+        pdf_path.name, pdf_path, "batch-cancelled-v1"
+    )
+
+    assert reviews == []
+    assert len(orders) == 1
+    assert len(products) == 3
+    order = orders[0]
+    assert order["order_id"] == "260908G952UC0W"
+    assert order["order_status"] == "Cancelled"
+    assert order["invoice_financial_layout"] == CANCELLED_ORDER
+    assert order["merchandise_subtotal"] == "0.00"
+    assert order["product_price"] == "77.20"
+    assert order["_cancelled_amount"] == "-77.20"
+    assert order["order_income"] == "0.00"
+    assert order["final_amount"] == "0.00"
+    assert sum(Decimal(product["line_subtotal"]) for product in products) == Decimal("77.20")
 
 
 def test_parse_real_shopee_promotional_bundle_allocation():

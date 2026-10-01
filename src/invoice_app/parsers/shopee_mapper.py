@@ -124,6 +124,8 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
         "payment_status": resolve_shopee_payment_status(data.fund_transfer_date, income_type),
         "final_amount": final_amount,
         "refund_amount": _source_money(data.refund_amount),
+        # Cancellation V1 validation evidence only; not part of the UAT2 schema.
+        "_cancelled_amount": _source_money(data.cancelled_amount),
         "_invoice_adjustment_evidence": tuple(
             {
                 "semantic_type": event.semantic_type,

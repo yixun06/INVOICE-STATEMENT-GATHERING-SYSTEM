@@ -313,6 +313,41 @@ def test_mapper_explicitly_converts_accepted_shopee_rows_without_parser_changes(
     assert bundle.items[0].nav == "NAV-01"
 
 
+def test_mapper_persists_cancelled_order_and_preserves_original_item_amounts():
+    bundle = map_accepted_shopee_invoice(
+        {
+            "platform": "Shopee",
+            "order_id": "CANCELLED-1",
+            "order_status": "Cancelled",
+            "invoice_financial_layout": "CANCELLED_ORDER",
+            "merchandise_subtotal": "0.00",
+            "product_price": "77.20",
+            "order_income": "0.00",
+            "final_amount": "0.00",
+            "status": "Accepted",
+        },
+        [
+            {
+                "platform": "Shopee",
+                "order_id": "CANCELLED-1",
+                "status": "Accepted",
+                "seller_sku": "SKU-CANCELLED",
+                "quantity": 1,
+                "unit_price": "77.20",
+                "line_subtotal": "77.20",
+            }
+        ],
+        source_hash="cancelled-source-hash",
+        enriched_items=[{"unit_price": "80.00", "nav": "NAV-CANCELLED"}],
+    )
+
+    assert bundle.order.order_status == "Cancelled"
+    assert bundle.order.invoice_financial_layout == "CANCELLED_ORDER"
+    assert bundle.order.merchandise_subtotal == Decimal("0.00")
+    assert bundle.items[0].actual_selling_unit_price == Decimal("77.20")
+    assert bundle.items[0].line_subtotal == Decimal("77.20")
+
+
 def test_mapper_accepts_authoritative_shopee_date_with_minutes_as_a_canonical_date():
     bundle = map_accepted_shopee_invoice(
         {"platform": "Shopee", "order_id": "DATE-1", "order_created_date": "19/08/2026 14:32", "status": "Accepted"},

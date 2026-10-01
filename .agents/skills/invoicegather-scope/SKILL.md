@@ -58,6 +58,34 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
   duplicate/skipped evidence remains visible with any approved optional action,
   but stays outside primary `Needs Attention` unless its explicit issue is
   `blocking=True`.
+- A product-level `Return/Refund` marker is operational source evidence, not by
+  itself completed refund financial evidence. When it is the only refund-layout
+  signal, keep the marker as a source fact, classify the Invoice as
+  `NORMAL_ORDER`, and run normal financial validation. Do not route this
+  marker-only pending state to `UNKNOWN_OR_MIXED` or Requires Re-upload.
+  Completed post-order Adjustment evidence remains a separate event and must not
+  rewrite the original Invoice financial layout.
+- A genuine Shopee cancelled order is valid historical Invoice evidence. Source
+  spellings `Cancelled` and `Canceled` normalize to canonical
+  `order_status = "Cancelled"` and explicit cancellation status selects
+  `invoice_financial_layout = "CANCELLED_ORDER"`. Never infer cancellation from
+  zero values, refund markers, or missing settlement values; unknown statuses
+  retain the existing behavior.
+- Cancellation V1 is intentionally limited to the current approved Shopee MY
+  format represented by `260908G952UC0W`: original product subtotals reconcile
+  to Product Price, explicit negative `Cancelled Amount` offsets Product Price
+  to zero Merchandise Subtotal, and source Order Income and Final Amount are
+  zero. Missing, positive, or contradictory cancellation evidence fails closed.
+  `Cancelled Amount` is staging validation evidence only and does not add an
+  `Invoice_Orders` column or change the source-fingerprint contract.
+- An Accepted cancelled Invoice persists through the existing
+  `Invoice_Orders` / `Invoice_Items` path with original item quantities and
+  amounts preserved. Product Summary backends must exclude an item before
+  aggregation when its parent order has canonical Cancelled status or
+  `CANCELLED_ORDER` layout. Weekly/Monthly Statement selection remains exact-ID;
+  a selected cancelled order remains source population evidence but contributes
+  no Product Summary item, quantity, or amount. Cross Platform applies the same
+  exclusion at its committed-data eligibility boundary.
 - **Reconcile** owns Product Master/NAV reconciliation and historical Invoice
   DB classification (`NEW`, `ALREADY_IMPORTED`, `SOURCE_CONFLICT`) plus safe
   removal from the current candidate batch only. It never deletes historical

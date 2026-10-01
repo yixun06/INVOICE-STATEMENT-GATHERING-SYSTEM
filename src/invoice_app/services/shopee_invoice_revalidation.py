@@ -8,17 +8,20 @@ from typing import Any, Mapping, Sequence
 from src.invoice_app.parsers.shopee_financial_parser import (
     INCOME_ALIASES,
     CONDITIONAL_TOP_LEVEL_INCOME_FIELDS,
+    CANCELLED_ORDER,
     NORMAL_ORDER,
     NORMAL_ORDER_REQUIRED_INCOME_DETAIL_FIELDS,
     RETURN_REFUND,
     RETURN_REFUND_REQUIRED_INCOME_DETAIL_FIELDS,
     classify_invoice_financial_layout_from_signals,
+    is_cancelled_order_status,
     is_missing_financial_value,
 )
 from src.invoice_app.parsers.shopee_product_parser import resolve_promotion_group_totals
 from src.invoice_app.parsers.validation import (
     count_product_anchor_items,
     validate_product_items,
+    validate_shopee_cancelled_order_amounts,
     validate_shopee_final_amount_adjustment,
     validate_shopee_financial_reconciliation,
     validate_shopee_product_amounts,
@@ -80,12 +83,16 @@ def revalidate_shopee_invoice(
         return _failed(working, promotion_error)
 
     layout_signals = frozenset(order.get("_financial_layout_signals") or ())
+    persisted_layout = str(order.get("invoice_financial_layout") or "").strip()
     layout = (
-        classify_invoice_financial_layout_from_signals(layout_signals)
+        CANCELLED_ORDER
+        if is_cancelled_order_status(order.get("order_status"))
+        or persisted_layout == CANCELLED_ORDER
+        else classify_invoice_financial_layout_from_signals(layout_signals)
         if "_financial_layout_signals" in order
-        else str(order.get("invoice_financial_layout") or "").strip()
+        else persisted_layout
     )
-    if layout not in {NORMAL_ORDER, RETURN_REFUND}:
+    if layout not in {NORMAL_ORDER, RETURN_REFUND, CANCELLED_ORDER}:
         return _failed(
             working,
             "Invoice financial layout is unresolved and cannot be Accepted.",
@@ -93,12 +100,21 @@ def revalidate_shopee_invoice(
         )
     if required_error := _validate_required_financial_source(order, layout):
         return _failed(working, required_error)
-    if product_error := validate_shopee_product_amounts(
-        working,
-        order.get("merchandise_subtotal"),
-        order.get("refund_amount"),
-        product_price=order.get("product_price"),
-    ):
+    product_error = (
+        validate_shopee_cancelled_order_amounts(
+            working,
+            order,
+            order.get("_cancelled_amount"),
+        )
+        if layout == CANCELLED_ORDER
+        else validate_shopee_product_amounts(
+            working,
+            order.get("merchandise_subtotal"),
+            order.get("refund_amount"),
+            product_price=order.get("product_price"),
+        )
+    )
+    if product_error:
         return _failed(working, product_error)
     if financial_error := validate_shopee_financial_reconciliation(
         dict(order),

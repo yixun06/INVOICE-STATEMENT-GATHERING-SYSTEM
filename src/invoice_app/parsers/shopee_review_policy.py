@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 
 from .shopee_extractor import ShopeeExtractedData
 from .shopee_financial_parser import missing_income_detail_fields
-from .shopee_financial_parser import UNKNOWN_OR_MIXED
+from .shopee_financial_parser import CANCELLED_ORDER, UNKNOWN_OR_MIXED
 from .validation import (
     count_product_anchor_items,
     extract_expected_product_count,
     format_validation_errors,
     validate_product_items,
+    validate_shopee_cancelled_order_amounts,
     validate_shopee_final_amount_adjustment,
     validate_shopee_financial_reconciliation,
     validate_shopee_promotion_evidence,
@@ -175,11 +176,19 @@ def find_shopee_review_issue(
                 reason_code=INCOME_DETAILS_REQUIRED_FIELD_MISSING,
             )
 
-    product_amount_error = validate_shopee_product_amounts(
-        product_items,
-        data.income.get("merchandise_subtotal"),
-        data.refund_amount,
-        product_price=data.income.get("product_price"),
+    product_amount_error = (
+        validate_shopee_cancelled_order_amounts(
+            product_items,
+            data.income,
+            data.cancelled_amount,
+        )
+        if data.invoice_financial_layout == CANCELLED_ORDER
+        else validate_shopee_product_amounts(
+            product_items,
+            data.income.get("merchandise_subtotal"),
+            data.refund_amount,
+            product_price=data.income.get("product_price"),
+        )
     )
     if product_amount_error:
         return ShopeeReviewIssue(
