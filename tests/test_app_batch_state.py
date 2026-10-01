@@ -662,9 +662,8 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
         element.value for element in app.subheader
     }
     assert "Review & Commit" not in {element.value for element in app.subheader}
-    assert {"Needs Attention", "Resolve Manual Review"} <= {
-        element.value for element in app.subheader
-    }
+    assert "Resolve Manual Review" in {element.value for element in app.subheader}
+    assert "Needs Attention" not in {element.value for element in app.subheader}
     current_order_table = next(
         dataframe.value
         for dataframe in app.dataframe
@@ -889,8 +888,8 @@ def test_data_import_exposes_distinct_monthly_statement_workflow(tmp_path, monke
         for element in app.file_uploader
     )
     stepper = {element.value for element in app.markdown if "badge[" in element.value}
-    assert len(stepper) == 4
-    assert not any("Reconcile" in item for item in stepper)
+    assert len(stepper) == 5
+    assert any("Reconcile" in item for item in stepper)
 
 
 def test_platform_invoice_uses_five_steps_without_provisional_normalization():
