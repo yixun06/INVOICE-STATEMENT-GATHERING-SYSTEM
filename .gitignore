@@ -27,6 +27,8 @@ Thumbs.db
 /.pytest_temp/
 /.pytest-*
 /.pytest_cache/
+/output/
+/outputs/
 
 # Editor or patch leftovers
 *.orig
