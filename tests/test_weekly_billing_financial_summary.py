@@ -258,6 +258,11 @@ def test_unified_workbook_has_exact_three_sheets_and_numeric_financial_amounts()
     assert finance.cell(1, 1).value == "Description"
     assert finance.cell(1, 2).value == "Amount"
     assert finance.cell(2, 2).value == 14767.32
+    assert finance.cell(2, 2).data_type == "n"
+    assert (
+        finance.cell(2, 2).number_format
+        == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
+    )
     assert finance.cell(32, 2).value is None
     assert finance.cell(33, 2).value == -82.4
     assert report.product_summary.period == report.financial_summary.period == PERIOD

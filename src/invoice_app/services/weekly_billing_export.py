@@ -14,6 +14,7 @@ from src.invoice_app.services.weekly_billing_staging import (
     STAGING_DATA_HEADERS,
     build_staging_data_rows,
 )
+from src.invoice_app.utils.monetary import excel_currency_format
 
 
 PRODUCT_SUMMARY_HEADERS = (
@@ -29,6 +30,7 @@ PRODUCT_SUMMARY_HEADERS = (
     "Amount",
 )
 FINANCIAL_SUMMARY_HEADERS = ("Description", "Amount")
+MYR_EXCEL_FORMAT = excel_currency_format()
 
 
 def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
@@ -58,7 +60,7 @@ def export_weekly_billing_summary(summary: WeeklyBillingSummary) -> bytes:
         )
     for column in (7, 8, 9, 10):
         for cells in sheet.iter_rows(min_row=2, min_col=column, max_col=column):
-            cells[0].number_format = '"RM" #,##0.00'
+            cells[0].number_format = MYR_EXCEL_FORMAT
     widths = {
         "A": 8,
         "B": 18,
@@ -124,7 +126,7 @@ def export_weekly_billing_report(
             indent=1 if row.parent_source_row_number is not None else 0,
         )
         if row.amount is not None:
-            amount.number_format = '"RM" #,##0.00;[Red]-"RM" #,##0.00'
+            amount.number_format = MYR_EXCEL_FORMAT
         if row.line_type == "TOTAL":
             _emphasize_financial_row(financial_sheet, excel_row, bold=True, fill="D9EAD3")
         elif row.line_type == "SUBTOTAL":
@@ -234,7 +236,7 @@ def _write_product_summary(sheet, summary: WeeklyBillingSummary) -> None:
         ))
     for column in (7, 8, 9, 10):
         for cells in sheet.iter_rows(min_row=2, min_col=column, max_col=column):
-            cells[0].number_format = '"RM" #,##0.00'
+            cells[0].number_format = MYR_EXCEL_FORMAT
     for column, width in {
         "A": 8, "B": 18, "C": 18, "D": 58, "E": 10, "F": 10,
         "G": 16, "H": 16, "I": 16, "J": 16,

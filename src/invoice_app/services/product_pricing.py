@@ -357,7 +357,7 @@ def _priced_result(
 ) -> ProductPricingResult:
     if discount < -PRICING_ANOMALY_TOLERANCE:
         status = ProductPricingStatus.PRICING_ANOMALY
-        reason = "Discount Given is below -RM0.02; retained without clamping."
+        reason = "Discount Given is below RM -0.02; retained without clamping."
     else:
         reason = None
     return _result(

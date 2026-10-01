@@ -110,7 +110,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert isinstance(orders["C4"].value, datetime)
     assert orders["C4"].number_format == "yyyy-mm-dd"
     assert orders["D4"].value == 1250.5
-    assert orders["D4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert orders["D4"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
     assert orders["D4"].alignment.horizontal == "left"
     assert orders["E5"].alignment.wrap_text is True
     assert orders["A4"].fill.fgColor.rgb == "00FFFFFF"
@@ -131,7 +131,7 @@ def test_platform_export_is_consistently_formatted_and_typed(tmp_path):
     assert summary["B4"].value == "Shopee"
     assert summary["B5"].value == 2
     assert summary["B8"].value == 1250.5
-    assert summary["B8"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert summary["B8"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
 
 
 def test_product_summary_export_uses_standard_layout_and_types(tmp_path):
@@ -165,7 +165,7 @@ def test_product_summary_export_uses_standard_layout_and_types(tmp_path):
     assert worksheet["A4"].value == "9555208109860"
     assert worksheet["A4"].number_format == "@"
     assert worksheet["C4"].value == 10.0
-    assert worksheet["C4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert worksheet["C4"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
     assert worksheet["D4"].value == 2
     assert worksheet["D4"].number_format == "#,##0"
     assert worksheet["E4"].value == 18.0
@@ -242,13 +242,13 @@ def test_shopee_canonical_order_column_selection_exports_labels_and_types(tmp_pa
     orders = workbook["Orders"]
     assert [cell.value for cell in orders[3]] == [FIELD_LABELS[column] for column in selected_order_columns]
     assert orders["C4"].value == 24.53
-    assert orders["C4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert orders["C4"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
     assert orders["D4"].value == "Estimated"
     assert orders["D4"].number_format == "@"
     assert orders["E4"].value == "Pending"
     assert orders["F4"].value == 3.2
     assert orders["G4"].value == -27.67
-    assert orders["G4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert orders["G4"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
 
 
 def test_export_format_remains_stable_for_empty_and_large_datasets(tmp_path):
@@ -310,7 +310,7 @@ def test_export_format_remains_stable_for_empty_and_large_datasets(tmp_path):
     assert large_sheet.auto_filter.ref == "A3:D1503"
     assert large_sheet["B1503"].value == "ORDER-01499"
     assert large_sheet["C1503"].value == 1499.25
-    assert large_sheet["C1503"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert large_sheet["C1503"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
 
 
 def test_review_export_excludes_duplicate_and_unsupported_rows(tmp_path):

@@ -17,6 +17,7 @@ from ..parsers.validation import (
     financial_reconciliation_evidence_notes,
     validate_product_items,
 )
+from ..utils.monetary import format_currency
 from ..review_reason_codes import (
     FINAL_AMOUNT_EXTRACTION_MISSING,
     INCOME_COMPLETION_ANCHOR_MISSING,
@@ -876,7 +877,8 @@ def _validated_promotion_subtotal(
     if advertised not in (None, "") and Decimal(subtotal) != Decimal(advertised):
         return (
             "",
-            f"Promotion Subtotal must match the source-visible amount RM{advertised}.",
+            "Promotion Subtotal must match the source-visible amount "
+            f"{format_currency(advertised)}.",
         )
     return subtotal, None
 

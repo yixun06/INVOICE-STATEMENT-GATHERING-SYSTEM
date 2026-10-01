@@ -236,7 +236,7 @@ def test_shopee_wrong_explicit_refund_still_requires_product_amount_manual_revie
 
     assert issue is not None
     assert issue.reason_code == "PRODUCT_AMOUNT_RECONCILIATION_FAILED"
-    assert "Refund Amount -20.00" in issue.reason
+    assert "Refund Amount RM -20.00" in issue.reason
 
 
 def test_shopee_explicit_zero_refund_uses_existing_non_refund_product_arithmetic():
@@ -277,7 +277,7 @@ def test_shopee_refund_is_not_double_subtracted_in_financial_reconciliation():
         extracted.income,
         extracted.refund_amount,
     ) == (
-        "Financial Reconciliation Failed: seller components total 249.84, but Order Income is 222.17.",
+        "Financial Reconciliation Failed: seller components total RM 249.84, but Order Income is RM 222.17.",
     )
 
 
@@ -294,7 +294,7 @@ def test_shopee_refund_financial_reconciliation_reports_wrong_totals_without_blo
         extracted.income,
         extracted.refund_amount,
     ) == (
-        "Financial Reconciliation Failed: seller components total 249.84, but Order Income is 249.87.",
+        "Financial Reconciliation Failed: seller components total RM 249.84, but Order Income is RM 249.87.",
     )
 
 
@@ -366,8 +366,8 @@ def test_shopee_normal_top_level_financial_identity_uses_existing_tolerance():
     issue = find_shopee_review_issue(outside_tolerance)
     assert issue is not None
     assert issue.reason == (
-        "Financial Reconciliation Failed: seller components total 22.00, "
-        "but Order Income is 22.03."
+        "Financial Reconciliation Failed: seller components total RM 22.00, "
+        "but Order Income is RM 22.03."
     )
 
 
@@ -455,8 +455,8 @@ def test_shopee_normal_absent_fees_produces_formula_mismatch_not_missing_review(
     assert issue is not None
     assert issue.reason_code is None
     assert issue.reason == (
-        "Financial Reconciliation Failed: seller components total 25.00, "
-        "but Order Income is 22.00."
+        "Financial Reconciliation Failed: seller components total RM 25.00, "
+        "but Order Income is RM 22.00."
     )
 
 
@@ -619,7 +619,7 @@ def test_shopee_missing_fee_component_is_non_blocking_financial_evidence():
     assert extracted.income["commission_fee"] == "N/A"
     assert find_shopee_review_issue(extracted) is None
     assert financial_reconciliation_evidence_notes(extracted.income) == (
-        "Financial Reconciliation Failed: source-present fee components total -2.00, but Fees & Charges is -3.00.",
+        "Financial Reconciliation Failed: source-present fee components total RM -2.00, but Fees & Charges is RM -3.00.",
     )
 
 

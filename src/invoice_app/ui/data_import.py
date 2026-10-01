@@ -17,6 +17,8 @@ from typing import Any, Callable, Mapping, MutableMapping
 
 import streamlit as st
 
+from ..utils.monetary import format_currency
+
 from .data_import_components import (
     render_authoritative_status,
     render_summary_items,
@@ -983,11 +985,11 @@ def _render_monthly_metrics(statement: Any) -> None:
     with st.container(horizontal=True):
         st.metric("Order rows", len(statement.order_rows))
         st.metric("SKU rows", len(statement.sku_rows))
-        st.metric("Total released", f"RM {statement.summary_total_released:,.2f}")
+        st.metric("Total released", format_currency(statement.summary_total_released))
         st.metric(
             "Adjustments",
             len(statement.adjustments),
-            help=f"Source total: RM {adjustment_total:,.2f}",
+            help=f"Source total: {format_currency(adjustment_total)}",
         )
 
 
@@ -2576,8 +2578,19 @@ def _render_combined_resolution_form(key: str, review: dict[str, Any]) -> None:
                         for name, quantity in zip(group.member_names, group.member_quantities)
                     )
                 )
-                st.caption(f"Source subtotal: {f'RM{group.source_group_total}' if group.source_group_total else 'Not extracted'}")
-                st.caption(f"Source-visible promotion amount: {f'RM{group.advertised_amount}' if group.advertised_amount else 'Visible in the original Invoice'}")
+                st.caption(
+                    "Source subtotal: "
+                    + format_currency(
+                        group.source_group_total, missing_value="Not extracted"
+                    )
+                )
+                st.caption(
+                    "Source-visible promotion amount: "
+                    + format_currency(
+                        group.advertised_amount,
+                        missing_value="Visible in the original Invoice",
+                    )
+                )
                 submitted[group.group_id] = st.text_input(
                     "Promotion Subtotal",
                     value=saved.get(group.group_id, ""),
@@ -2740,9 +2753,9 @@ def _formula_mismatch_summary(reason: str) -> tuple[str, str, str] | None:
     except ArithmeticError:
         return None
     return (
-        _format_rm(calculated),
-        _format_rm(invoice),
-        _format_rm(abs(invoice - calculated)),
+        format_currency(calculated),
+        format_currency(invoice),
+        format_currency(abs(invoice - calculated)),
     )
 
 
@@ -2760,14 +2773,10 @@ def _adjustment_conflict_summary(
         return None
     expected = order_income + adjustment
     return (
-        _format_rm(expected),
-        _format_rm(final_amount),
-        _format_rm(abs(final_amount - expected)),
+        format_currency(expected),
+        format_currency(final_amount),
+        format_currency(abs(final_amount - expected)),
     )
-
-
-def _format_rm(value: Decimal) -> str:
-    return f"RM{value.quantize(Decimal('0.01'))}"
 
 
 def _unfixable_financial_presentation(
@@ -2862,7 +2871,11 @@ def _render_draft_product_form(
     groups = promotion_group_options(review)
     group_labels = ["No Promotion", *[
         f"{group.label} · {', '.join(group.member_names)}"
-        + (f" · subtotal RM{group.source_group_total}" if group.source_group_total else "")
+        + (
+            f" · subtotal {format_currency(group.source_group_total)}"
+            if group.source_group_total is not None
+            else ""
+        )
         for group in groups
     ]]
     group_ids = ["", *[group.group_id for group in groups]]
@@ -2954,17 +2967,18 @@ def _render_promotion_subtotal_form(key: str, review: dict[str, Any]) -> None:
             st.caption(
                 "Source subtotal: "
                 + (
-                    f"RM{group.source_group_total}"
-                    if group.source_group_total
-                    else "Not extracted"
+                    format_currency(
+                        group.source_group_total, missing_value="Not extracted"
+                    )
                 )
             )
             st.caption(
                 "Source-visible promotion amount: "
                 + (
-                    f"RM{group.advertised_amount}"
-                    if group.advertised_amount
-                    else "Visible in the original Invoice"
+                    format_currency(
+                        group.advertised_amount,
+                        missing_value="Visible in the original Invoice",
+                    )
                 )
             )
             submitted[group.group_id] = st.text_input(
@@ -3939,7 +3953,7 @@ def _render_statement_review_content(
         _render_reconciliation_notes(review)
     with st.container(border=True):
         st.write("**Statement Adjustment evidence (separate)**")
-        st.write(f"RM {batch.statement_adjustment_total:.2f}")
+        st.write(format_currency(batch.statement_adjustment_total))
         st.caption(
             "This is not included in original merchandise or seller-settlement reconciliation."
         )

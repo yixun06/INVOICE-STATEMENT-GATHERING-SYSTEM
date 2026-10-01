@@ -14,6 +14,7 @@ from ..services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
     stage_shopee_weekly_statement,
 )
+from ..utils.monetary import format_currency, streamlit_currency_format
 
 
 SETTLEMENT_TEST_LAB_PAGE = "Settlement Test Lab"
@@ -167,7 +168,11 @@ def _render_statement_validation(stage: StagedShopeeWeeklyStatement) -> None:
                 st.metric("Order rows", len(statement.order_rows), border=True)
             with right:
                 st.metric("Status", stage.result, border=True)
-                st.metric("Total released", f"RM {statement.summary_total_released:.2f}", border=True)
+                st.metric(
+                    "Total released",
+                    format_currency(statement.summary_total_released),
+                    border=True,
+                )
         if stage.result == READY_TO_COMMIT and stage.duplicate_status is None:
             st.success("Passed — the existing statement validation is ready for this session-only test.", icon=":material/check_circle:")
         elif stage.validation_issues or stage.rejection_reasons:
@@ -230,11 +235,21 @@ def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
         column_config={
             "Order Created Date": st.column_config.DateColumn("Order Created Date", format="YYYY-MM-DD"),
             "Payout Completed Date": st.column_config.DateColumn("Payout Completed Date", format="DD/MM/YYYY"),
-            "Comparison Amount": st.column_config.NumberColumn(format="RM %.2f"),
-            "Released Amount": st.column_config.NumberColumn(format="RM %.2f"),
-            "Invoice Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),
-            "Statement Refund Amount": st.column_config.NumberColumn(format="RM %.2f"),
-            "Difference": st.column_config.NumberColumn(format="RM %.2f"),
+            "Comparison Amount": st.column_config.NumberColumn(
+                format=streamlit_currency_format()
+            ),
+            "Released Amount": st.column_config.NumberColumn(
+                format=streamlit_currency_format()
+            ),
+            "Invoice Refund Amount": st.column_config.NumberColumn(
+                format=streamlit_currency_format()
+            ),
+            "Statement Refund Amount": st.column_config.NumberColumn(
+                format=streamlit_currency_format()
+            ),
+            "Difference": st.column_config.NumberColumn(
+                format=streamlit_currency_format()
+            ),
         },
         hide_index=True,
         key="settlement_test_lab_projection",
@@ -264,7 +279,9 @@ def _render_projection(rows: tuple[Any, ...], statement: Any) -> None:
             ),
             column_config={
                 "Adjustment Complete Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
-                "Adjustment Amount": st.column_config.NumberColumn(format="RM %.2f"),
+                "Adjustment Amount": st.column_config.NumberColumn(
+                    format=streamlit_currency_format()
+                ),
             },
             hide_index=True,
             key="settlement_test_lab_adjustments",

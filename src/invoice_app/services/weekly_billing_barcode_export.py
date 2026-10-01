@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+
+from src.invoice_app.utils.monetary import format_currency
 from io import BytesIO
 from pathlib import Path
 
@@ -177,8 +179,8 @@ def _draw_label(pdf: Canvas, row: ProductSummaryRow) -> None:
         ("NO", str(row.number)),
         ("QUANTITY", str(row.quantity)),
         ("UOM", row.uom or ""),
-        ("SALES AMOUNT", _format_money(row.amount)),
-        ("DISCOUNT AMOUNT", _format_money(row.discount_amount)),
+        ("SALES AMOUNT", format_currency(row.amount)),
+        ("DISCOUNT AMOUNT", format_currency(row.discount_amount)),
     ):
         pdf.setFont("Helvetica-Bold", FIELD_FONT_SIZE)
         pdf.drawString(LABEL_MARGIN, field_y, f"{label}:")
@@ -323,8 +325,6 @@ def _split_word_to_width(
     return parts
 
 
-def _format_money(value: Decimal) -> str:
-    return f"RM {value:,.2f}"
 
 
 def _ensure_label_text_font() -> str:

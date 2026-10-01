@@ -8,6 +8,7 @@ from src.invoice_app.services.weekly_billing_barcode_table_export import (
     ProductSummaryBarcodeTablePresentation,
     render_product_summary_barcode_table_pdf,
 )
+from src.invoice_app.utils.monetary import format_currency
 
 
 def export_monthly_product_summary_barcode_table_pdf(
@@ -27,9 +28,9 @@ def export_monthly_product_summary_barcode_table_pdf(
         metrics=(
             ("Total Product", str(len(rows))),
             ("Total Qty", str(summary.total_quantity)),
-            ("Total Original Sales", _format_money(summary.total_standard_amount)),
-            ("Total Discount Given", _format_money(summary.total_discount_amount)),
-            ("Total Amount", _format_money(summary.total_amount)),
+            ("Total Original Sales", format_currency(summary.total_standard_amount)),
+            ("Total Discount Given", format_currency(summary.total_discount_amount)),
+            ("Total Amount", format_currency(summary.total_amount)),
             ("Barcode Ready", str(barcode_ready)),
             ("Barcode Unavailable", str(len(rows) - barcode_ready)),
         ),
@@ -41,7 +42,3 @@ def export_monthly_product_summary_barcode_table_pdf(
         product_rows=rows,
         presentation=presentation,
     )
-
-
-def _format_money(value) -> str:
-    return f"RM {value:,.2f}"

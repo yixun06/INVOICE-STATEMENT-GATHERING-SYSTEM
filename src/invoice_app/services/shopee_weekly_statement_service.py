@@ -19,6 +19,7 @@ from .statement_reconciliation import (
     DISPLAY_STATUS,
     compare_statement_order,
 )
+from ..utils.monetary import format_currency
 
 
 READY_TO_COMMIT = "Ready to Commit"
@@ -278,7 +279,9 @@ def validate_shopee_weekly_statement(
         if _amount_differs(order_total, statement.summary_total_released):
             issues.append(ValidationIssue(
                 "order_total_vs_summary_mismatch",
-                f"Order View total {order_total:.2f} does not match Summary Total Released {statement.summary_total_released:.2f}.",
+                f"Order View total {format_currency(order_total)} does not match "
+                "Summary Total Released "
+                f"{format_currency(statement.summary_total_released)}.",
             ))
 
     component_mismatches: list[str] = []
@@ -370,7 +373,8 @@ def validate_shopee_weekly_statement(
         if _amount_differs(adjustment_total, statement.adjustment_control_total):
             issues.append(ValidationIssue(
                 "adjustment_detail_vs_control_mismatch",
-                f"Adjustment details total {adjustment_total:.2f} does not match control total {statement.adjustment_control_total:.2f}.",
+                f"Adjustment details total {format_currency(adjustment_total)} does not "
+                f"match control total {format_currency(statement.adjustment_control_total)}.",
             ))
         if (
             statement.adjustment_footer_total is not None
@@ -378,7 +382,8 @@ def validate_shopee_weekly_statement(
         ):
             issues.append(ValidationIssue(
                 "adjustment_detail_vs_footer_mismatch",
-                f"Adjustment details total {adjustment_total:.2f} does not match footer total {statement.adjustment_footer_total:.2f}.",
+                f"Adjustment details total {format_currency(adjustment_total)} does not "
+                f"match footer total {format_currency(statement.adjustment_footer_total)}.",
             ))
     return tuple(issues)
 

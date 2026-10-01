@@ -11,6 +11,7 @@ from ..review_reason_codes import (
     POST_ORDER_ADJUSTMENT_SOURCE_MISSING,
 )
 from ..utils.normalize import parse_quantity
+from ..utils.monetary import format_currency
 from .shopee_financial_parser import (
     CONDITIONAL_TOP_LEVEL_INCOME_FIELDS,
     NORMAL_ORDER,
@@ -161,8 +162,8 @@ def validate_shopee_product_amounts(
         if abs(expected - line_total) > MONEY_TOLERANCE and not _has_explicit_shopee_promotion(item):
             return (
                 "Product Amount Reconciliation Failed: "
-                f"Item {index} quantity x unit price is {expected:.2f}, "
-                f"but line subtotal is {line_total:.2f}."
+                f"Item {index} quantity x unit price is {format_currency(expected)}, "
+                f"but line subtotal is {format_currency(line_total)}."
             )
 
     seller_subtotal = _decimal_value(merchandise_subtotal)
@@ -173,8 +174,8 @@ def validate_shopee_product_amounts(
     if source_product_price is not None and abs(extracted_total - source_product_price) > MONEY_TOLERANCE:
         return (
             "Product Amount Reconciliation Failed: "
-            f"extracted source subtotals total {extracted_total:.2f}, "
-            f"but seller Product Price is {source_product_price:.2f}."
+            f"extracted source subtotals total {format_currency(extracted_total)}, "
+            f"but seller Product Price is {format_currency(source_product_price)}."
         )
     signed_refund = _decimal_value(refund_amount)
     product_base = source_product_price if source_product_price is not None else extracted_total
@@ -183,14 +184,14 @@ def validate_shopee_product_amounts(
     )
     if abs(reconciled_total - seller_subtotal) > MONEY_TOLERANCE:
         refund_detail = (
-            f" plus explicit Refund Amount {signed_refund:.2f}"
+            f" plus explicit Refund Amount {format_currency(signed_refund)}"
             if signed_refund is not None
             else ""
         )
         return (
             "Product Amount Reconciliation Failed: "
-            f"extracted source subtotals total {extracted_total:.2f}{refund_detail}, "
-            f"but seller Merchandise Subtotal is {seller_subtotal:.2f}."
+            f"extracted source subtotals total {format_currency(extracted_total)}{refund_detail}, "
+            f"but seller Merchandise Subtotal is {format_currency(seller_subtotal)}."
         )
     return None
 
@@ -232,8 +233,8 @@ def validate_shopee_financial_reconciliation(
     if abs(expected_income - order_income) > MONEY_TOLERANCE:
         return (
             "Financial Reconciliation Failed: "
-            f"seller components total {expected_income:.2f}, "
-            f"but Order Income is {order_income:.2f}."
+            f"seller components total {format_currency(expected_income)}, "
+            f"but Order Income is {format_currency(order_income)}."
         )
     return None
 
@@ -275,7 +276,7 @@ def validate_shopee_cancelled_order_amounts(
             return (
                 "Cancelled Order Reconciliation Failed: "
                 f"{label} must be 0.00 for the supported cancellation layout, "
-                f"but source value is {parsed:.2f}."
+                f"but source value is {format_currency(parsed)}."
             )
     return None
 
@@ -473,8 +474,8 @@ def financial_reconciliation_evidence_notes(
         if abs(shipping_components - shipping_subtotal) > MONEY_TOLERANCE:
             notes.append(
                 "Financial Reconciliation Failed: "
-                f"source-present shipping components total {shipping_components:.2f}, "
-                f"but Shipping Subtotal is {shipping_subtotal:.2f}."
+                f"source-present shipping components total {format_currency(shipping_components)}, "
+                f"but Shipping Subtotal is {format_currency(shipping_subtotal)}."
             )
 
     fee_fields = (
@@ -493,8 +494,8 @@ def financial_reconciliation_evidence_notes(
         if abs(fee_components - fees_aggregate) > MONEY_TOLERANCE:
             notes.append(
                 "Financial Reconciliation Failed: "
-                f"source-present fee components total {fee_components:.2f}, "
-                f"but Fees & Charges is {fees_aggregate:.2f}."
+                f"source-present fee components total {format_currency(fee_components)}, "
+                f"but Fees & Charges is {format_currency(fees_aggregate)}."
             )
 
     merchandise = _decimal_value(income.get("merchandise_subtotal"))
@@ -513,8 +514,8 @@ def financial_reconciliation_evidence_notes(
     if abs(expected_income - order_income) > MONEY_TOLERANCE:
         notes.append(
             "Financial Reconciliation Failed: "
-            f"seller components total {expected_income:.2f}, "
-            f"but Order Income is {order_income:.2f}."
+            f"seller components total {format_currency(expected_income)}, "
+            f"but Order Income is {format_currency(order_income)}."
         )
     return tuple(notes)
 

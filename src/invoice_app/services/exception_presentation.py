@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from .historical_invoice_intake import IntakeStatus, InvoiceIntakeEntry
 from .import_result_contract import ImportResult, RecoveryAction, ValidationIssue
 from .validation_recovery import REMOVE_SOURCE, recovery_actions_for_source
+from ..utils.monetary import format_currency
 
 
 MISSING_INVOICE_COVERAGE_REASON = (
@@ -475,7 +476,7 @@ def _statement_review_guidance(
                     "Source": "Comparison",
                     "Field": "Difference",
                     "Value": _money(difference),
-                    "Reference": "RM0.02 tolerance",
+                    "Reference": "RM 0.02 tolerance",
                 },
             ),
         )
@@ -658,6 +659,6 @@ def _money(value: Any) -> str:
     if value is None:
         return "Not provided"
     try:
-        return f"RM {value:.2f}"
+        return format_currency(value)
     except (TypeError, ValueError):
         return _display(value)

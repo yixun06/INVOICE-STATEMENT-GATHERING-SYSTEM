@@ -23,9 +23,19 @@ def test_cross_platform_renderer_receives_the_canonical_column_order(monkeypatch
         )
     )
     captured = {}
+    number_formats = []
+    original_number_column = cross_ui.st.column_config.NumberColumn
 
     monkeypatch.setattr(cross_ui.st, "title", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cross_ui.st, "subheader", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cross_ui.st.column_config,
+        "NumberColumn",
+        lambda *args, **kwargs: (
+            number_formats.append(kwargs.get("format")),
+            original_number_column(*args, **kwargs),
+        )[1],
+    )
     monkeypatch.setattr(cross_ui, "_render_filters", lambda _snapshot: ("Shopee", None, None))
     monkeypatch.setattr(
         cross_ui.st,
@@ -42,6 +52,7 @@ def test_cross_platform_renderer_receives_the_canonical_column_order(monkeypatch
         config.get("pinned") is not True
         for config in captured["kwargs"]["column_config"].values()
     )
+    assert number_formats.count("RM %,.2f") == 4
 
 
 def test_cross_platform_dashboard_uses_the_final_table_rowset_for_all_metrics(monkeypatch):

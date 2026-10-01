@@ -125,6 +125,28 @@ render_weekly_billing(dataset)
     assert tuple(app.dataframe[1].value.columns) == ("Description", "Amount")
 
 
+def test_weekly_billing_total_uses_thousands_grouping():
+    app = AppTest.from_string(
+        """
+from decimal import Decimal
+from types import SimpleNamespace
+from src.invoice_app.ui.weekly_billing import _render_metrics
+
+_render_metrics(SimpleNamespace(
+    order_count=1,
+    product_rows=(object(),),
+    total_quantity=1,
+    total_amount=Decimal("30169.02"),
+))
+"""
+    )
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert [metric.value for metric in app.metric][-1] == "RM 30,169.02"
+
+
 def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
     source = (
         Path(__file__).parents[1]

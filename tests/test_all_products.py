@@ -260,7 +260,7 @@ def test_all_product_export_uses_requested_labels_and_numeric_formats(tmp_path):
     assert "Delivery Fee" not in {cell.value for cell in products[3]}
     assert "Order Date" not in {cell.value for cell in products[3]}
     assert products["B4"].value == 12.5
-    assert products["B4"].number_format == '#,##0.00;[Red]-#,##0.00'
+    assert products["B4"].number_format == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
     assert products["C4"].value == "000123"
     assert products["C4"].number_format == "@"
     assert products["D4"].value == 2

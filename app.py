@@ -20,6 +20,7 @@ from src.invoice_app.services.product_master_source import (
     load_configured_product_price_master,
 )
 from src.invoice_app.utils.order_dates import has_missing_source_date, shopee_order_date_from_id
+from src.invoice_app.utils.monetary import format_currency, streamlit_currency_format
 from src.invoice_app.services.analytics import (
     compute_current_batch_validation_dashboard,
     compute_overall_dashboard,
@@ -428,7 +429,12 @@ def dataframe_column_config(
             config[label] = st.column_config.NumberColumn(label, format="%d", width="small")
         elif column in MONEY_COLUMNS or col_lower.endswith("price") or col_lower.endswith("fee") or col_lower.endswith("subtotal") or col_lower.endswith("amount") or col_lower.endswith("total") or col_lower.endswith("income") or col_lower.endswith("discount"):
             if column not in {"income_type", "payment_method", "voucher_code", "voucher_funded_by", "voucher_type"} and not col_lower.endswith("quantity") and not col_lower.endswith("count"):
-                config[label] = st.column_config.NumberColumn(label, format="RM %.2f", width="small", alignment="right")
+                config[label] = st.column_config.NumberColumn(
+                    label,
+                    format=streamlit_currency_format(),
+                    width="small",
+                    alignment="right",
+                )
         elif column in DATE_COLUMNS or "date" in col_lower or "timestamp" in col_lower or column in DATE_FORMATS_BY_PLATFORM.get(platform_name, {}):
             if "timestamp" in col_lower or column in {"delivered_date", "completed_date"}:
                 config[label] = st.column_config.DatetimeColumn(label, format="DD/MM/YYYY HH:mm", width="small")
@@ -933,8 +939,8 @@ def show_current_batch_validation_summary() -> None:
         st.metric("Orders", int(dashboard["orders"]), border=True)
         st.metric("Products", int(dashboard["products"]), border=True)
         st.metric("Quantity", int(dashboard["quantity"]), border=True)
-        st.metric("Order Income", f"RM {dashboard['order_income']}", border=True)
-        st.metric("Final Amount", f"RM {dashboard['final_amount']}", border=True)
+        st.metric("Order Income", format_currency(dashboard["order_income"]), border=True)
+        st.metric("Final Amount", format_currency(dashboard["final_amount"]), border=True)
         show_manual_review_metric(manual_review_count, "data-import-current-batch")
 
 
@@ -1196,7 +1202,12 @@ def show_overall_dashboard(orders: list[dict], products: list[dict], reviews: li
         st.metric("Orders", int(dashboard["order_count"]), border=True, icon=":material/receipt_long:")
         st.metric("Products", int(dashboard["product_rows"]), border=True, icon=":material/category:")
         st.metric("Quantity", int(dashboard["total_quantity"]), border=True, icon=":material/inventory_2:")
-        st.metric("Income", f"RM {dashboard['income']}", border=True, icon=":material/payments:")
+        st.metric(
+            "Income",
+            format_currency(dashboard["income"]),
+            border=True,
+            icon=":material/payments:",
+        )
 
 
 def apply_platform_filters(
@@ -1292,7 +1303,7 @@ def show_platform_tab(
         st.metric("Orders", int(dashboard["orders"]), border=True)
         st.metric("Products", int(dashboard["products"]), border=True)
         st.metric("Quantity", int(dashboard["quantity"]), border=True)
-        st.metric("Income", f"RM {dashboard['income']}", border=True)
+        st.metric("Income", format_currency(dashboard["income"]), border=True)
         show_manual_review_metric(len(platform_reviews), platform_name.lower())
 
     if not (platform_orders or platform_products):
@@ -1577,16 +1588,28 @@ def show_cross_platform_summary_table(summary_rows: list[dict]) -> None:
             ),
             summary_labels["uom"]: st.column_config.TextColumn(summary_labels["uom"], width="small"),
             summary_labels["unit_price"]: st.column_config.NumberColumn(
-                summary_labels["unit_price"], format="RM %.2f", width="small", alignment="right"
+                summary_labels["unit_price"],
+                format=streamlit_currency_format(),
+                width="small",
+                alignment="right",
             ),
             summary_labels["original_sales"]: st.column_config.NumberColumn(
-                summary_labels["original_sales"], format="RM %.2f", width="small", alignment="right"
+                summary_labels["original_sales"],
+                format=streamlit_currency_format(),
+                width="small",
+                alignment="right",
             ),
             summary_labels["discount_amount"]: st.column_config.NumberColumn(
-                summary_labels["discount_amount"], format="RM %.2f", width="small", alignment="right"
+                summary_labels["discount_amount"],
+                format=streamlit_currency_format(),
+                width="small",
+                alignment="right",
             ),
             summary_labels["amount"]: st.column_config.NumberColumn(
-                summary_labels["amount"], format="RM %.2f", width="small", alignment="right"
+                summary_labels["amount"],
+                format=streamlit_currency_format(),
+                width="small",
+                alignment="right",
             ),
         },
         height=320,
@@ -1701,7 +1724,7 @@ def show_cross_platform_missing_sku_rows(
         )
         actual_selling_value = display_numeric_value(row.get("reporting_actual_selling_value"))
         actual_selling_value_text = (
-            f"RM {actual_selling_value:,.2f}"
+            format_currency(actual_selling_value)
             if actual_selling_value is not None
             else MISSING_VALUE_PLACEHOLDER
         )
@@ -1915,7 +1938,12 @@ def show_manual_review(
         if "timestamp" in col_lower or "date" in col_lower:
             review_column_config[col] = st.column_config.DatetimeColumn(col, format="DD/MM/YYYY HH:mm", width="medium")
         elif "price" in col_lower or "amount" in col_lower or "fee" in col_lower or "income" in col_lower:
-            review_column_config[col] = st.column_config.NumberColumn(col, format="RM %.2f", width="small", alignment="right")
+            review_column_config[col] = st.column_config.NumberColumn(
+                col,
+                format=streamlit_currency_format(),
+                width="small",
+                alignment="right",
+            )
         elif "quantity" in col_lower or "qty" in col_lower:
             review_column_config[col] = st.column_config.NumberColumn(col, format="%d", width="small")
 

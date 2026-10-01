@@ -782,6 +782,12 @@ def test_excel_uses_exact_summary_rows_numeric_money_and_deterministic_order():
     assert all(sheet.cell(row=row, column=8).data_type == "n" for row in (2, 3))
     assert all(sheet.cell(row=row, column=9).data_type == "n" for row in (2, 3))
     assert all(sheet.cell(row=row, column=10).data_type == "n" for row in (2, 3))
+    assert all(
+        sheet.cell(row=row, column=column).number_format
+        == '"RM" #,##0.00;[Red]"RM" -#,##0.00'
+        for row in (2, 3)
+        for column in (7, 8, 9, 10)
+    )
     assert all(row[5] == "EA" for row in values[1:])
     assert values[1:] == [
         (1, "SKU-A", "NAV-A", "Alpha", 1, "EA", 10, 10, 2, 8),

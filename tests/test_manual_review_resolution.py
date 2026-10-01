@@ -793,8 +793,8 @@ def test_income_resolution_rejects_top_level_financial_difference():
 
     assert differing.resolved is False
     assert differing.reason == (
-        "Financial Reconciliation Failed: seller components total 22.00, "
-        "but Order Income is 23.00."
+        "Financial Reconciliation Failed: seller components total RM 22.00, "
+        "but Order Income is RM 23.00."
     )
     assert differing_state["orders"] == []
     assert differing_state["reviews"] == [review]
@@ -1117,7 +1117,7 @@ def test_source_visible_advertised_amount_requires_exact_user_confirmation():
 
     assert rejected.resolved is False
     assert rejected.reason == (
-        "Promotion Subtotal must match the source-visible amount RM20.00."
+        "Promotion Subtotal must match the source-visible amount RM 20.00."
     )
     assert state["reviews"] == [review]
 
@@ -1432,12 +1432,12 @@ def test_financial_manual_review_ui_prefills_formula_fields_and_focuses_visible_
         "Difference",
     ]
     assert [metric.value for metric in app.metric] == [
-        "RM11.00",
-        "RM12.00",
-        "RM1.00",
-        "RM10.00",
-        "RM9.00",
-        "RM1.00",
+        "RM 11.00",
+        "RM 12.00",
+        "RM 1.00",
+        "RM 10.00",
+        "RM 9.00",
+        "RM 1.00",
     ]
     markdown = {item.value for item in app.markdown}
     captions = {item.value for item in app.caption}
@@ -1553,7 +1553,7 @@ def test_fixable_promotion_routes_to_online_resolution_tab_with_source_evidence(
     assert "⚠️ Requires Re-upload: 1    📝 Online Resolution: 1" in captions
     assert "Promotion: Any 2 at RM20.00" in captions
     assert "Source subtotal: Not extracted" in captions
-    assert "Source-visible promotion amount: RM20.00" in captions
+    assert "Source-visible promotion amount: RM 20.00" in captions
     assert any(
         checkbox.label == "I confirmed this subtotal from the original Invoice."
         for checkbox in app.checkbox
@@ -1668,7 +1668,7 @@ def test_case_one_subtotal_still_blocks_on_top_level_financial_difference():
     outcome = apply_resolution(state, key=plan.key, values={"source_confirmed": True, "promotion_group_id": "source-group-1", "source_group_total": "20.00"}, price_master=_promotion_master())
     assert outcome.resolved is False
     assert outcome.reason == (
-        "Financial Reconciliation Failed: seller components total 20.00, "
-        "but Order Income is 19.00."
+        "Financial Reconciliation Failed: seller components total RM 20.00, "
+        "but Order Income is RM 19.00."
     )
     assert state["orders"] == []

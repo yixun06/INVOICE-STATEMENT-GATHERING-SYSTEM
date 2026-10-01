@@ -244,7 +244,7 @@ def _match_one(
         return _matched(row, amount_matches[0], "LINE_SUBTOTAL_TIE_BREAK")
     return _needs_review(
         row,
-        "Line subtotal within RM0.02 did not leave exactly one non-promotion candidate.",
+        "Line subtotal within RM 0.02 did not leave exactly one non-promotion candidate.",
     )
 
 

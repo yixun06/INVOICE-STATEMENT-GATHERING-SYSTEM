@@ -164,8 +164,8 @@ def test_completed_adjustment_keeps_transient_evidence_and_normal_identity_block
     issue = find_shopee_review_issue(extracted)
     assert issue is not None
     assert issue.reason == (
-        "Financial Reconciliation Failed: seller components total 50.00, "
-        "but Order Income is 50.03."
+        "Financial Reconciliation Failed: seller components total RM 50.00, "
+        "but Order Income is RM 50.03."
     )
     assert order["order_income"] == "50.03"
     assert order["final_amount"] == "32.36"
@@ -535,8 +535,8 @@ Final Amount RM32.36""",
     issue = find_shopee_review_issue(extracted)
     assert issue is not None
     assert issue.reason == (
-        "Financial Reconciliation Failed: seller components total 50.00, "
-        "but Order Income is 50.03."
+        "Financial Reconciliation Failed: seller components total RM 50.00, "
+        "but Order Income is RM 50.03."
     )
 
 

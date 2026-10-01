@@ -12,6 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.workbook import Workbook
 from ..utils.normalize import normalize_sku_text
+from ..utils.monetary import excel_currency_format
 
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -24,7 +25,7 @@ HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 BODY_FONT = Font(name="Calibri", size=11, color="000000")
 GRID_SIDE = Side(style="thin", color="000000")
 GRID_BORDER = Border(left=GRID_SIDE, right=GRID_SIDE, top=GRID_SIDE, bottom=GRID_SIDE)
-MONEY_FORMAT = '#,##0.00;[Red]-#,##0.00'
+MONEY_FORMAT = excel_currency_format()
 INTEGER_FORMAT = "#,##0"
 DATE_FORMAT = "dd/mm/yyyy"
 DATETIME_FORMAT = "dd/mm/yyyy hh:mm"

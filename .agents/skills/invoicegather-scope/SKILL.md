@@ -42,6 +42,21 @@ This V2.7 handoff is authoritative over conflicting older V2.6, V2.5, V2.4, and
 V2.3 wording. Older sections remain useful only for non-conflicting parser,
 source-safety, Statement, and historical rationale.
 
+## Monetary presentation — Approved
+
+- Business-facing monetary values use the applicable currency symbol, thousands
+  separators, and exactly two decimal places. Missing evidence remains missing
+  and must never be presented as zero.
+- Domain, calculation, reconciliation, sorting, and persistence values remain
+  numeric; presentation formatting must not change financial semantics.
+- Excel monetary exports keep numeric cells and apply currency-aware number
+  formats. Machine/data-interchange flat exports keep their numeric contract
+  unless a separate human-facing report contract is explicitly approved.
+- MYR presentation uses `RM`; SGD presentation infrastructure may use `S$`, but
+  this rule does not enable Shopee SG data flow or market selection.
+- NAV is the company internal product/system identifier, not a monetary value;
+  keep it as an identifier and never apply currency formatting to it.
+
 ## Shopee SG architecture direction — Approved / Pending Implementation
 
 Shopee MY and Shopee SG remain in one InvoiceGather application. The approved

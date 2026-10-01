@@ -41,6 +41,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_SUMMARY_HEADERS,
     STATEMENT_SUMMARY_TAB,
 )
+from src.invoice_app.utils.monetary import format_currency
 from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
     resolve_product_summary_identity,
@@ -314,8 +315,8 @@ def build_weekly_billing_financial_summary(
         ),
     )
     failures = tuple(
-        f"{control.name} control failed: derived {control.derived_amount:.2f} "
-        f"does not equal native {control.native_amount:.2f}."
+        f"{control.name} control failed: derived {format_currency(control.derived_amount)} "
+        f"does not equal native {format_currency(control.native_amount)}."
         for control in controls
         if not control.passed
     )

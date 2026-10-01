@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+
+from src.invoice_app.utils.monetary import format_currency
 from io import BytesIO
 from typing import Sequence
 from xml.sax.saxutils import escape
@@ -121,10 +123,10 @@ def build_product_summary_barcode_table_rows_from_product_rows(
                 row.nav,
                 row.product_name,
                 row.uom or "",
-                _format_money(row.unit_price),
-                _format_money(row.original_sales),
-                _format_money(row.discount_amount),
-                _format_money(row.amount),
+                format_currency(row.unit_price),
+                format_currency(row.original_sales),
+                format_currency(row.discount_amount),
+                format_currency(row.amount),
             ),
             has_graphical_barcode=is_valid_ean13(row.sku_code),
         )
@@ -264,9 +266,9 @@ def _weekly_billing_presentation(
         metrics=(
             ("Product Rows", str(summary.product_rows)),
             ("Total Qty", str(summary.total_quantity)),
-            ("Total Original Sales", _format_money(summary.total_original_sales)),
-            ("Total Discount Given", _format_money(summary.total_discount_given)),
-            ("Total Amount", _format_money(summary.total_amount)),
+            ("Total Original Sales", format_currency(summary.total_original_sales)),
+            ("Total Discount Given", format_currency(summary.total_discount_given)),
+            ("Total Amount", format_currency(summary.total_amount)),
         ),
         barcode_ready=summary.barcode_ready,
         barcode_unavailable=summary.barcode_unavailable,
@@ -493,7 +495,3 @@ def _presentation_first_page_summary_flowable(
         )
     )
     return summary_table
-
-
-def _format_money(value: Decimal) -> str:
-    return f"RM {value:,.2f}"

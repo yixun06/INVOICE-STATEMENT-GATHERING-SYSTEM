@@ -12,6 +12,7 @@ from src.invoice_app.services.weekly_billing_barcode_table_export import (
     ProductSummaryBarcodeTablePresentation,
     render_product_summary_barcode_table_pdf,
 )
+from src.invoice_app.utils.monetary import format_currency
 
 
 def export_cross_platform_product_summary_barcode_table_pdf(
@@ -39,9 +40,9 @@ def export_cross_platform_product_summary_barcode_table_pdf(
         metrics=(
             ("Total Product", str(len(rows))),
             ("Total Qty", str(total_quantity)),
-            ("Total Original Sales", _format_money(total_original_sales)),
-            ("Total Discount Given", _format_money(total_discount_given)),
-            ("Total Amount", _format_money(total_amount)),
+            ("Total Original Sales", format_currency(total_original_sales)),
+            ("Total Discount Given", format_currency(total_discount_given)),
+            ("Total Amount", format_currency(total_amount)),
             ("Barcode Ready", str(barcode_ready)),
             ("Barcode Unavailable", str(len(rows) - barcode_ready)),
         ),
@@ -65,7 +66,3 @@ def _reporting_period_label(summary: CrossPlatformProductSummary) -> str:
     if to_date is not None:
         return f"To {to_date:%d %b %Y}"
     return "All Dates"
-
-
-def _format_money(value: Decimal) -> str:
-    return f"RM {value:,.2f}"

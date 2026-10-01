@@ -38,6 +38,7 @@ from src.invoice_app.services.weekly_billing_export import (
 from src.invoice_app.services.weekly_billing_barcode_export import (
     summarize_product_summary_barcodes,
 )
+from src.invoice_app.utils.monetary import format_currency, streamlit_currency_format
 from src.invoice_app.services.weekly_billing_barcode_table_export import (
     export_product_summary_barcode_table_pdf,
 )
@@ -118,13 +119,17 @@ def render_weekly_billing(
             "Qty": st.column_config.NumberColumn("Qty", format="%d"),
             "UOM": st.column_config.TextColumn("UOM"),
             "Unit Price": st.column_config.NumberColumn(
-                "Unit Price", format="RM %.2f"
+                "Unit Price", format=streamlit_currency_format()
             ),
             "Original Sales": st.column_config.NumberColumn(
-                "Original Sales", format="RM %.2f"
+                "Original Sales", format=streamlit_currency_format()
             ),
-            "Disc Amt": st.column_config.NumberColumn("Disc Amt", format="RM %.2f"),
-            "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
+            "Disc Amt": st.column_config.NumberColumn(
+                "Disc Amt", format=streamlit_currency_format()
+            ),
+            "Amount": st.column_config.NumberColumn(
+                "Amount", format=streamlit_currency_format()
+            ),
         },
     )
     st.subheader("Financial Summary")
@@ -134,7 +139,9 @@ def render_weekly_billing(
         key="weekly_billing_financial_summary",
         column_config={
             "Description": st.column_config.TextColumn("Description"),
-            "Amount": st.column_config.NumberColumn("Amount", format="RM %.2f"),
+            "Amount": st.column_config.NumberColumn(
+                "Amount", format=streamlit_currency_format()
+            ),
         },
     )
     _render_financial_readiness(report)
@@ -202,7 +209,7 @@ def _render_metrics(summary: WeeklyBillingSummary) -> None:
         st.metric("Total Quantity", f"{summary.total_quantity:,}", border=True)
         st.metric(
             "Total Amount",
-            f"RM {summary.total_amount:,.2f}",
+            format_currency(summary.total_amount),
             border=True,
         )
 

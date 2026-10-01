@@ -105,6 +105,19 @@ def test_valid_ean13_row_uses_a_graphical_barcode_and_all_required_values(monkey
     assert "RM 899.64" in text
 
 
+def test_pdf_money_uses_thousands_grouping():
+    row = _row(
+        unit_price=Decimal("1234.56"),
+        quantity=1,
+        discount_amount=Decimal("0.00"),
+        amount=Decimal("1234.56"),
+    )
+
+    text = "\n".join(page.extract_text() for page in _reader(_summary(row)).pages)
+
+    assert "RM 1,234.56" in text
+
+
 def test_invalid_ean13_keeps_full_sku_and_uses_unavailable_cell(monkeypatch):
     draw_calls: list[str] = []
     monkeypatch.setattr(
