@@ -52,6 +52,20 @@ class UAT2DataSettings:
     market_context: MarketContext = SHOPEE_MY
 
     def create_repository(self) -> GoogleSheetsHistoricalInvoiceRepository:
+        context = resolve_market_context(self.market_context)
+        if context.key not in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
+            raise MarketConfigurationUnavailable(
+                f"{context.display_name} persistence is unavailable: "
+                "no market-specific repository backend is configured."
+            )
+        if (
+            context.key is MarketKey.SHOPEE_SG
+            and self.google_spreadsheet_id == DEFAULT_UAT2_DATA_SPREADSHEET_ID
+        ):
+            raise MarketConfigurationUnavailable(
+                "Shopee SG persistence is unavailable: an explicit SG spreadsheet "
+                "destination is required."
+            )
         credentials = self._credentials_source()
         return GoogleSheetsHistoricalInvoiceRepository(
             spreadsheet_id=self.google_spreadsheet_id,
@@ -127,13 +141,17 @@ def configured_uat2_data_settings(
             "cache_ttl_seconds": os.getenv("INV_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
         }
         configured = _configured_uat2_secret_mapping()
-    else:
+    elif resolved.key is MarketKey.SHOPEE_SG:
         values = {
             "google_spreadsheet_id": os.getenv("INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID", ""),
             "google_credentials_path": os.getenv("INV_SHOPEE_SG_UAT2_GOOGLE_CREDENTIALS_PATH", ""),
             "cache_ttl_seconds": os.getenv("INV_SHOPEE_SG_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
         }
         configured = _configured_market_uat2_secret_mapping(resolved)
+    else:
+        raise MarketConfigurationUnavailable(
+            f"{resolved.display_name} persistence is unavailable: no billing backend is configured."
+        )
     for key in values:
         if configured.get(key) not in (None, ""):
             values[key] = str(configured[key])

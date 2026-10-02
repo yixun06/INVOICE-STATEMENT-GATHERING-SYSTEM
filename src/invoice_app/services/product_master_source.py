@@ -216,7 +216,7 @@ def configured_product_master_source_settings(
             "google_worksheet_name": os.getenv("INV_GOOGLE_WORKSHEET_NAME", ""),
         }
         source_config = _configured_product_master_secret_mapping()
-    else:
+    elif resolved.key is MarketKey.SHOPEE_SG:
         values = {
             "source": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", ""),
             "local_excel_path": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_PATH", ""),
@@ -225,6 +225,11 @@ def configured_product_master_source_settings(
             "google_worksheet_name": os.getenv("INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME", ""),
         }
         source_config = _configured_market_product_master_secret_mapping(resolved)
+    else:
+        raise MarketConfigurationUnavailable(
+            f"{resolved.display_name} Product Master is unavailable: "
+            "no market-specific source is configured."
+        )
     google_service_account: GoogleServiceAccountInfo | None = None
     for key in values:
         if source_config.get(key):

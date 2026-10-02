@@ -70,21 +70,24 @@ def test_data_import_starts_with_a_four_platform_card_chooser(tmp_path, monkeypa
 
     assert app.exception == []
     assert "Choose a platform" in {title.value for title in app.title}
-    assert {"Shopee MY", "Shopee SG", "Lazada", "Zenxin Website"} <= {
+    assert {"Shopee MY", "Shopee SG", "Lazada", "TikTok"} <= {
         item.value for item in app.subheader
     }
     assert {
         "Enter Shopee MY",
         "Enter Shopee SG",
         "Enter Lazada",
-        "Enter Zenxin Website",
+        "Enter TikTok",
     } <= {button.label for button in app.button}
+    assert {"Zenxin Website", "ZENXIN"}.isdisjoint(
+        {item.value for item in app.subheader}
+    )
     assert app.get("button_group") == []
 
 
 @pytest.mark.parametrize(
     "platform_name",
-    ["Shopee MY", "Shopee SG", "Lazada", "Zenxin Website"],
+    ["Shopee MY", "Shopee SG", "Lazada", "TikTok"],
 )
 def test_every_platform_enters_the_shared_data_import_shell(tmp_path, monkeypatch, platform_name):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), platform_name)
@@ -145,7 +148,7 @@ def test_shopee_cancelled_order_v1_real_pdf_completes_data_import_ui(tmp_path, m
     (
         ("Shopee SG", "Invoice Import", "not available for Shopee SG yet"),
         ("Lazada", "Weekly Statement", "not available for Lazada yet"),
-        ("Zenxin Website", "Monthly Statement", "not available for Zenxin Website yet"),
+        ("TikTok", "Monthly Statement", "not available for TikTok yet"),
     ),
 )
 def test_unsupported_platform_source_stays_in_shared_shell_without_upload(
@@ -194,6 +197,16 @@ def test_shopee_market_names_use_text_only_without_flag_icons():
     assert "flag_icon_path" not in source
 
 
+def test_tiktok_data_import_entry_is_not_backed_by_zenxin():
+    platforms = {platform.key: platform for platform in data_import.DATA_IMPORT_PLATFORMS}
+
+    assert "zenxin_website" not in platforms
+    assert platforms["tiktok"].display_name == "TikTok"
+    assert platforms["tiktok"].expected_platform is None
+    assert platforms["tiktok"].supported_source_types == frozenset()
+    assert platforms["tiktok"].market_context.key.value == "tiktok"
+
+
 def test_back_returns_to_chooser_without_discarding_the_active_batch(tmp_path, monkeypatch):
     app = AppTest.from_file(str(APP_PATH))
     for key, value in {
@@ -228,7 +241,7 @@ def test_back_returns_to_chooser_without_discarding_the_active_batch(tmp_path, m
         ("shopee_my", "shopee_my", "Shopee SG"),
         ("shopee_sg", "shopee_sg", "Shopee MY"),
         ("shopee_my", "shopee_my", "Lazada"),
-        ("lazada", None, "Zenxin Website"),
+        ("lazada", None, "TikTok"),
     ),
 )
 def test_active_batch_platform_switch_renders_controlled_conflict(

@@ -16,6 +16,7 @@ from src.invoice_app.services.cross_platform_product_summary import (
     CrossPlatformProductSummaryError,
     CrossPlatformReportingSnapshot,
     build_cross_platform_product_summary,
+    cross_platform_backend_available,
 )
 from src.invoice_app.services.cross_platform_product_summary_barcode_table_export import (
     export_cross_platform_product_summary_barcode_table_pdf,
@@ -51,13 +52,24 @@ def render_cross_platform_product_summary(
     """Render one source snapshot; its final rowset drives both table and PDF."""
 
     st.title("Cross Platform Summary")
+    platform, all_dates, from_date_col, to_date_col = _render_platform_filter()
+    if not cross_platform_backend_available(platform):
+        st.info(f"{platform} Cross Platform reporting is not configured yet.")
+        return
+
     try:
         source = snapshot if snapshot is not None else _load_cross_platform_reporting_snapshot()
     except (HistoricalInvoiceStorageError, CrossPlatformProductSummaryError) as error:
         st.error(f"Cross Platform Summary is unavailable: {error}")
         return
 
-    platform, from_date, to_date = _render_filters(source)
+    from_date, to_date = _render_date_filters(
+        source,
+        platform=platform,
+        all_dates=all_dates,
+        from_date_col=from_date_col,
+        to_date_col=to_date_col,
+    )
     if from_date is not None and to_date is not None and from_date > to_date:
         st.error("From Date must be on or before To Date.")
         return
@@ -116,9 +128,7 @@ def render_cross_platform_product_summary(
     )
 
 
-def _render_filters(
-    snapshot: CrossPlatformReportingSnapshot,
-) -> tuple[str, date | None, date | None]:
+def _render_platform_filter():
     platform_col, from_date_col, to_date_col = st.columns(3, gap="small")
     with platform_col:
         platform = st.selectbox(
@@ -126,31 +136,65 @@ def _render_filters(
             PLATFORM_OPTIONS,
             key="cross_platform_reporting_platform",
         )
+        all_dates = st.toggle(
+            "All dates",
+            value=True,
+            key="cross_platform_reporting_all_dates",
+        )
+    return platform, all_dates, from_date_col, to_date_col
+
+
+def _render_date_filters(
+    snapshot: CrossPlatformReportingSnapshot,
+    *,
+    platform: str,
+    all_dates: bool,
+    from_date_col,
+    to_date_col,
+) -> tuple[date | None, date | None]:
     options = snapshot.available_payout_dates(platform)
     with from_date_col:
-        from_date = _payout_date_selectbox(
-            "From Date", options, "cross_platform_reporting_from_date"
+        from_date = _payout_date_input(
+            "From Date",
+            options,
+            "cross_platform_reporting_from_date",
+            disabled=all_dates,
+            default_to_end=False,
         )
     with to_date_col:
-        to_date = _payout_date_selectbox(
-            "To Date", options, "cross_platform_reporting_to_date"
+        to_date = _payout_date_input(
+            "To Date",
+            options,
+            "cross_platform_reporting_to_date",
+            disabled=all_dates,
+            default_to_end=True,
         )
-    return platform, from_date, to_date
+    if all_dates or not options:
+        return None, None
+    return from_date, to_date
 
 
-def _payout_date_selectbox(
+def _payout_date_input(
     label: str,
     options: tuple[date, ...],
     key: str,
+    *,
+    disabled: bool,
+    default_to_end: bool,
 ) -> date | None:
-    choices: tuple[date | None, ...] = (None, *options)
-    if st.session_state.get(key) not in choices:
+    if not options:
+        st.text_input(label, "No dates available", key=f"{key}_empty", disabled=True)
+        return None
+    current = st.session_state.get(key)
+    if not isinstance(current, date):
         st.session_state.pop(key, None)
-    return st.selectbox(
+    return st.date_input(
         label,
-        choices,
+        value=options[-1] if default_to_end else options[0],
         key=key,
-        format_func=lambda value: "All Dates" if value is None else value.isoformat(),
+        format="YYYY/MM/DD",
+        disabled=disabled,
+        help="Includes committed payout rows within the selected date range.",
     )
 
 

@@ -86,12 +86,12 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
     snapshot = GoogleSheetsCrossPlatformProductSummaryReader(
         spreadsheet_id="uat2", gateway=gateway
     ).load_snapshot()
-    summary = build_cross_platform_product_summary(snapshot, platform="Shopee")
+    summary = build_cross_platform_product_summary(snapshot, platform="Shopee MY")
 
     assert gateway.read_calls == [
         ("uat2", (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB))
     ]
-    assert snapshot.available_payout_dates("Shopee") == (date(2026, 8, 8),)
+    assert snapshot.available_payout_dates("Shopee MY") == (date(2026, 8, 8),)
     assert [(row.sku_code, row.nav, row.uom, row.unit_price, row.quantity, row.original_sales, row.discount_amount, row.amount) for row in summary.product_rows] == [
         (
             "9555208107347",
@@ -195,7 +195,7 @@ def _item(
     )
 
 
-def test_payout_date_options_are_platform_linked_and_filter_before_aggregation():
+def test_payout_date_options_are_platform_linked_and_ordinary_range_filters_before_aggregation():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformReportingSnapshot,
         build_cross_platform_product_summary,
@@ -203,21 +203,27 @@ def test_payout_date_options_are_platform_linked_and_filter_before_aggregation()
 
     snapshot = CrossPlatformReportingSnapshot(
         (
-            _item(order_id="SHP-1", item_index=0, payout_date=date(2026, 8, 8), sku="SKU-1", unit_price="10.00", quantity=1, line_subtotal="9.00"),
-            _item(order_id="SHP-2", item_index=0, payout_date=date(2026, 8, 10), sku="SKU-1", unit_price="10.00", quantity=2, line_subtotal="18.00"),
+            _item(order_id="SHP-1", item_index=0, payout_date=date(2026, 8, 1), sku="SKU-1", unit_price="10.00", quantity=1, line_subtotal="9.00"),
+            _item(order_id="SHP-2", item_index=0, payout_date=date(2026, 8, 3), sku="SKU-1", unit_price="10.00", quantity=2, line_subtotal="18.00"),
+            _item(order_id="SHP-3", item_index=0, payout_date=date(2026, 8, 5), sku="SKU-1", unit_price="10.00", quantity=3, line_subtotal="27.00"),
         )
     )
 
     filtered = build_cross_platform_product_summary(
         snapshot,
-        platform="Shopee",
-        from_date=date(2026, 8, 10),
+        platform="Shopee MY",
+        from_date=date(2026, 8, 2),
+        to_date=date(2026, 8, 5),
     )
 
-    assert snapshot.available_payout_dates("All") == (date(2026, 8, 8), date(2026, 8, 10))
+    assert snapshot.available_payout_dates("All") == (
+        date(2026, 8, 1),
+        date(2026, 8, 3),
+        date(2026, 8, 5),
+    )
     assert snapshot.available_payout_dates("Lazada") == ()
     assert [(row.quantity, row.amount) for row in filtered.product_rows] == [
-        (2, Decimal("18.00"))
+        (5, Decimal("45.00"))
     ]
 
 
@@ -234,7 +240,7 @@ def test_persisted_promotion_facts_allocate_amount_without_product_master_lookup
         )
     )
 
-    summary = build_cross_platform_product_summary(snapshot, platform="Shopee")
+    summary = build_cross_platform_product_summary(snapshot, platform="Shopee MY")
 
     assert [(row.sku_code, row.original_sales, row.discount_amount, row.amount) for row in summary.product_rows] == [
         ("SKU-10", Decimal("10.00"), Decimal("3.33"), Decimal("6.67")),
@@ -312,7 +318,7 @@ def test_cross_product_summary_uses_weekly_canonical_identity_and_display_policy
     )
 
     summary = build_cross_platform_product_summary(
-        CrossPlatformReportingSnapshot(source_items), platform="Shopee"
+        CrossPlatformReportingSnapshot(source_items), platform="Shopee MY"
     )
 
     assert len(summary.product_rows) == 5

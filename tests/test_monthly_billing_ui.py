@@ -17,6 +17,7 @@ def test_monthly_billing_renderer_uses_a_distinct_state_and_cache_namespace():
     assert "monthly_billing_export" in source
     assert "monthly_billing_product_summary_barcode_pdf_export" in source
     assert "spreadsheet_id" in source
+    assert 'platform_col, month_col = st.columns(2, gap="small")' in source
 
 
 def test_weekly_and_monthly_billing_render_in_one_session_without_widget_collision():
@@ -57,8 +58,16 @@ monthly_billing.render_monthly_billing(dataset)
     app.run(timeout=20)
 
     assert app.exception == []
-    assert [widget.label for widget in app.selectbox] == ["Statement Period", "Month"]
+    assert [widget.label for widget in app.selectbox] == [
+        "Platform", "Statement Period", "Platform", "Month"
+    ]
+    assert app.selectbox[0].options == ["Shopee MY", "Shopee SG", "Lazada", "TikTok"]
+    assert app.selectbox[2].options == ["Shopee MY", "Shopee SG", "Lazada", "TikTok"]
+    assert "All" not in app.selectbox[0].options
+    assert "All" not in app.selectbox[2].options
     state = app.session_state.filtered_state
+    assert state["weekly_billing_platform"] == "Shopee MY"
+    assert state["monthly_billing_platform"] == "Shopee MY"
     assert "weekly_billing_statement_period" in state
     assert "monthly_billing_month" in state
     assert {button.label for button in app.download_button} >= {
@@ -89,3 +98,27 @@ def test_monthly_billing_is_a_distinct_app_route(tmp_path, monkeypatch):
     assert app.exception == []
     assert MONTHLY_BILLING_PAGE in {title.value for title in app.title}
     assert MONTHLY_BILLING_PAGE in {button.label for button in app.button}
+
+
+def test_monthly_billing_unsupported_platforms_fail_closed_without_my_data():
+    for platform in ("Shopee SG", "Lazada", "TikTok"):
+        app = AppTest.from_string(
+            f'''
+import streamlit as st
+from src.invoice_app.ui.monthly_billing import render_monthly_billing
+
+st.session_state["monthly_billing_platform"] = {platform!r}
+render_monthly_billing(object())
+'''
+        )
+        app.run(timeout=20)
+
+        assert app.exception == []
+        assert [widget.options for widget in app.selectbox] == [
+            ["Shopee MY", "Shopee SG", "Lazada", "TikTok"]
+        ]
+        assert [message.value for message in app.info] == [
+            f"{platform} billing is not configured yet."
+        ]
+        assert app.dataframe == []
+        assert app.download_button == []

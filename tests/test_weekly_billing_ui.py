@@ -28,7 +28,8 @@ def test_weekly_billing_remains_the_single_uat2_sidebar_page(tmp_path, monkeypat
     assert app.exception == []
     assert WEEKLY_BILLING_PAGE in {title.value for title in app.title}
     labels = {button.label for button in app.button}
-    assert {"Data Import", "Dashboard", WEEKLY_BILLING_PAGE} <= labels
+    assert {"Data Import", "Cross Platform Summary", WEEKLY_BILLING_PAGE} <= labels
+    assert "Dashboard" not in labels
     assert "Settlement Test Lab" not in labels
     assert app.session_state.filtered_state["batch_id"] == "active-batch"
     assert app.session_state.filtered_state["orders"] == [
@@ -108,7 +109,10 @@ render_weekly_billing(dataset)
         "Total Amount",
     ]
     assert [metric.value for metric in app.metric] == ["1", "1", "2", "RM 16.00"]
-    assert app.selectbox[0].label == "Statement Period"
+    assert app.selectbox[0].label == "Platform"
+    assert app.selectbox[0].options == ["Shopee MY", "Shopee SG", "Lazada", "TikTok"]
+    assert "All" not in app.selectbox[0].options
+    assert app.selectbox[1].label == "Statement Period"
     assert tuple(app.dataframe[0].value.columns) == (
         "No.",
         "SKU Code",
@@ -147,6 +151,30 @@ _render_metrics(SimpleNamespace(
     assert [metric.value for metric in app.metric][-1] == "RM 30,169.02"
 
 
+def test_weekly_billing_unsupported_platforms_fail_closed_without_my_data():
+    for platform in ("Shopee SG", "Lazada", "TikTok"):
+        app = AppTest.from_string(
+            f'''
+import streamlit as st
+from src.invoice_app.ui.weekly_billing import render_weekly_billing
+
+st.session_state["weekly_billing_platform"] = {platform!r}
+render_weekly_billing(object())
+'''
+        )
+        app.run(timeout=20)
+
+        assert app.exception == []
+        assert [widget.options for widget in app.selectbox] == [
+            ["Shopee MY", "Shopee SG", "Lazada", "TikTok"]
+        ]
+        assert [message.value for message in app.info] == [
+            f"{platform} billing is not configured yet."
+        ]
+        assert app.dataframe == []
+        assert app.download_button == []
+
+
 def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
     source = (
         Path(__file__).parents[1]
@@ -163,3 +191,4 @@ def test_weekly_billing_ui_has_no_source_ingestion_or_second_calculation_path():
     assert "statement_financial_components" not in source
     assert "build_weekly_billing_report" in source
     assert "product_master_records=product_master.records" in source
+    assert 'platform_col, period_col = st.columns(2, gap="small")' in source

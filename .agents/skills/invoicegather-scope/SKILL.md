@@ -57,6 +57,41 @@ source-safety, Statement, and historical rationale.
 - NAV is the company internal product/system identifier, not a monetary value;
   keep it as an identifier and never apply currency formatting to it.
 
+## Reporting platform selectors — Approved
+
+- Weekly Billing and Monthly Billing expose exactly `Shopee MY`, `Shopee SG`,
+  `Lazada`, and `TikTok`, with no `All` option. Platform and period/month belong
+  on the same row. `Shopee MY` remains the default and the only currently
+  implemented billing backend.
+- Selecting `Shopee SG`, `Lazada`, or `TikTok` must fail closed with a clear
+  unavailable message before any Shopee MY reader, dataset, calculation, or
+  export can be reused. Their presence in a selector does not claim parser,
+  persistence, Product Master, Statement, or billing support.
+- Cross Platform Summary exposes exactly `All`, `Shopee MY`, `Lazada`, and
+  `TikTok`; its Platform, From Date, and To Date controls share one row.
+  `Shopee SG` is excluded because this is an MYR-only reporting universe.
+- Cross Platform date filters use ordinary inclusive calendar ranges plus an
+  explicit `All dates` mode. Users may choose any valid From/To dates; only
+  `From Date > To Date` is invalid. The report aggregates actual committed rows
+  whose payout date falls inside the selected range. A valid range with no
+  matching rows shows the normal empty state, and `All dates` removes both
+  bounds. Do not require either endpoint to contain a payout row.
+- Cross Platform `All` means all records supported by currently implemented,
+  currency-compatible reporting adapters. It must not imply that every visible
+  future platform already has a backend. Until additional adapters are approved,
+  only committed Shopee MY data is eligible.
+- Persisted `platform = "Shopee"` remains the historical Shopee MY identity and
+  is mapped to the visible `Shopee MY` label without a data migration.
+- ZENXIN is not a future reporting-platform target. TikTok occupies that future
+  selector position, but must never reuse or reinterpret ZENXIN parsing, data,
+  storage, or backend behavior. Existing historical ZENXIN code/data are not
+  deleted by this selector decision.
+- The sidebar analysis section is `LIVE ANALYSIS`, ordered as Cross Platform
+  Summary, Shopee MY, Shopee SG, Lazada, and TikTok. `Dashboard`, ambiguous
+  `Shopee`, and `ZENXIN` are not visible navigation entries. Shopee MY maps to
+  the existing internal persisted `Shopee` analysis path; Shopee SG and TikTok
+  show a fail-closed unavailable page and must not expose MY or ZENXIN data.
+
 ## Shopee SG architecture direction — Approved / Pending Implementation
 
 Shopee MY and Shopee SG remain in one InvoiceGather application. The approved
@@ -114,7 +149,7 @@ create or infer any of them during architecture work.
 ## Data Import platform entry — Approved / Implemented
 
 `Data Import` begins with explicit platform selection: Shopee MY, Shopee SG,
-Lazada, or Zenxin Website. It then enters one shared five-step shell:
+Lazada, or TikTok. It then enters one shared five-step shell:
 
 ```text
 Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
@@ -124,9 +159,10 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
   Statement, and Monthly Statement. An unavailable source remains visible but
   fails closed before Upload; the shared shell is not duplicated per platform.
 - Current capability matrix: Shopee MY supports all three existing workflows;
-  Lazada and Zenxin Website support Invoice Import only; Shopee SG supports no
-  source yet. This does not authorize new Lazada/Zenxin persistence or an SG
-  parser/persistence path.
+  Lazada supports Invoice Import only; Shopee SG and TikTok support no source
+  yet. TikTok must never route to the historical ZENXIN parser or data. This
+  does not authorize new Lazada/TikTok persistence or an SG parser/persistence
+  path; historical ZENXIN internals remain untouched.
 - Invoice Upload is strict expected-platform intake: the selected platform is
   the expected source and the existing detector remains the actual-source
   safeguard. A mismatch is reported as `PLATFORM MISMATCH`, admits no order,

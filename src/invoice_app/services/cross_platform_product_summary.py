@@ -29,14 +29,18 @@ from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
     resolve_product_summary_identity,
 )
-from src.invoice_app.services.market_context import SHOPEE_MY
+from src.invoice_app.services.market_context import (
+    CROSS_PLATFORM_OPTIONS,
+    SHOPEE_MY,
+    resolve_market_context,
+)
 from src.invoice_app.utils.normalize import (
     normalize_sku_text,
 )
 
 
 CENT = Decimal("0.01")
-PLATFORM_OPTIONS = ("All", "Shopee", "Lazada", "ZENXIN")
+PLATFORM_OPTIONS = CROSS_PLATFORM_OPTIONS
 # Cross Platform Summary is a MY/local reporting domain.  This allowlist is a
 # data-service boundary, so a future "Shopee SG" persisted row cannot enter the
 # snapshot merely because a UI option is changed.
@@ -86,7 +90,8 @@ class CrossPlatformReportingSnapshot:
                 {
                     item.payout_completed_date
                     for item in self.eligible_items
-                    if platform == "All" or item.platform == platform
+                    if platform == "All"
+                    or item.platform == _persisted_platform_for_filter(platform)
                 }
             )
         )
@@ -192,7 +197,10 @@ def build_cross_platform_product_summary(
     filtered = tuple(
         item
         for item in snapshot.eligible_items
-        if (platform == "All" or item.platform == platform)
+        if (
+            platform == "All"
+            or item.platform == _persisted_platform_for_filter(platform)
+        )
         and (from_date is None or item.payout_completed_date >= from_date)
         and (to_date is None or item.payout_completed_date <= to_date)
     )
@@ -443,6 +451,23 @@ def _source_item_sort_key(item: CommittedReportingItem) -> tuple[Any, ...]:
 def _validate_platform(platform: str) -> None:
     if platform not in PLATFORM_OPTIONS:
         raise ValueError(f"Unsupported Cross Platform filter: {platform}.")
+
+
+def cross_platform_backend_available(platform: str) -> bool:
+    """Return whether one visible filter has an implemented reporting adapter."""
+
+    _validate_platform(platform)
+    return (
+        platform == "All"
+        or _persisted_platform_for_filter(platform)
+        in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS
+    )
+
+
+def _persisted_platform_for_filter(platform: str) -> str:
+    if platform == "All":
+        raise ValueError("All does not identify one persisted platform.")
+    return resolve_market_context(platform).persisted_platform
 
 
 def _text(value: Any) -> str:

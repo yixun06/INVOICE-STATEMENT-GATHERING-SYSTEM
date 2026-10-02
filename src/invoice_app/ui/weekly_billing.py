@@ -17,6 +17,7 @@ from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
 from src.invoice_app.services.market_context import (
+    BILLING_PLATFORM_OPTIONS,
     MarketConfigurationUnavailable,
     MarketContext,
     MarketKey,
@@ -77,6 +78,19 @@ def render_weekly_billing(
     """Render one committed-period report for preview and downloadable Excel."""
 
     st.title(WEEKLY_BILLING_PAGE)
+    requested_context = resolve_market_context(market_context)
+    platform_col, period_col = st.columns(2, gap="small")
+    with platform_col:
+        selected_platform = st.selectbox(
+            "Platform",
+            BILLING_PLATFORM_OPTIONS,
+            index=BILLING_PLATFORM_OPTIONS.index(requested_context.display_name),
+            key="weekly_billing_platform",
+        )
+    context = resolve_market_context(selected_platform)
+    if not context.weekly_billing_available:
+        st.info(f"{context.display_name} billing is not configured yet.")
+        return
     st.caption(
         "Product and Financial Summary from one committed Shopee Statement period."
     )
@@ -84,7 +98,7 @@ def render_weekly_billing(
         source = (
             dataset
             if dataset is not None
-            else _load_weekly_billing_dataset(resolve_market_context(market_context))
+            else _load_weekly_billing_dataset(context)
         )
     except (HistoricalInvoiceStorageError, MarketConfigurationUnavailable, WeeklyBillingError) as error:
         st.error(f"Weekly Billing is unavailable: {error}")
@@ -93,12 +107,13 @@ def render_weekly_billing(
         st.info("No committed Statement period is available for Weekly Billing.")
         return
 
-    period = st.selectbox(
-        "Statement Period",
-        source.periods,
-        format_func=lambda value: value.label,
-        key="weekly_billing_statement_period",
-    )
+    with period_col:
+        period = st.selectbox(
+            "Statement Period",
+            source.periods,
+            format_func=lambda value: value.label,
+            key="weekly_billing_statement_period",
+        )
     try:
         report = build_weekly_billing_report(source, period)
     except WeeklyBillingError as error:

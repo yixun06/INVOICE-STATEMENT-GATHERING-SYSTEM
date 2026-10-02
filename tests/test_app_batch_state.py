@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import load_workbook
+import pytest
 
 from streamlit.testing.v1 import AppTest
 
@@ -204,15 +205,15 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
     app.session_state["products"] = []
     app.session_state["batch_id"] = "batch-review"
     app.session_state["pdf_count"] = 3
-    app.session_state["navigation"] = "Shopee"
+    app.session_state["navigation"] = "Shopee MY"
 
     app.run(timeout=20)
 
-    for platform_name in ("Shopee", "Lazada", "ZENXIN"):
-        if platform_name != "Shopee":
+    for platform_name in ("Shopee MY", "Lazada"):
+        if platform_name != "Shopee MY":
             navigate(app, platform_name)
         assert app.exception == []
-        if platform_name == "Shopee":
+        if platform_name == "Shopee MY":
             assert "Manual Review" not in {element.value for element in app.subheader}
         else:
             assert "Manual Review" in {element.value for element in app.subheader}
@@ -223,7 +224,7 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
         for dataframe in app.dataframe:
             assert "order_payload" not in dataframe.value.columns
             assert "product_payloads" not in dataframe.value.columns
-        if platform_name == "Shopee":
+        if platform_name == "Shopee MY":
             assert app.dataframe == []
         else:
             assert all("Payment Status" not in dataframe.value.columns for dataframe in app.dataframe)
@@ -274,7 +275,7 @@ def test_platform_tabs_hide_manual_review_section_when_that_platform_has_none(tm
     ]
     app.session_state["batch_id"] = "batch-shopee-only"
     app.session_state["pdf_count"] = 1
-    app.session_state["navigation"] = "Shopee"
+    app.session_state["navigation"] = "Shopee MY"
 
     app.run(timeout=20)
 
@@ -284,7 +285,7 @@ def test_platform_tabs_hide_manual_review_section_when_that_platform_has_none(tm
         (metric.label, metric.value) for metric in app.metric
     }
 
-    for platform_name in ("Lazada", "ZENXIN"):
+    for platform_name in ("Lazada",):
         navigate(app, platform_name)
         assert app.exception == []
         assert "Manual Review" not in {element.value for element in app.subheader}
@@ -328,7 +329,7 @@ def test_lazada_preview_dates_are_typed_for_chronological_sorting(tmp_path, monk
     assert order_table["Order Date"].dtype.kind == "M"
     assert order_table["Invoice Date"].dtype.kind == "M"
 
-def test_zenxin_preview_invoice_date_is_typed_without_lazada_format_coercion(tmp_path, monkeypatch):
+def test_tiktok_navigation_does_not_expose_zenxin_batch_data(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -343,18 +344,44 @@ def test_zenxin_preview_invoice_date_is_typed_without_lazada_format_coercion(tmp
     app.session_state["reviews"] = []
     app.session_state["batch_id"] = "batch-zenxin-date"
     app.session_state["pdf_count"] = 1
-    app.session_state["navigation"] = "ZENXIN"
+    app.session_state["navigation"] = "TikTok"
 
     app.run(timeout=20)
 
     assert app.exception == []
-    order_table = next(
-        dataframe.value
-        for dataframe in app.dataframe
-        if "Invoice Date" in dataframe.value.columns
-    )
-    assert order_table["Invoice Date"].dtype.kind == "M"
-    assert order_table["Invoice Date"].iloc[0].strftime("%d/%m/%Y") == "31/03/2026"
+    assert "TikTok" in {title.value for title in app.title}
+    assert [message.value for message in app.info] == [
+        "TikTok analysis is not configured yet."
+    ]
+    assert app.dataframe == []
+
+
+@pytest.mark.parametrize("page", ("Shopee SG", "TikTok"))
+def test_unimplemented_analysis_pages_do_not_expose_my_or_zenxin_data(
+    tmp_path, monkeypatch, page
+):
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    app.session_state["authenticated"] = True
+    app.session_state["orders"] = [
+        {"platform": "Shopee", "order_id": "SHP-1"},
+        {"platform": "ZENXIN", "order_id": "ZNX-1"},
+    ]
+    app.session_state["products"] = [
+        {"platform": "Shopee", "order_id": "SHP-1", "product_name": "MY"},
+        {"platform": "ZENXIN", "order_id": "ZNX-1", "product_name": "Legacy"},
+    ]
+    app.session_state["reviews"] = []
+    app.session_state["navigation"] = page
+
+    app.run(timeout=30)
+
+    assert app.exception == []
+    assert page in {title.value for title in app.title}
+    assert [message.value for message in app.info] == [
+        f"{page} analysis is not configured yet."
+    ]
+    assert app.dataframe == []
 
 def test_data_import_validate_restores_current_batch_dashboard_and_filterable_order_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -623,12 +650,15 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     assert app.exception == []
     assert {
         "Data Import",
-        "Dashboard",
         "Cross Platform Summary",
-        "Shopee",
+        "Shopee MY",
+        "Shopee SG",
         "Lazada",
-        "ZENXIN",
-   } <= {button.label for button in app.button}
+        "TikTok",
+    } <= {button.label for button in app.button}
+    assert {"Dashboard", "Shopee", "ZENXIN"}.isdisjoint(
+        {button.label for button in app.button}
+    )
     metrics = {(metric.label, metric.value) for metric in app.metric}
     assert {
         ("Orders", "1"),
@@ -672,7 +702,7 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     )
     assert current_order_table["Order ID"].tolist() == ["ORD-A"]
 
-    navigate(app, "Shopee")
+    navigate(app, "Shopee MY")
 
     assert app.exception == []
     assert {"Search and Filters", "Product Level"} <= {
@@ -717,7 +747,7 @@ def test_platform_export_keeps_full_batch_separate_from_filtered_view(tmp_path, 
     app.session_state["reviews"] = []
     app.session_state["batch_id"] = "batch-export-scopes"
     app.session_state["pdf_count"] = 2
-    app.session_state["navigation"] = "Shopee"
+    app.session_state["navigation"] = "Shopee MY"
 
     app.run(timeout=20)
     next(element for element in app.text_input if element.label == "Order ID").set_value("SHP-1").run(timeout=20)

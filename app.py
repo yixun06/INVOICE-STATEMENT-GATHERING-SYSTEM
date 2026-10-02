@@ -207,18 +207,24 @@ DATE_COLUMNS = {
     "payout_completed_date",
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
-REPORT_NAVIGATION_PAGES = ["Dashboard", "Cross Platform Summary", *PLATFORMS]
+LIVE_ANALYSIS_NAVIGATION_PAGES = [
+    "Cross Platform Summary",
+    "Shopee MY",
+    "Shopee SG",
+    "Lazada",
+    "TikTok",
+]
 UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE, MONTHLY_BILLING_PAGE]
 DEVELOPMENT_NAVIGATION_PAGES: list[str] = []
 NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
     WEEKLY_BILLING_PAGE: "calendar_month",
     MONTHLY_BILLING_PAGE: "calendar_view_month",
-    "Dashboard": "dashboard",
     "Cross Platform Summary": "inventory_2",
-    "Shopee": "storefront",
+    "Shopee MY": "storefront",
+    "Shopee SG": "local_mall",
     "Lazada": "shopping_bag",
-    "ZENXIN": "language",
+    "TikTok": "music_note",
 }
 PAGE_CONTROL_WIDGET_SUFFIXES = (
     "_order_filter",
@@ -775,10 +781,12 @@ def show_sidebar(pdf_count: int) -> str:
         navigation = st.session_state.get("navigation", DATA_IMPORT_PAGE)
         if navigation == "All Products":
             navigation = "Cross Platform Summary"
+        if navigation == "Shopee":
+            navigation = "Shopee MY"
         if navigation not in {
             DATA_IMPORT_PAGE,
             *UAT2_NAVIGATION_PAGES,
-            *REPORT_NAVIGATION_PAGES,
+            *LIVE_ANALYSIS_NAVIGATION_PAGES,
             *DEVELOPMENT_NAVIGATION_PAGES,
         }:
             navigation = DATA_IMPORT_PAGE
@@ -801,7 +809,7 @@ def show_sidebar(pdf_count: int) -> str:
 
         render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
         render_navigation_section("BILLING & ACCOUNTING", UAT2_NAVIGATION_PAGES)
-        render_navigation_section("REPORTS", REPORT_NAVIGATION_PAGES)
+        render_navigation_section("LIVE ANALYSIS", LIVE_ANALYSIS_NAVIGATION_PAGES)
 
         st.html('<p class="sidebar-section-label">Product Master</p>')
         refresh_message = st.session_state.pop("product_master_refresh_message", None)
@@ -1293,9 +1301,12 @@ def show_platform_tab(
     platform_orders: list[dict],
     platform_products: list[dict],
     platform_reviews: list[dict],
+    *,
+    display_name: str | None = None,
 ) -> None:
+    visible_name = display_name or platform_name
     title_col, export_col = st.columns([5, 2], vertical_alignment="center")
-    title_col.title(platform_name)
+    title_col.title(visible_name)
 
     export_actions = export_col.container(horizontal_alignment="right", gap=None)
     dashboard = compute_platform_dashboard(platform_orders, platform_products)
@@ -1322,7 +1333,7 @@ def show_platform_tab(
                 include_payment_status=platform_name == "Shopee",
             )
         else:
-            st.caption(f"No {platform_name} data in this batch.")
+            st.caption(f"No {visible_name} data in this batch.")
         return
 
     full_batch_kpi = compute_platform_kpis(platform_orders, platform_products)
@@ -1996,12 +2007,21 @@ elif selected_page == WEEKLY_BILLING_PAGE:
     render_weekly_billing()
 elif selected_page == MONTHLY_BILLING_PAGE:
     render_monthly_billing()
-elif selected_page == "Dashboard":
-    st.title("Dashboard")
-    st.caption("Current active-batch reporting view. Import and validation remain in Data Import.")
-    show_overall_dashboard(orders, products, reviews, pdf_count)
 elif selected_page == "Cross Platform Summary":
     render_cross_platform_product_summary()
+elif selected_page == "Shopee MY":
+    orders_by_platform = split_by_platform(orders)
+    products_by_platform = split_by_platform(products)
+    show_platform_tab(
+        "Shopee",
+        orders_by_platform.get("Shopee", []),
+        products_by_platform.get("Shopee", []),
+        reviews_for_platform(reviews, "Shopee"),
+        display_name="Shopee MY",
+    )
+elif selected_page in {"Shopee SG", "TikTok"}:
+    st.title(selected_page)
+    st.info(f"{selected_page} analysis is not configured yet.")
 else:
     orders_by_platform = split_by_platform(orders)
     products_by_platform = split_by_platform(products)

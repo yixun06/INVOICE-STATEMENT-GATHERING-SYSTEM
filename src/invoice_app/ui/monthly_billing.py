@@ -14,6 +14,7 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
     HistoricalInvoiceStorageError,
 )
 from src.invoice_app.services.market_context import (
+    BILLING_PLATFORM_OPTIONS,
     MarketConfigurationUnavailable,
     MarketContext,
     MarketKey,
@@ -83,9 +84,21 @@ def render_monthly_billing(
 ) -> None:
     """Render one committed Monthly statement without touching the Weekly UI path."""
 
-    context = resolve_market_context(market_context)
     st.title(MONTHLY_BILLING_PAGE)
-    st.caption("Platform: Shopee MY")
+    requested_context = resolve_market_context(market_context)
+    platform_col, month_col = st.columns(2, gap="small")
+    with platform_col:
+        selected_platform = st.selectbox(
+            "Platform",
+            BILLING_PLATFORM_OPTIONS,
+            index=BILLING_PLATFORM_OPTIONS.index(requested_context.display_name),
+            key="monthly_billing_platform",
+        )
+    context = resolve_market_context(selected_platform)
+    if not context.weekly_billing_available:
+        st.info(f"{context.display_name} billing is not configured yet.")
+        return
+    st.caption(f"Platform: {context.display_name}")
     st.caption(
         "Product and Financial Summary from one committed full-calendar-month Shopee Statement."
     )
@@ -110,12 +123,13 @@ def render_monthly_billing(
         st.info("No committed full-calendar-month Statement is available for Monthly Billing.")
         return
 
-    period = st.selectbox(
-        "Month",
-        source.periods,
-        format_func=month_label,
-        key="monthly_billing_month",
-    )
+    with month_col:
+        period = st.selectbox(
+            "Month",
+            source.periods,
+            format_func=month_label,
+            key="monthly_billing_month",
+        )
     try:
         report = build_monthly_billing_report(source, period)
     except MonthlyBillingError as error:

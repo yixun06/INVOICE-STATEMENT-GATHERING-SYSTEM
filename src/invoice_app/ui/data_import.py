@@ -32,6 +32,7 @@ from ..services.market_context import (
     MarketStateIsolationError,
     SHOPEE_MY,
     SHOPEE_SG,
+    TIKTOK,
     bind_active_import_market,
 )
 from ..services.import_result_adapters import (
@@ -194,11 +195,12 @@ DATA_IMPORT_PLATFORMS = (
         supported_source_types=frozenset({PLATFORM_ORDERS}),
     ),
     DataImportPlatform(
-        key="zenxin_website",
-        display_name="Zenxin Website",
-        subtitle="Import Zenxin Website invoice documents.",
-        expected_platform="ZENXIN",
-        supported_source_types=frozenset({PLATFORM_ORDERS}),
+        key="tiktok",
+        display_name="TikTok",
+        subtitle="TikTok marketplace import workspace.",
+        expected_platform=None,
+        supported_source_types=frozenset(),
+        market_context=TIKTOK,
     ),
 )
 _DATA_IMPORT_PLATFORM_BY_KEY = {platform.key: platform for platform in DATA_IMPORT_PLATFORMS}

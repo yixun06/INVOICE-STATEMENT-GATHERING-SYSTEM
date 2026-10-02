@@ -15,6 +15,8 @@ from typing import Any, Mapping, MutableMapping
 class MarketKey(str, Enum):
     SHOPEE_MY = "shopee_my"
     SHOPEE_SG = "shopee_sg"
+    LAZADA = "lazada"
+    TIKTOK = "tiktok"
 
 
 class MarketConfigurationUnavailable(RuntimeError):
@@ -63,11 +65,45 @@ SHOPEE_SG = MarketContext(
     weekly_billing_available=False,
 )
 
+LAZADA = MarketContext(
+    key=MarketKey.LAZADA,
+    display_name="Lazada",
+    persisted_platform="Lazada",
+    currency_code="MYR",
+    currency_display="RM",
+    cross_platform_eligible=True,
+    statement_commit_available=False,
+    weekly_billing_available=False,
+)
+
+TIKTOK = MarketContext(
+    key=MarketKey.TIKTOK,
+    display_name="TikTok",
+    persisted_platform="TikTok",
+    currency_code="MYR",
+    currency_display="RM",
+    cross_platform_eligible=True,
+    statement_commit_available=False,
+    weekly_billing_available=False,
+)
+
 
 MARKET_CONTEXTS: Mapping[MarketKey, MarketContext] = {
     SHOPEE_MY.key: SHOPEE_MY,
     SHOPEE_SG.key: SHOPEE_SG,
+    LAZADA.key: LAZADA,
+    TIKTOK.key: TIKTOK,
 }
+
+BILLING_MARKET_CONTEXTS = (SHOPEE_MY, SHOPEE_SG, LAZADA, TIKTOK)
+BILLING_PLATFORM_OPTIONS = tuple(
+    context.display_name for context in BILLING_MARKET_CONTEXTS
+)
+CROSS_PLATFORM_MARKET_CONTEXTS = (SHOPEE_MY, LAZADA, TIKTOK)
+CROSS_PLATFORM_OPTIONS = (
+    "All",
+    *(context.display_name for context in CROSS_PLATFORM_MARKET_CONTEXTS),
+)
 
 
 def resolve_market_context(value: MarketContext | MarketKey | str | None = None) -> MarketContext:
@@ -82,11 +118,13 @@ def resolve_market_context(value: MarketContext | MarketKey | str | None = None)
                 f"Unrecognized market context for {value.key.value!r}."
             )
         return known
-    try:
-        key = value if isinstance(value, MarketKey) else MarketKey(str(value))
-    except ValueError as error:
-        raise MarketConfigurationUnavailable(f"Unsupported market context: {value!r}.") from error
-    return MARKET_CONTEXTS[key]
+    if isinstance(value, MarketKey):
+        return MARKET_CONTEXTS[value]
+    text = str(value).strip()
+    for context in MARKET_CONTEXTS.values():
+        if text.casefold() in {context.key.value.casefold(), context.display_name.casefold()}:
+            return context
+    raise MarketConfigurationUnavailable(f"Unsupported market context: {value!r}.")
 
 
 def require_capability(context: MarketContext, capability: str) -> None:

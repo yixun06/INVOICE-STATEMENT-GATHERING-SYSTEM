@@ -9,12 +9,16 @@ from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
 from src.invoice_app.services.market_context import (
+    BILLING_PLATFORM_OPTIONS,
+    CROSS_PLATFORM_OPTIONS,
+    LAZADA,
     MarketConfigurationUnavailable,
     MarketContext,
     MarketKey,
     MarketStateIsolationError,
     SHOPEE_MY,
     SHOPEE_SG,
+    TIKTOK,
     active_import_market,
     bind_active_import_market,
     market_state_key,
@@ -40,6 +44,13 @@ def test_market_registry_preserves_my_identity_and_reserves_sg_identity():
     assert SHOPEE_SG.currency_display == "SGD"
     assert SHOPEE_MY.cross_platform_eligible is True
     assert SHOPEE_SG.cross_platform_eligible is False
+    assert BILLING_PLATFORM_OPTIONS == ("Shopee MY", "Shopee SG", "Lazada", "TikTok")
+    assert CROSS_PLATFORM_OPTIONS == ("All", "Shopee MY", "Lazada", "TikTok")
+    assert LAZADA.weekly_billing_available is False
+    assert TIKTOK.weekly_billing_available is False
+    assert resolve_market_context("Shopee MY") is SHOPEE_MY
+    assert resolve_market_context("Lazada") is LAZADA
+    assert resolve_market_context("TikTok") is TIKTOK
 
 
 def test_market_registry_rejects_ad_hoc_context_that_weakens_sg_capabilities():
@@ -74,6 +85,69 @@ def test_unconfigured_sg_persistence_never_falls_back_to_my(monkeypatch, tmp_pat
         configured_uat2_data_settings(SHOPEE_SG)
 
 
+@pytest.mark.parametrize("context", (LAZADA, TIKTOK))
+def test_future_platform_persistence_never_borrows_my_or_sg(context, monkeypatch):
+    monkeypatch.setenv("INV_UAT2_DATA_SPREADSHEET_ID", "my-sheet")
+    monkeypatch.setenv("INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID", "sg-sheet")
+
+    with pytest.raises(
+        MarketConfigurationUnavailable,
+        match=f"{context.display_name} persistence is unavailable",
+    ):
+        configured_uat2_data_settings(context)
+
+
+def test_my_repository_creation_remains_available_with_valid_settings():
+    settings = UAT2DataSettings(
+        google_spreadsheet_id="my-explicit-sheet",
+        google_service_account={"type": "service_account"},
+        market_context=SHOPEE_MY,
+    )
+
+    repository = settings.create_repository()
+
+    assert repository is not None
+
+
+@pytest.mark.parametrize("context", (LAZADA, TIKTOK))
+def test_manually_constructed_future_market_repository_fails_before_my_fallback(context):
+    settings = UAT2DataSettings(
+        google_service_account={"type": "service_account"},
+        market_context=context,
+    )
+
+    with pytest.raises(
+        MarketConfigurationUnavailable,
+        match=f"{context.display_name} persistence is unavailable",
+    ):
+        settings.create_repository()
+
+
+def test_manually_constructed_sg_repository_requires_an_explicit_sg_destination():
+    settings = UAT2DataSettings(
+        google_service_account={"type": "service_account"},
+        market_context=SHOPEE_SG,
+    )
+
+    with pytest.raises(
+        MarketConfigurationUnavailable,
+        match="explicit SG spreadsheet destination is required",
+    ):
+        settings.create_repository()
+
+
+def test_manually_constructed_sg_repository_accepts_explicit_sg_settings():
+    settings = UAT2DataSettings(
+        google_spreadsheet_id="sg-explicit-sheet",
+        google_service_account={"type": "service_account"},
+        market_context=SHOPEE_SG,
+    )
+
+    repository = settings.create_repository()
+
+    assert repository is not None
+
+
 def test_sg_market_capabilities_fail_closed_even_with_manually_constructed_settings():
     settings = UAT2DataSettings(
         google_spreadsheet_id="sg-only-sheet",
@@ -106,6 +180,21 @@ def test_unconfigured_sg_product_master_never_falls_back_to_my(monkeypatch, tmp_
 
     with pytest.raises(MarketConfigurationUnavailable, match="Shopee SG Product Master is unavailable"):
         product_master_source.configured_product_master_source_settings(SHOPEE_SG)
+
+
+@pytest.mark.parametrize("context", (LAZADA, TIKTOK))
+def test_future_platform_product_master_never_borrows_sg(context, monkeypatch):
+    from src.invoice_app.services import product_master_source
+
+    monkeypatch.setenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", "google_sheets")
+    monkeypatch.setenv("INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID", "sg-sheet")
+    monkeypatch.setenv("INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME", "SG Product Master")
+
+    with pytest.raises(
+        MarketConfigurationUnavailable,
+        match=f"{context.display_name} Product Master is unavailable",
+    ):
+        product_master_source.configured_product_master_source_settings(context)
 
 
 def test_sg_product_master_rejects_a_non_tab_provider(monkeypatch, tmp_path):

@@ -687,4 +687,5 @@ def test_confirmed_discard_clears_stale_activity_and_restores_navigation(tmp_pat
     assert "workflow_activity" not in state
     assert "workflow_navigation_blocked" not in state
     assert "batch_id" not in state
-    assert any(button.label == "Dashboard" for button in app.button)
+    assert any(button.label == "Cross Platform Summary" for button in app.button)
+    assert all(button.label != "Dashboard" for button in app.button)
