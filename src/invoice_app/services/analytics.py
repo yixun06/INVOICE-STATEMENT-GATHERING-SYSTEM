@@ -8,6 +8,7 @@ from ..utils.normalize import parse_decimal, parse_quantity
 
 INCOME_FIELD_BY_PLATFORM = {
     "Shopee": "order_income",
+    "Shopee SG": "order_income",
     "Lazada": "net_paid",
     "ZENXIN": "total",
 }

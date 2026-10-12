@@ -96,7 +96,7 @@ source-safety, Statement, and historical rationale.
   the existing internal persisted `Shopee` analysis path; Shopee SG and TikTok
   show a fail-closed unavailable page and must not expose MY or ZENXIN data.
 
-## Shopee SG architecture direction — Approved / Pending Implementation
+## Shopee SG architecture direction — PDF Test Entry Implemented / Persistence Pending
 
 Shopee MY and Shopee SG remain in one InvoiceGather application. The approved
 long-term shape is shared workflow/reporting engines with market-specific
@@ -121,24 +121,35 @@ The following rules are locked for future implementation:
   one immutable context. Cross-market reads, reconciliation, commits, and stale
   provider reuse are prohibited.
 - Product Master infrastructure is shared, but MY and SG use different tabs/data
-  scopes. The SG tab name/schema/data are not yet supplied and must not be
-  invented. Missing SG configuration fails closed; SG must never fall back to
-  MY rows, prices, or NAV.
+  scopes. SG uses only the `SHOPEE PRODUCT LISTING` Google spreadsheet's exact
+  `shopee sg` tab and `Price SGD`. The approved SG spreadsheet ID is
+  `1tZN0lHSY2omOUycXBss6sim9iVBwAvOe0_DJNIPMwMM`. The existing read-only Google
+  credential may be reused as access infrastructure, but the SG workbook, tab,
+  rows, prices, and NAV must never fall back to MY. Missing credentials, an
+  inaccessible/missing tab, missing required headers, or invalid `Price SGD`
+  evidence fails closed.
 - NAV and Unit Price must come from the same resolved market-specific Product
   Master row. Although both markets share the ERP NAV identity system, SG NAV
   must not be copied from MY data.
 - Shopee MY is MYR; Shopee SG is SGD. Do not convert FX, aggregate currencies,
-  or combine platform financial totals without later explicit approval.
+  or combine platform financial totals without later explicit approval. All
+  business-facing Data Import money follows the active MarketContext (`RM` for
+  MYR and `S$` for SGD); domain and persisted numeric values remain unchanged.
 - Shopee SG is permanently excluded from the existing Cross Platform Summary at
   the service/data-eligibility layer, not only hidden in UI.
 - SG Product Summary reuses the canonical identity `NAV + resolved Seller SKU +
   persisted historical Product Master Unit Price`; names/variation are display
   only, missing NAV blocks, and differing NAV values remain separate.
-- SG Invoice and Statement compatibility with MY is a provisional implementation
-  assumption only. Real approved SG Invoice, Statement, and Product Listing
-  samples must be compared before claiming support. Reuse proven format engines;
-  introduce the smallest SG-specific normalization only when evidence requires
-  it, without changing correct MY parsing.
+- SG Invoice PDF compatibility with the shared Shopee core is evidence-backed for
+  the audited ordinary-order corpus. SG routing requires `seller.shopee.sg` and
+  an explicit SG market context; `$` is normalized only inside the SG adapter as
+  SGD evidence. `$` alone is not source identity. SG Statement and exception
+  layouts remain unsupported unless separately evidenced and approved.
+- For SG source SKU resolution, listing `SKU` and `Parent SKU` are peer exact
+  keys whose union is deterministically disambiguated. Source-blank SKU may use
+  approved exact Product Name/Variation rules. Ambiguous, missing, incomplete,
+  or price-reference-mismatched listing evidence remains Manual Review; never
+  fuzzy-match, price-guess, or choose the first candidate.
 - Weekly Billing will become a shared shell with a market/platform selector and
   market-specific committed source, Statement population, currency, Product
   Master, dataset builder, and exports. It must not combine cross-currency totals.
@@ -146,9 +157,10 @@ The following rules are locked for future implementation:
   only behavior proven identical and keep differing SG behavior in explicit
   extension points.
 
-Current blockers are real SG Invoice/Statement samples, the SG Product Listing,
-the approved SG Product Master tab/configuration, and the SG spreadsheet. Do not
-create or infer any of them during architecture work.
+The SG PDF/ZIP test entry stops at Manual Review / Accepted Candidate. Current
+blockers to permanent SG persistence are an approved separate SG destination,
+schema/acceptance contract, and runtime configuration. SG Statement support and
+cancelled/refund/return layouts remain pending evidence. Do not infer them.
 
 ## Data Import platform entry — Approved / Implemented
 
@@ -163,10 +175,10 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
   Statement, and Monthly Statement. An unavailable source remains visible but
   fails closed before Upload; the shared shell is not duplicated per platform.
 - Current capability matrix: Shopee MY supports all three existing workflows;
-  Lazada supports Invoice Import only; Shopee SG and TikTok support no source
-  yet. TikTok must never route to the historical ZENXIN parser or data. This
-  does not authorize new Lazada/TikTok persistence or an SG parser/persistence
-  path; historical ZENXIN internals remain untouched.
+  Lazada supports Invoice Import only; Shopee SG supports PDF/ZIP Invoice Import
+  in test mode through validation, Product Listing resolution, reconciliation,
+  and Manual Review / Accepted Candidate; TikTok supports no source. SG exposes
+  no permanent commit control. TikTok must never route to historical ZENXIN.
 - Invoice Upload is strict expected-platform intake: the selected platform is
   the expected source and the existing detector remains the actual-source
   safeguard. A mismatch is reported as `PLATFORM MISMATCH`, admits no order,
@@ -176,9 +188,19 @@ Select Source -> Upload -> Validate -> Reconcile -> Review & Commit
   discarding it. Entering another platform while work is active requires the
   existing explicit safe-discard lifecycle; only after that reset may the target
   platform bind. Reset clears both platform and market session bindings.
-- Shopee SG remains fail closed: it must not invoke Shopee MY parsing,
-  persistence, Product Master, or Statement paths, and it never falls back to
-  MY configuration or data.
+- A real active Data Import batch is proved only by the current `batch_id`.
+  `data_import.active_market` and `data_import.active_platform` describe
+  selection/ownership context and may be stale after a rerun; by themselves
+  they must not block market switching or contradict the sidebar. A known
+  cross-market batch conflict is shown as a concise business warning at the
+  chooser boundary, never as a normal-user traceback.
+- Before SG Product Listing reconciliation has successfully run, the Current
+  Batch Manual Review KPI is `Pending`, not numeric zero. A numeric count is
+  authoritative only after the SG resolution stage has evaluated the live
+  market-specific listing.
+- Shopee SG uses the shared parsing/validation core only through its explicit SG
+  source/currency adapter. It must not invoke Shopee MY persistence, Product
+  Master, or Statement paths, and it never falls back to MY configuration/data.
 - Shopee MY and Shopee SG use text-only labels in the chooser and platform
   title; no flag icon or Unicode flag is rendered. The secondary Back control
   is left-aligned above the platform Data Import title, rather than competing

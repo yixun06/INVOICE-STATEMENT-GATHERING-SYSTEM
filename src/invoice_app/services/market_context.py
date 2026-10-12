@@ -155,6 +155,18 @@ def market_state_key(context: MarketContext | MarketKey | str, domain: str, name
 ACTIVE_IMPORT_MARKET_KEY = "data_import.active_market"
 
 
+def has_active_import_batch(state: Mapping[str, Any]) -> bool:
+    """Return whether Data Import has a real unfinished batch.
+
+    The market and platform keys describe the selected/owned context; they are
+    not batch evidence.  ``batch_id`` is created when upload processing starts
+    and is cleared by the shared finish/discard lifecycle, so it is the one
+    authoritative fact used by both the sidebar and cross-market guard.
+    """
+
+    return bool(str(state.get("batch_id") or "").strip())
+
+
 def bind_active_import_market(
     state: MutableMapping[str, Any], context: MarketContext | MarketKey | str
 ) -> MarketContext:
@@ -162,7 +174,10 @@ def bind_active_import_market(
 
     resolved = resolve_market_context(context)
     current = state.get(ACTIVE_IMPORT_MARKET_KEY)
-    if current not in (None, "", resolved.key.value):
+    if (
+        has_active_import_batch(state)
+        and current not in (None, "", resolved.key.value)
+    ):
         raise MarketStateIsolationError(
             "The active import batch belongs to another market; finish or discard it before switching."
         )

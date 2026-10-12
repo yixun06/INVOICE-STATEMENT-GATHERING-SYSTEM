@@ -31,16 +31,25 @@ def resolve_shopee_payment_status(
 def map_shopee_records(
     data: ShopeeExtractedData,
     batch_id: str,
+    *,
+    platform: str = SHOPEE_PLATFORM,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    return map_shopee_order(data, batch_id), map_shopee_products(data, batch_id)
+    return (
+        map_shopee_order(data, batch_id, platform=platform),
+        map_shopee_products(data, batch_id, platform=platform),
+    )
 
 
 def map_shopee_review_payloads(
     data: ShopeeExtractedData,
     batch_id: str,
+    *,
+    platform: str = SHOPEE_PLATFORM,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Package extracted order facts so a safe correction can revalidate them."""
-    order_payload = map_shopee_order(data, batch_id) if data.order_id else None
+    order_payload = (
+        map_shopee_order(data, batch_id, platform=platform) if data.order_id else None
+    )
     if order_payload is not None:
         order_payload["status"] = "Manual Review"
     return order_payload, map_shopee_products(
@@ -48,10 +57,16 @@ def map_shopee_review_payloads(
         batch_id,
         derive_missing_amounts=False,
         status="Manual Review",
+        platform=platform,
     )
 
 
-def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]:
+def map_shopee_order(
+    data: ShopeeExtractedData,
+    batch_id: str,
+    *,
+    platform: str = SHOPEE_PLATFORM,
+) -> dict[str, Any]:
     income = data.income
     buyer_payment = data.buyer_payment
     voucher = data.voucher
@@ -63,7 +78,7 @@ def map_shopee_order(data: ShopeeExtractedData, batch_id: str) -> dict[str, Any]
 
     return {
         "batch_id": batch_id,
-        "platform": SHOPEE_PLATFORM,
+        "platform": platform,
         "order_id": data.order_id,
         "order_status": data.order_status,
         "invoice_number": "",
@@ -191,6 +206,7 @@ def map_shopee_products(
     *,
     derive_missing_amounts: bool = True,
     status: str = "Accepted",
+    platform: str = SHOPEE_PLATFORM,
 ) -> list[dict[str, Any]]:
     products: list[dict[str, Any]] = []
     for item in data.product_items:
@@ -213,7 +229,7 @@ def map_shopee_products(
 
         product = {
             "batch_id": batch_id,
-            "platform": SHOPEE_PLATFORM,
+            "platform": platform,
             "order_id": data.order_id,
             "invoice_date": data.order_created_date,
             "order_created_date": data.order_created_date,

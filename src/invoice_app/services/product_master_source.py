@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -29,6 +29,10 @@ from .product_price_master import (
 
 
 GOOGLE_SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SHOPEE_SG_PRODUCT_MASTER_SPREADSHEET_ID = (
+    "1tZN0lHSY2omOUycXBss6sim9iVBwAvOe0_DJNIPMwMM"
+)
+SHOPEE_SG_PRODUCT_MASTER_WORKSHEET = "shopee sg"
 
 
 class ProductMasterSourceError(RuntimeError):
@@ -85,15 +89,24 @@ class GoogleSheetsProductMasterSource:
     worksheet_name: str
     google_service_account: GoogleServiceAccountInfo | None = field(default=None, repr=False)
     values_fetcher: GoogleSheetValuesFetcher | None = None
+    unit_price_headers: tuple[str, ...] = ("price",)
+    reject_invalid_prices: bool = False
 
     def load(self) -> ProductMasterSourceLoad:
         rows = tuple(tuple(row) for row in self._fetch_values())
-        header_row, columns = _find_tabular_listing_headers(rows)
+        header_row, columns = _find_tabular_listing_headers(
+            rows, unit_price_headers=self.unit_price_headers
+        )
         records, candidate_rows, invalid_prices = _canonical_records_from_rows(
             rows,
             header_row=header_row,
             columns=columns,
         )
+        if self.reject_invalid_prices and invalid_prices:
+            raise ProductMasterSourceError(
+                "Google Sheets Product Master contains "
+                f"{invalid_prices} row(s) with missing or invalid Price SGD values."
+            )
         return ProductMasterSourceLoad(
             records=records,
             metadata=ProductPriceMasterMetadata(
@@ -218,11 +231,22 @@ def configured_product_master_source_settings(
         source_config = _configured_product_master_secret_mapping()
     elif resolved.key is MarketKey.SHOPEE_SG:
         values = {
-            "source": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", ""),
+            "source": os.getenv(
+                "INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", "google_sheets"
+            ),
             "local_excel_path": os.getenv("INV_SHOPEE_SG_PRODUCT_MASTER_PATH", ""),
-            "google_credentials_path": os.getenv("INV_SHOPEE_SG_GOOGLE_CREDENTIALS_PATH", ""),
-            "google_spreadsheet_id": os.getenv("INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID", ""),
-            "google_worksheet_name": os.getenv("INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME", ""),
+            "google_credentials_path": os.getenv(
+                "INV_SHOPEE_SG_GOOGLE_CREDENTIALS_PATH",
+                os.getenv("INV_GOOGLE_CREDENTIALS_PATH", ""),
+            ),
+            "google_spreadsheet_id": os.getenv(
+                "INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID",
+                SHOPEE_SG_PRODUCT_MASTER_SPREADSHEET_ID,
+            ),
+            "google_worksheet_name": os.getenv(
+                "INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME",
+                SHOPEE_SG_PRODUCT_MASTER_WORKSHEET,
+            ),
         }
         source_config = _configured_market_product_master_secret_mapping(resolved)
     else:
@@ -237,6 +261,24 @@ def configured_product_master_source_settings(
     configured_service_account = source_config.get("google_service_account")
     if isinstance(configured_service_account, Mapping) and configured_service_account:
         google_service_account = dict(configured_service_account)
+    if resolved.key is MarketKey.SHOPEE_SG:
+        # Credentials are access infrastructure, not Product Master data.  The
+        # approved SG workbook/tab remains explicit and cannot inherit MY rows,
+        # while the existing read-only service account may be reused.
+        shared_config = _configured_product_master_secret_mapping()
+        if not values["google_credentials_path"] and shared_config.get(
+            "google_credentials_path"
+        ):
+            values["google_credentials_path"] = str(
+                shared_config["google_credentials_path"]
+            )
+        shared_service_account = shared_config.get("google_service_account")
+        if (
+            google_service_account is None
+            and isinstance(shared_service_account, Mapping)
+            and shared_service_account
+        ):
+            google_service_account = dict(shared_service_account)
     if resolved.key is not MarketKey.SHOPEE_MY and not values["source"].strip():
         raise MarketConfigurationUnavailable(
             f"{resolved.display_name} Product Master is unavailable: no market-specific source is configured."
@@ -244,6 +286,13 @@ def configured_product_master_source_settings(
     if resolved.key is not MarketKey.SHOPEE_MY and values["source"].strip().casefold() != "google_sheets":
         raise MarketConfigurationUnavailable(
             f"{resolved.display_name} Product Master must use its approved Google Sheets tab configuration."
+        )
+    if (
+        resolved.key is MarketKey.SHOPEE_SG
+        and values["google_worksheet_name"].strip().casefold() != "shopee sg"
+    ):
+        raise MarketConfigurationUnavailable(
+            "Shopee SG Product Master is unavailable: configure the exact 'shopee sg' worksheet."
         )
     return ProductMasterSourceSettings(
         source=values["source"].strip().casefold(),
@@ -295,15 +344,15 @@ def _configured_market_product_master_secret_mapping(
             import streamlit as st
 
             secrets = st.secrets
+        markets = secrets.get("markets", {}) if isinstance(secrets, Mapping) else {}
+        market = markets.get(context.key.value, {}) if isinstance(markets, Mapping) else {}
+        configured = market.get("product_master", {}) if isinstance(market, Mapping) else {}
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ProductMasterSourceError(
             f"Market Product Master configuration could not be read: {error}"
         ) from error
     except Exception:
         return {}
-    markets = secrets.get("markets", {}) if isinstance(secrets, Mapping) else {}
-    market = markets.get(context.key.value, {}) if isinstance(markets, Mapping) else {}
-    configured = market.get("product_master", {}) if isinstance(market, Mapping) else {}
     return configured if isinstance(configured, Mapping) else {}
 
 
@@ -328,8 +377,34 @@ def _load_configured_product_price_master(
 ) -> tuple[ProductPriceMaster, str]:
     # `context` is intentionally part of the cache key even if future MY/SG
     # settings happen to be textually equal; a market must never borrow rows.
-    loaded = settings.create_source().load()
-    return loaded.to_price_master(), loaded.source_label
+    sg_context = context.key is MarketKey.SHOPEE_SG
+    source = settings.create_source()
+    if sg_context and isinstance(source, GoogleSheetsProductMasterSource):
+        source = replace(
+            source,
+            unit_price_headers=("price sgd",),
+            reject_invalid_prices=True,
+        )
+    loaded = source.load()
+    if not hasattr(loaded, "records") or not hasattr(loaded, "metadata"):
+        price_master = loaded.to_price_master()
+        if sg_context and isinstance(price_master, ProductPriceMaster):
+            price_master = ProductPriceMaster(
+                price_master.records,
+                price_master.metadata,
+                sku_parent_peer_keys=True,
+                allow_less_suffix_alias=False,
+            )
+        return price_master, loaded.source_label
+    return (
+        ProductPriceMaster(
+            loaded.records,
+            loaded.metadata,
+            sku_parent_peer_keys=sg_context,
+            allow_less_suffix_alias=not sg_context,
+        ),
+        loaded.source_label,
+    )
 
 
 def clear_product_master_source_cache() -> None:
@@ -378,6 +453,8 @@ def _fetch_google_sheet_values(
 
 def _find_tabular_listing_headers(
     rows: Sequence[Sequence[Any]],
+    *,
+    unit_price_headers: tuple[str, ...] = ("price",),
 ) -> tuple[int, dict[str, int]]:
     for row_number, row in enumerate(rows, start=1):
         headers = {
@@ -385,10 +462,19 @@ def _find_tabular_listing_headers(
             for index, value in enumerate(row)
             if _header_text(value)
         }
-        if all(expected in headers for expected in _REQUIRED_HEADERS.values()):
+        required_headers = {
+            field: expected
+            for field, expected in _REQUIRED_HEADERS.items()
+            if field != "unit_selling_price"
+        }
+        price_header = next(
+            (header for header in unit_price_headers if header in headers), None
+        )
+        if all(expected in headers for expected in required_headers.values()) and price_header:
             columns = {
-                field: headers[expected] for field, expected in _REQUIRED_HEADERS.items()
+                field: headers[expected] for field, expected in required_headers.items()
             }
+            columns["unit_selling_price"] = headers[price_header]
             if _NAV_HEADER in headers:
                 columns["nav_code"] = headers[_NAV_HEADER]
             if _PRODUCT_ID_HEADER in headers:

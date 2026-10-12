@@ -94,11 +94,16 @@ class ProductPriceMaster:
         self,
         records: Iterable[ProductPriceMasterRecord],
         metadata: ProductPriceMasterMetadata,
+        *,
+        sku_parent_peer_keys: bool = False,
+        allow_less_suffix_alias: bool = True,
     ) -> None:
         self.metadata = metadata
         self.records = tuple(records)
         self._seller_sku_index = _build_index(self.records, "seller_sku")
         self._parent_sku_index = _build_index(self.records, "parent_sku")
+        self._sku_parent_peer_keys = sku_parent_peer_keys
+        self._allow_less_suffix_alias = allow_less_suffix_alias
 
     @classmethod
     def from_xlsx(cls, source_path: str | Path) -> ProductPriceMaster:
@@ -221,9 +226,16 @@ class ProductPriceMaster:
         if _is_invalid_sku(requested_seller_sku):
             return self._resolve_name_variation(product_name, variation_name)
 
-        exact_seller_sku_candidates = self._seller_sku_index.get(
-            requested_seller_sku, ()
-        )
+        if self._sku_parent_peer_keys:
+            peer_candidates = self._sku_candidates(requested_seller_sku)
+            if peer_candidates:
+                return self._resolve_sku_candidates(
+                    peer_candidates,
+                    product_name=product_name,
+                    variation_name=variation_name,
+                )
+
+        exact_seller_sku_candidates = self._seller_sku_index.get(requested_seller_sku, ())
         if exact_seller_sku_candidates:
             return self._resolve_sku_candidates(
                 exact_seller_sku_candidates,
@@ -239,7 +251,7 @@ class ProductPriceMaster:
                 variation_name=variation_name,
             )
 
-        if requested_seller_sku.endswith("-Less"):
+        if self._allow_less_suffix_alias and requested_seller_sku.endswith("-Less"):
             alias_candidates = self._sku_candidates(
                 requested_seller_sku.removesuffix("-Less")
             )

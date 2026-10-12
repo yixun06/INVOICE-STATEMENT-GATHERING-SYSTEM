@@ -10,6 +10,7 @@ from typing import Any
 
 from .batch_service import apply_batch_rules, is_manual_review_record
 from .product_price_master import PriceLookupStatus, ProductPriceMaster
+from ..utils.normalize import parse_decimal
 from .shopee_invoice_revalidation import revalidate_shopee_invoice
 from ..parsers.shopee_mapper import resolve_shopee_payment_status
 from ..parsers.shopee_financial_parser import INCOME_ALIASES, is_missing_financial_value
@@ -176,7 +177,13 @@ def _has_source_missing_sku(review: Mapping[str, Any]) -> bool:
 
 
 def surface_product_identity_reviews(
-    state: MutableMapping[str, Any], *, price_master: ProductPriceMaster
+    state: MutableMapping[str, Any],
+    *,
+    price_master: ProductPriceMaster,
+    platform: str = "Shopee",
+    include_not_found: bool = False,
+    enrich_resolved: bool = False,
+    review_price_mismatch: bool = False,
 ) -> int:
     """Move source-damaged, ambiguous Shopee identities into Validate review.
 
@@ -190,11 +197,12 @@ def surface_product_identity_reviews(
     reviews = list(state.get("reviews", []))
     retained_orders: list[dict[str, Any]] = []
     moved_identities: set[tuple[str, str]] = set()
+    enriched_products: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     created = 0
 
     for order in orders:
         if (
-            str(order.get("platform") or "").strip() != "Shopee"
+            str(order.get("platform") or "").strip() != platform
             or str(order.get("status") or "").strip() != "Accepted"
         ):
             retained_orders.append(order)
@@ -207,7 +215,7 @@ def surface_product_identity_reviews(
             dict(product)
             for product in products
             if (
-                str(product.get("platform") or "").strip() == "Shopee"
+                str(product.get("platform") or "").strip() == platform
                 and str(product.get("source_pdf") or "").strip() == identity[0]
                 and str(product.get("order_id") or "").strip() == identity[1]
             )
@@ -219,16 +227,73 @@ def surface_product_identity_reviews(
                 product_name=product.get("product_name"),
                 variation_name=product.get("variation") or product.get("variation_name"),
             )
-            if lookup.status not in {
+            unresolved_statuses = {
                 PriceLookupStatus.PRICING_CONFLICT,
                 PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS,
-            }:
+            }
+            if include_not_found:
+                unresolved_statuses.add(PriceLookupStatus.PRICE_NOT_FOUND)
+            if lookup.status not in unresolved_statuses and lookup.unit_selling_price is not None:
+                if not lookup.nav_code:
+                    affected.append(
+                        {
+                            "index": index,
+                            "candidate_count": len(lookup.source_rows),
+                            "candidate_rows": lookup.source_rows,
+                            "issue_type": "listing_row_incomplete",
+                            "reason": "Resolved SG Product Listing row has blank NAV CODE.",
+                        }
+                    )
+                elif enrich_resolved:
+                    product["master_unit_price"] = lookup.unit_selling_price
+                    product["nav"] = lookup.nav_code
+                    product["product_identity_match_method"] = lookup.matched_by
+                    product["product_identity_source_rows"] = lookup.source_rows
+                    enriched_products[
+                        (
+                            str(product.get("source_pdf") or "").strip(),
+                            str(product.get("order_id") or "").strip(),
+                            str(product.get("product_name") or "").strip(),
+                            str(product.get("seller_sku") or "").strip(),
+                        )
+                    ] = product
+                    source_unit_price = parse_decimal(product.get("unit_price"))
+                    if (
+                        review_price_mismatch
+                        and source_unit_price is not None
+                        and source_unit_price != lookup.unit_selling_price
+                    ):
+                        affected.append(
+                            {
+                                "index": index,
+                                "candidate_count": len(lookup.source_rows),
+                                "candidate_rows": lookup.source_rows,
+                                "issue_type": "pricing_reference_mismatch",
+                                "source_unit_price": source_unit_price,
+                                "reference_unit_price": lookup.unit_selling_price,
+                                "reason": (
+                                    "Source unit-price evidence does not match the resolved "
+                                    "SG Product Listing Price SGD reference."
+                                ),
+                            }
+                        )
                 continue
+            source_sku = str(
+                product.get("seller_sku") or product.get("resolved_seller_sku") or ""
+            ).strip()
+            issue_type = (
+                "source_sku_missing"
+                if not source_sku and bool(product.get("sku_missing_in_source"))
+                else "sku_not_found"
+                if lookup.status is PriceLookupStatus.PRICE_NOT_FOUND
+                else "identity_conflict"
+            )
             affected.append(
                 {
                     "index": index,
                     "candidate_count": len(lookup.source_rows),
                     "candidate_rows": lookup.source_rows,
+                    "issue_type": issue_type,
                     "reason": lookup.reason
                     or "Product Master identity remains unresolved.",
                 }
@@ -242,7 +307,7 @@ def surface_product_identity_reviews(
             {
                 "batch_id": order.get("batch_id"),
                 "source_pdf": identity[0],
-                "platform": "Shopee",
+                "platform": platform,
                 "order_id": identity[1],
                 "status": "Manual Review",
                 "reason_code": PRODUCT_MASTER_IDENTITY_RESOLUTION_REQUIRED,
@@ -254,6 +319,17 @@ def surface_product_identity_reviews(
         )
         created += 1
 
+    if enrich_resolved:
+        for product in state.get("products", []):
+            key = (
+                str(product.get("source_pdf") or "").strip(),
+                str(product.get("order_id") or "").strip(),
+                str(product.get("product_name") or "").strip(),
+                str(product.get("seller_sku") or "").strip(),
+            )
+            resolved = enriched_products.get(key)
+            if resolved is not None:
+                product.update(resolved)
     if not created:
         return 0
     state["orders"] = retained_orders

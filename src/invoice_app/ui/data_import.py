@@ -29,11 +29,14 @@ from ..services.batch_service import create_batch_id
 from ..services.market_context import (
     ACTIVE_IMPORT_MARKET_KEY,
     MarketContext,
+    MarketConfigurationUnavailable,
+    MarketKey,
     MarketStateIsolationError,
     SHOPEE_MY,
     SHOPEE_SG,
     TIKTOK,
     bind_active_import_market,
+    has_active_import_batch,
 )
 from ..services.import_result_adapters import (
     adapt_platform_orders_import_result,
@@ -183,8 +186,8 @@ DATA_IMPORT_PLATFORMS = (
         key="shopee_sg",
         display_name="Shopee SG",
         subtitle="Singapore marketplace import workspace.",
-        expected_platform=None,
-        supported_source_types=frozenset(),
+        expected_platform="Shopee",
+        supported_source_types=frozenset({PLATFORM_ORDERS}),
         market_context=SHOPEE_SG,
     ),
     DataImportPlatform(
@@ -208,6 +211,9 @@ ACTIVE_IMPORT_PLATFORM_KEY = "data_import.active_platform"
 SHOW_PLATFORM_SELECTOR_KEY = "data_import.show_platform_selector"
 PENDING_PLATFORM_SWITCH_KEY = "data_import.pending_platform_switch"
 POST_DISCARD_PLATFORM_SWITCH_KEY = "data_import.platform_after_discard"
+SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY = (
+    "data_import.shopee_sg.product_resolution_evaluated"
+)
 
 WIZARD_STEPS = (
     "Select Source",
@@ -221,6 +227,7 @@ _WORKFLOW_KEYS = (
     ACTIVE_IMPORT_PLATFORM_KEY,
     SHOW_PLATFORM_SELECTOR_KEY,
     PENDING_PLATFORM_SWITCH_KEY,
+    SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY,
     "data_import_step",
     "import_source_type",
     "invoice_upload_attempt",
@@ -424,10 +431,10 @@ def render_data_import(
 
 def _adopt_legacy_platform_batch() -> None:
     """Present a pre-wizard batch as Platform Orders without changing it."""
-    if st.session_state.get("batch_id") and not st.session_state.get("import_source_type"):
+    if has_active_import_batch(st.session_state) and not st.session_state.get("import_source_type"):
         st.session_state.import_source_type = PLATFORM_ORDERS
         st.session_state.data_import_step = max(int(st.session_state.get("data_import_step", 1)), 3)
-    if st.session_state.get("batch_id"):
+    if has_active_import_batch(st.session_state):
         market_platform = _platform_for_active_market(st.session_state)
         if market_platform is not None:
             # The market binding is the existing batch owner.  Repair only the
@@ -445,7 +452,7 @@ def _adopt_legacy_platform_batch() -> None:
 
 def _complete_platform_switch_after_discard() -> None:
     """Enter the requested platform only after the shared discard lifecycle cleared state."""
-    if st.session_state.get("batch_id"):
+    if has_active_import_batch(st.session_state):
         return
     pending_key = st.session_state.pop(POST_DISCARD_PLATFORM_SWITCH_KEY, None)
     pending = _DATA_IMPORT_PLATFORM_BY_KEY.get(str(pending_key))
@@ -461,8 +468,19 @@ def active_data_import_platform(state: Mapping[str, Any]) -> DataImportPlatform 
     return _DATA_IMPORT_PLATFORM_BY_KEY.get(str(value))
 
 
+def _active_invoice_market_context() -> MarketContext:
+    platform = active_data_import_platform(st.session_state)
+    return platform.market_context if platform and platform.market_context else SHOPEE_MY
+
+
+def _active_invoice_currency() -> str:
+    return _active_invoice_market_context().currency_code
+
+
 def _platform_for_active_market(state: Mapping[str, Any]) -> DataImportPlatform | None:
-    """Return the platform already owned by the active market binding, if any."""
+    """Return the platform owned by a real active batch, if any."""
+    if not has_active_import_batch(state):
+        return None
     active_market = state.get(ACTIVE_IMPORT_MARKET_KEY)
     if active_market in (None, ""):
         return None
@@ -481,15 +499,17 @@ def bind_active_import_platform(
     state: MutableMapping[str, Any], platform: DataImportPlatform
 ) -> DataImportPlatform:
     current = active_data_import_platform(state)
-    if current is not None and current.key != platform.key and state.get("batch_id"):
+    if current is not None and current.key != platform.key and has_active_import_batch(state):
         raise MarketStateIsolationError(
             "The active import batch belongs to another platform; finish or discard it before switching."
         )
-    state[ACTIVE_IMPORT_PLATFORM_KEY] = platform.key
     if platform.market_context is not None:
         bind_active_import_market(state, platform.market_context)
     else:
         state.pop(ACTIVE_IMPORT_MARKET_KEY, None)
+    # Bind the market first so a rejected real-batch switch cannot leave the UI
+    # platform key pointing at a target the batch never entered.
+    state[ACTIVE_IMPORT_PLATFORM_KEY] = platform.key
     return platform
 
 
@@ -501,8 +521,8 @@ def _render_platform_selection(discard_current_batch: Callable[[], None]) -> Non
     st.title("Choose a platform")
     st.caption("Select the source workspace for this import.")
     pending_key = st.session_state.get(PENDING_PLATFORM_SWITCH_KEY)
-    # A bound market is the authoritative owner of an active batch.  It must
-    # win over any stale UI platform key before a platform card can be entered.
+    # A market binding owns the chooser only while a real batch exists.  A
+    # leftover binding alone is stale selection state, not an active batch.
     current = _platform_for_active_market(st.session_state) or active_data_import_platform(
         st.session_state
     )
@@ -548,10 +568,30 @@ def _render_platform_selection(discard_current_batch: Callable[[], None]) -> Non
                         icon=":material/arrow_forward:",
                         width="stretch",
                     ):
-                        if current is not None and current.key != platform.key and st.session_state.get("batch_id"):
+                        if (
+                            current is not None
+                            and current.key != platform.key
+                            and has_active_import_batch(st.session_state)
+                        ):
                             st.session_state[PENDING_PLATFORM_SWITCH_KEY] = platform.key
                         else:
-                            bind_active_import_platform(st.session_state, platform)
+                            try:
+                                bind_active_import_platform(st.session_state, platform)
+                            except MarketStateIsolationError:
+                                # The normal live-batch route above renders the
+                                # safe-discard panel.  Keep an unexpected
+                                # domain conflict at this UI boundary friendly.
+                                owner = _platform_for_active_market(st.session_state) or current
+                                if owner is not None:
+                                    st.warning(
+                                        f"An import batch is still active for {owner.display_name}. "
+                                        f"Finish or discard it before switching to {platform.display_name}."
+                                    )
+                                else:
+                                    st.warning(
+                                        "An import batch is still active. Finish or discard it before switching platforms."
+                                    )
+                                return
                             st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
                         st.rerun()
 
@@ -2394,9 +2434,9 @@ def _preserve_manual_review_resolution_context(key: str, *, resolved: bool, reas
 
 def _apply_manual_resolution(key: str, values: dict[str, Any]) -> None:
     try:
-        master, _ = load_configured_product_price_master()
+        master, _ = load_configured_product_price_master(_active_invoice_market_context())
         outcome = apply_resolution(st.session_state, key=key, values=values, price_master=master)
-    except ProductMasterSourceError as error:
+    except (ProductMasterSourceError, MarketConfigurationUnavailable) as error:
         st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
         st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
         st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
@@ -2419,10 +2459,18 @@ def _surface_reconciliation_product_identity_reviews() -> int:
     into a Manual Review record.
     """
     try:
-        master, _ = load_configured_product_price_master()
-    except ProductMasterSourceError:
+        context = _active_invoice_market_context()
+        master, _ = load_configured_product_price_master(context)
+    except (ProductMasterSourceError, MarketConfigurationUnavailable):
         return 0
-    created = surface_product_identity_reviews(st.session_state, price_master=master)
+    created = surface_product_identity_reviews(
+        st.session_state,
+        price_master=master,
+        platform=context.persisted_platform,
+        include_not_found=context.key is MarketKey.SHOPEE_SG,
+        enrich_resolved=context.key is MarketKey.SHOPEE_SG,
+        review_price_mismatch=context.key is MarketKey.SHOPEE_SG,
+    )
     return created
 
 
@@ -2477,15 +2525,21 @@ def _render_product_identity_resolution_form(key: str, review: dict[str, Any]) -
         if not 0 <= index < len(products):
             continue
         product = products[index]
-        evidence_rows.append(
-            {
-                "Affected item": index + 1,
-                "Seller SKU": product.get("seller_sku") or "",
-                "Product Name": product.get("product_name") or "",
-                "Variation": product.get("variation") or product.get("variation_name") or "",
-                "Product Master candidates": item.get("candidate_count"),
-            }
-        )
+        evidence = {
+            "Affected item": index + 1,
+            "Seller SKU": product.get("seller_sku") or "",
+            "Product Name": product.get("product_name") or "",
+            "Variation": product.get("variation") or product.get("variation_name") or "",
+            "Product Master candidates": item.get("candidate_count"),
+        }
+        if item.get("issue_type") == "pricing_reference_mismatch":
+            evidence["Invoice Unit Price"] = format_currency(
+                item.get("source_unit_price"), _active_invoice_currency()
+            )
+            evidence["Product Listing Price"] = format_currency(
+                item.get("reference_unit_price"), _active_invoice_currency()
+            )
+        evidence_rows.append(evidence)
     if evidence_rows:
         st.write("Original source evidence / current parsed values")
         st.dataframe(evidence_rows, hide_index=True)
@@ -2583,13 +2637,16 @@ def _render_combined_resolution_form(key: str, review: dict[str, Any]) -> None:
                 st.caption(
                     "Source subtotal: "
                     + format_currency(
-                        group.source_group_total, missing_value="Not extracted"
+                        group.source_group_total,
+                        _active_invoice_currency(),
+                        missing_value="Not extracted",
                     )
                 )
                 st.caption(
                     "Source-visible promotion amount: "
                     + format_currency(
                         group.advertised_amount,
+                        _active_invoice_currency(),
                         missing_value="Visible in the original Invoice",
                     )
                 )
@@ -2755,9 +2812,9 @@ def _formula_mismatch_summary(reason: str) -> tuple[str, str, str] | None:
     except ArithmeticError:
         return None
     return (
-        format_currency(calculated),
-        format_currency(invoice),
-        format_currency(abs(invoice - calculated)),
+        format_currency(calculated, _active_invoice_currency()),
+        format_currency(invoice, _active_invoice_currency()),
+        format_currency(abs(invoice - calculated), _active_invoice_currency()),
     )
 
 
@@ -2775,9 +2832,9 @@ def _adjustment_conflict_summary(
         return None
     expected = order_income + adjustment
     return (
-        format_currency(expected),
-        format_currency(final_amount),
-        format_currency(abs(final_amount - expected)),
+        format_currency(expected, _active_invoice_currency()),
+        format_currency(final_amount, _active_invoice_currency()),
+        format_currency(abs(final_amount - expected), _active_invoice_currency()),
     )
 
 
@@ -2874,7 +2931,7 @@ def _render_draft_product_form(
     group_labels = ["No Promotion", *[
         f"{group.label} · {', '.join(group.member_names)}"
         + (
-            f" · subtotal {format_currency(group.source_group_total)}"
+            f" · subtotal {format_currency(group.source_group_total, _active_invoice_currency())}"
             if group.source_group_total is not None
             else ""
         )
@@ -2931,9 +2988,9 @@ def _render_draft_product_form(
 
 def _apply_product_draft(key: str) -> None:
     try:
-        master, _ = load_configured_product_price_master()
+        master, _ = load_configured_product_price_master(_active_invoice_market_context())
         outcome = apply_product_draft(st.session_state, key=key, price_master=master)
-    except ProductMasterSourceError as error:
+    except (ProductMasterSourceError, MarketConfigurationUnavailable) as error:
         st.session_state[_MANUAL_REVIEW_ACTIVE_SECTION] = _MANUAL_REVIEW_ONLINE
         st.session_state[_MANUAL_REVIEW_ACTIVE_KEY] = key
         st.session_state.manual_resolution_notice = f"Product Master validation is unavailable: {error}"
@@ -2970,7 +3027,9 @@ def _render_promotion_subtotal_form(key: str, review: dict[str, Any]) -> None:
                 "Source subtotal: "
                 + (
                     format_currency(
-                        group.source_group_total, missing_value="Not extracted"
+                        group.source_group_total,
+                        _active_invoice_currency(),
+                        missing_value="Not extracted",
                     )
                 )
             )
@@ -2979,6 +3038,7 @@ def _render_promotion_subtotal_form(key: str, review: dict[str, Any]) -> None:
                 + (
                     format_currency(
                         group.advertised_amount,
+                        _active_invoice_currency(),
                         missing_value="Visible in the original Invoice",
                     )
                 )
@@ -3031,6 +3091,9 @@ def _render_reconciliation_step() -> None:
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
         if not eligibility.eligible:
             _render_blocked_invoice_destination(5)
+            return
+        if _active_invoice_market_context().key is MarketKey.SHOPEE_SG:
+            _render_shopee_sg_test_reconciliation()
             return
         created_identity_reviews = _surface_reconciliation_product_identity_reviews()
         if created_identity_reviews:
@@ -3150,6 +3213,81 @@ def _render_reconciliation_step() -> None:
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
     _render_statement_review_tables(collapsed=not allowed)
+
+
+def _render_shopee_sg_test_reconciliation() -> None:
+    """Resolve SG listing identity without opening a persistence dependency."""
+
+    st.session_state[SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY] = False
+    try:
+        master, source_label = load_configured_product_price_master(SHOPEE_SG)
+    except (ProductMasterSourceError, MarketConfigurationUnavailable) as error:
+        render_authoritative_status(
+            title="SG Product Listing unavailable",
+            message=(
+                "Shopee SG remains fail-closed. Configure the SHOPEE PRODUCT "
+                "LISTING 'shopee sg' tab before product resolution can continue."
+            ),
+            state="blocked",
+        )
+        with st.expander("View technical details", expanded=False):
+            st.code(str(error), language=None)
+        _render_back_button(3, key="shopee_sg_listing_unavailable_back")
+        return
+
+    st.session_state[SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY] = True
+    created = surface_product_identity_reviews(
+        st.session_state,
+        price_master=master,
+        platform=SHOPEE_SG.persisted_platform,
+        include_not_found=True,
+        enrich_resolved=True,
+        review_price_mismatch=True,
+    )
+    if created:
+        _return_product_identity_reviews_to_validate(created)
+        return
+
+    accepted_orders = [
+        order
+        for order in st.session_state.get("orders", [])
+        if str(order.get("platform") or "").strip() == SHOPEE_SG.persisted_platform
+        and str(order.get("status") or "").strip() == "Accepted"
+    ]
+    resolved_products = [
+        product
+        for product in st.session_state.get("products", [])
+        if str(product.get("platform") or "").strip() == SHOPEE_SG.persisted_platform
+        and product.get("nav")
+        and product.get("master_unit_price") is not None
+    ]
+    ready = bool(accepted_orders) and all(
+        product.get("nav") and product.get("master_unit_price") is not None
+        for product in st.session_state.get("products", [])
+        if str(product.get("platform") or "").strip() == SHOPEE_SG.persisted_platform
+    )
+    render_authoritative_status(
+        title="Test candidates ready" if ready else "Needs Attention",
+        message=(
+            "SG source validation and deterministic Product Listing resolution passed. "
+            "These are test candidates only; no historical database check or write was performed."
+            if ready
+            else "Resolve every SG product identity before continuing."
+        ),
+        state="ready" if ready else "blocked",
+    )
+    with st.container(horizontal=True):
+        st.metric("Accepted candidates", len(accepted_orders), border=True)
+        st.metric("Resolved product rows", len(resolved_products), border=True)
+    st.caption(f"Product Listing source: {source_label} · worksheet: shopee sg")
+    _render_next_step(
+        "Continue to review",
+        5,
+        back_step=3,
+        allowed=ready,
+        include_invoice_exit=True,
+        disabled_reason=None if ready else "Resolve every SG product identity first.",
+    )
 
 
 @st.dialog("Continue Remaining Invoices?", icon=":material/check_circle:")
@@ -3353,6 +3491,9 @@ def _render_review_and_commit_step() -> None:
     result = _current_import_result()
     readiness = result.commit_readiness
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
+        if _active_invoice_market_context().key is MarketKey.SHOPEE_SG:
+            _render_shopee_sg_test_review(result)
+            return
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
         if not eligibility.eligible:
             _render_blocked_invoice_destination(4)
@@ -3467,6 +3608,38 @@ def _render_review_and_commit_step() -> None:
             st.rerun()
         _render_statement_exit_button(key="exit_blocked_statement_commit")
         _render_source_summary(result)
+
+
+def _render_shopee_sg_test_review(result: ImportResult) -> None:
+    accepted = len(result.source_specific_details.get("orders", ()))
+    products = len(result.source_specific_details.get("products", ()))
+    manual_review = len(result.source_specific_details.get("manual_review", ()))
+    if result.commit_readiness.ready:
+        render_authoritative_status(
+            title="Accepted test candidates",
+            message=(
+                "Shopee SG PDF validation and Product Listing resolution are complete. "
+                "Permanent SG persistence is not approved for this test entry."
+            ),
+            state="ready",
+        )
+    else:
+        render_authoritative_status(
+            title="Needs Attention",
+            message="Resolve the remaining SG Manual Review records before acceptance.",
+            state="blocked",
+        )
+    with st.container(horizontal=True):
+        st.metric("Accepted candidates", accepted, border=True)
+        st.metric("Product rows", products, border=True)
+        st.metric("Manual Review", manual_review, border=True)
+    st.info(
+        "Test-mode boundary: no SG Invoice_Orders or Invoice_Items write is available, "
+        "and Shopee MY storage is never used as a fallback.",
+        icon=":material/lock:",
+    )
+    _render_back_button(4, key="shopee_sg_test_review_back")
+    _render_invoice_exit_button(key="exit_shopee_sg_test_review")
 
 
 def _render_source_summary(result: ImportResult) -> None:

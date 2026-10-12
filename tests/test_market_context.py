@@ -9,6 +9,7 @@ from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
 from src.invoice_app.services.market_context import (
+    ACTIVE_IMPORT_MARKET_KEY,
     BILLING_PLATFORM_OPTIONS,
     CROSS_PLATFORM_OPTIONS,
     LAZADA,
@@ -21,10 +22,12 @@ from src.invoice_app.services.market_context import (
     TIKTOK,
     active_import_market,
     bind_active_import_market,
+    has_active_import_batch,
     market_state_key,
     resolve_market_context,
 )
 from src.invoice_app.services.product_master_source import (
+    ProductMasterSourceError,
     ProductMasterSourceSettings,
 )
 from src.invoice_app.services.uat2_data_settings import (
@@ -164,11 +167,20 @@ def test_sg_market_capabilities_fail_closed_even_with_manually_constructed_setti
         settings.create_cross_platform_product_summary_reader()
 
 
-def test_unconfigured_sg_product_master_never_falls_back_to_my(monkeypatch, tmp_path):
+def test_sg_product_master_reuses_only_shared_google_credentials(monkeypatch, tmp_path):
     from src.invoice_app.services import product_master_source
 
     monkeypatch.setattr(product_master_source, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(
+        product_master_source, "_configured_product_master_secret_mapping", lambda: {}
+    )
+    monkeypatch.setattr(
+        product_master_source,
+        "_configured_market_product_master_secret_mapping",
+        lambda _context: {},
+    )
     monkeypatch.setenv("INV_PRODUCT_MASTER_SOURCE", "local_excel")
+    monkeypatch.setenv("INV_GOOGLE_CREDENTIALS_PATH", str(tmp_path / "shared.json"))
     for name in (
         "INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE",
         "INV_SHOPEE_SG_PRODUCT_MASTER_PATH",
@@ -178,8 +190,44 @@ def test_unconfigured_sg_product_master_never_falls_back_to_my(monkeypatch, tmp_
     ):
         monkeypatch.delenv(name, raising=False)
 
-    with pytest.raises(MarketConfigurationUnavailable, match="Shopee SG Product Master is unavailable"):
-        product_master_source.configured_product_master_source_settings(SHOPEE_SG)
+    settings = product_master_source.configured_product_master_source_settings(SHOPEE_SG)
+
+    assert settings.source == "google_sheets"
+    assert settings.google_credentials_path == tmp_path / "shared.json"
+    assert (
+        settings.google_spreadsheet_id
+        == product_master_source.SHOPEE_SG_PRODUCT_MASTER_SPREADSHEET_ID
+    )
+    assert (
+        settings.google_worksheet_name
+        == product_master_source.SHOPEE_SG_PRODUCT_MASTER_WORKSHEET
+    )
+
+
+def test_sg_product_master_without_any_google_credentials_fails_closed(
+    monkeypatch, tmp_path
+):
+    from src.invoice_app.services import product_master_source
+
+    monkeypatch.setattr(product_master_source, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(
+        product_master_source, "_configured_product_master_secret_mapping", lambda: {}
+    )
+    monkeypatch.setattr(
+        product_master_source,
+        "_configured_market_product_master_secret_mapping",
+        lambda _context: {},
+    )
+    for name in (
+        "INV_GOOGLE_CREDENTIALS_PATH",
+        "INV_SHOPEE_SG_GOOGLE_CREDENTIALS_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = product_master_source.configured_product_master_source_settings(SHOPEE_SG)
+
+    with pytest.raises(ProductMasterSourceError, match="configuration is incomplete"):
+        settings.create_source()
 
 
 @pytest.mark.parametrize("context", (LAZADA, TIKTOK))
@@ -204,6 +252,18 @@ def test_sg_product_master_rejects_a_non_tab_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", "local_excel")
 
     with pytest.raises(MarketConfigurationUnavailable, match="Google Sheets tab configuration"):
+        product_master_source.configured_product_master_source_settings(SHOPEE_SG)
+
+
+def test_sg_product_master_requires_exact_shopee_sg_tab(monkeypatch, tmp_path):
+    from src.invoice_app.services import product_master_source
+
+    monkeypatch.setattr(product_master_source, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setenv("INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE", "google_sheets")
+    monkeypatch.setenv("INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID", "sg-sheet")
+    monkeypatch.setenv("INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME", "SG Product Master")
+
+    with pytest.raises(MarketConfigurationUnavailable, match="exact 'shopee sg' worksheet"):
         product_master_source.configured_product_master_source_settings(SHOPEE_SG)
 
 
@@ -244,11 +304,19 @@ def test_market_scoped_state_keys_and_active_batch_binding_are_isolated():
     assert market_state_key(SHOPEE_MY, "data_import", "batch_id") == "data_import.shopee_my.batch_id"
     assert market_state_key(SHOPEE_SG, "data_import", "batch_id") == "data_import.shopee_sg.batch_id"
 
-    state: dict[str, object] = {}
+    state: dict[str, object] = {"batch_id": "active-batch"}
     assert bind_active_import_market(state, SHOPEE_MY) is SHOPEE_MY
     assert active_import_market(state) is SHOPEE_MY
     with pytest.raises(MarketStateIsolationError, match="another market"):
         bind_active_import_market(state, SHOPEE_SG)
+
+
+def test_stale_market_binding_without_a_batch_can_be_rebound():
+    state: dict[str, object] = {ACTIVE_IMPORT_MARKET_KEY: SHOPEE_MY.key.value}
+
+    assert has_active_import_batch(state) is False
+    assert bind_active_import_market(state, SHOPEE_SG) is SHOPEE_SG
+    assert active_import_market(state) is SHOPEE_SG
 
 
 def test_statement_writer_rejects_plan_for_another_persisted_platform_before_io():

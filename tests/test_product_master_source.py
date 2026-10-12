@@ -74,6 +74,100 @@ def test_google_sheet_rows_become_canonical_records_with_text_skus(tmp_path):
     assert record.usoft_product_description == "USOFT Fresh Oil 500ml"
 
 
+def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_path):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        [
+            "Product Name",
+            "Variation Name",
+            "Parent SKU",
+            "SKU",
+            "NAV CODE",
+            "Price",
+            "Price SGD",
+        ],
+        ["SG Product", "One", "PARENT-1", "SKU-1", "NAV-1", "99.00", "8.50"],
+    ]
+    source = _google_source(tmp_path, rows)
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=source.credentials_path,
+        spreadsheet_id=source.spreadsheet_id,
+        worksheet_name="shopee sg",
+        values_fetcher=source.values_fetcher,
+        unit_price_headers=("price sgd",),
+    )
+
+    loaded = source.load()
+
+    assert loaded.records[0].unit_selling_price == Decimal("8.50")
+    assert loaded.metadata.sheet_name == "shopee sg"
+
+
+def test_sg_google_sheet_rejects_invalid_price_sgd_rows(tmp_path):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        [
+            "Product Name",
+            "Variation Name",
+            "Parent SKU",
+            "SKU",
+            "NAV CODE",
+            "Price SGD",
+        ],
+        ["SG Product", "One", "PARENT-1", "SKU-1", "NAV-1", "bad price"],
+    ]
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=tmp_path / "service-account.json",
+        spreadsheet_id="synthetic-sheet-id",
+        worksheet_name="shopee sg",
+        values_fetcher=lambda *_: rows,
+        unit_price_headers=("price sgd",),
+        reject_invalid_prices=True,
+    )
+    source.credentials_path.write_text("unused by fake fetcher", encoding="utf-8")
+
+    with pytest.raises(ProductMasterSourceError, match="invalid Price SGD"):
+        source.load()
+
+
+def test_sg_google_sheet_missing_tab_fails_closed(tmp_path):
+    def missing_tab(*_args):
+        raise RuntimeError("Unable to parse range: shopee sg")
+
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=tmp_path / "service-account.json",
+        spreadsheet_id="synthetic-sheet-id",
+        worksheet_name="shopee sg",
+        values_fetcher=missing_tab,
+        unit_price_headers=("price sgd",),
+        reject_invalid_prices=True,
+    )
+    source.credentials_path.write_text("unused by fake fetcher", encoding="utf-8")
+
+    with pytest.raises(ProductMasterSourceError, match="load failed"):
+        source.load()
+
+
+def test_sg_google_sheet_missing_required_header_fails_closed(tmp_path):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        ["Product Name", "Parent SKU", "SKU", "NAV CODE", "Price SGD"],
+        ["SG Product", "PARENT-1", "SKU-1", "NAV-1", "8.50"],
+    ]
+    source = GoogleSheetsProductMasterSource(
+        credentials_path=tmp_path / "service-account.json",
+        spreadsheet_id="synthetic-sheet-id",
+        worksheet_name="shopee sg",
+        values_fetcher=lambda *_: rows,
+        unit_price_headers=("price sgd",),
+        reject_invalid_prices=True,
+    )
+    source.credentials_path.write_text("unused by fake fetcher", encoding="utf-8")
+
+    with pytest.raises(ProductMasterSourceError, match="required headers"):
+        source.load()
+
+
 def test_google_and_excel_sources_produce_equivalent_canonical_records(tmp_path):
     rows = _sheet_rows()
     workbook_path = tmp_path / "product_listing.xlsx"

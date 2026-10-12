@@ -14,18 +14,22 @@ from ..config import ARCHIVE_DIR
 from ..detector import detect_platform
 from ..pdf_document import PdfDocument, read_pdf_document, read_pdf_document_selective_words
 from ..parsers.lazada_parser import LazadaParser
-from ..parsers.shopee_parser import ShopeeParser
+from ..parsers.shopee_parser import ShopeeParser, ShopeeSGParser
+from ..parsers.shopee_sg_adapter import has_shopee_sg_source_evidence
 from ..parsers.zenxin_parser import ZenxinParser
 from ..utils.normalize import parse_decimal, parse_quantity
 from ..utils.order_dates import has_missing_source_date, shopee_order_date_from_id
+from .market_context import MarketContext, MarketKey, resolve_market_context
 
 PARSER_MAP = {
     "Shopee": ShopeeParser(),
     "Lazada": LazadaParser(),
     "ZENXIN": ZenxinParser(),
 }
+SHOPEE_SG_PARSER = ShopeeSGParser()
 
-PLATFORMS = ("Shopee", "Lazada", "ZENXIN")
+PLATFORMS = ("Shopee", "Shopee SG", "Lazada", "ZENXIN")
+SHOPEE_PLATFORMS = frozenset({"Shopee", "Shopee SG"})
 MISSING_VALUE_PLACEHOLDER = "N/A"
 _CANONICAL_PLATFORM_BY_NAME = {platform.casefold(): platform for platform in PLATFORMS}
 
@@ -250,8 +254,14 @@ PLATFORM_PRODUCT_FIELDS = {
     ],
 }
 
+# SG reuses the normalized Shopee Invoice display contract while retaining a
+# distinct platform identity throughout the active batch.
+PLATFORM_ORDER_FIELDS["Shopee SG"] = list(PLATFORM_ORDER_FIELDS["Shopee"])
+PLATFORM_PRODUCT_FIELDS["Shopee SG"] = list(PLATFORM_PRODUCT_FIELDS["Shopee"])
+
 PLATFORM_ORDER_PLACEHOLDER_FIELDS = {
     "Shopee": tuple(PLATFORM_ORDER_FIELDS["Shopee"]),
+    "Shopee SG": tuple(PLATFORM_ORDER_FIELDS["Shopee SG"]),
     "Lazada": (
         *PLATFORM_ORDER_FIELDS["Lazada"],
         "gross_sales",
@@ -273,6 +283,7 @@ PLATFORM_ORDER_PLACEHOLDER_FIELDS = {
 
 PLATFORM_PRODUCT_PLACEHOLDER_FIELDS = {
     "Shopee": tuple(PLATFORM_PRODUCT_FIELDS["Shopee"]),
+    "Shopee SG": tuple(PLATFORM_PRODUCT_FIELDS["Shopee SG"]),
     "Lazada": (*PLATFORM_PRODUCT_FIELDS["Lazada"], "unit_price", "line_total"),
     "ZENXIN": (*PLATFORM_PRODUCT_FIELDS["ZENXIN"], "line_total"),
 }
@@ -576,6 +587,7 @@ def process_pdf_file_with_outcome(
     *,
     expected_platform: str | None = None,
     selected_platform_label: str | None = None,
+    market_context: MarketContext | MarketKey | str | None = None,
 ) -> PdfProcessingResult:
     document = read_pdf_document_selective_words(
         pdf_path,
@@ -588,6 +600,7 @@ def process_pdf_file_with_outcome(
         document=document,
         expected_platform=expected_platform,
         selected_platform_label=selected_platform_label,
+        market_context=market_context,
     )
 
 
@@ -598,6 +611,7 @@ def process_pdf_text(
     *,
     expected_platform: str | None = None,
     selected_platform_label: str | None = None,
+    market_context: MarketContext | MarketKey | str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     result = process_pdf_text_with_outcome(
         source_pdf,
@@ -605,6 +619,7 @@ def process_pdf_text(
         batch_id,
         expected_platform=expected_platform,
         selected_platform_label=selected_platform_label,
+        market_context=market_context,
     )
     return result.orders, result.products, result.reviews
 
@@ -616,6 +631,7 @@ def process_pdf_text_with_outcome(
     *,
     expected_platform: str | None = None,
     selected_platform_label: str | None = None,
+    market_context: MarketContext | MarketKey | str | None = None,
 ) -> PdfProcessingResult:
     return _process_pdf_content_with_outcome(
         source_pdf,
@@ -624,6 +640,7 @@ def process_pdf_text_with_outcome(
         document=None,
         expected_platform=expected_platform,
         selected_platform_label=selected_platform_label,
+        market_context=market_context,
     )
 
 
@@ -634,6 +651,7 @@ def _process_pdf_content_with_outcome(
     document: PdfDocument | None,
     expected_platform: str | None = None,
     selected_platform_label: str | None = None,
+    market_context: MarketContext | MarketKey | str | None = None,
 ) -> PdfProcessingResult:
     platform = detect_platform(text)
     if platform is None:
@@ -670,7 +688,32 @@ def _process_pdf_content_with_outcome(
             processing_errors=[],
         )
 
-    parser = PARSER_MAP.get(platform)
+    resolved_market = (
+        resolve_market_context(market_context) if market_context is not None else None
+    )
+    is_sg_source = has_shopee_sg_source_evidence(text)
+    if resolved_market is not None and resolved_market.key is MarketKey.SHOPEE_SG:
+        if platform != "Shopee" or not is_sg_source:
+            return _market_source_mismatch(
+                source_pdf,
+                selected_platform_label or resolved_market.display_name,
+                (
+                    "Shopee source without audited seller.shopee.sg evidence"
+                    if platform == "Shopee"
+                    else platform
+                ),
+            )
+        parser = SHOPEE_SG_PARSER
+    elif resolved_market is not None and resolved_market.key is MarketKey.SHOPEE_MY:
+        if platform == "Shopee" and is_sg_source:
+            return _market_source_mismatch(
+                source_pdf,
+                selected_platform_label or resolved_market.display_name,
+                "Shopee SG",
+            )
+        parser = PARSER_MAP.get(platform)
+    else:
+        parser = PARSER_MAP.get(platform)
     if parser is None:
         return PdfProcessingResult(
             orders=[],
@@ -698,6 +741,28 @@ def _process_pdf_content_with_outcome(
         products=products,
         reviews=reviews,
         unsupported_files=[],
+        processing_errors=[],
+    )
+
+
+def _market_source_mismatch(
+    source_pdf: str, selected_platform: str, detected_platform: str
+) -> PdfProcessingResult:
+    return PdfProcessingResult(
+        orders=[],
+        products=[],
+        reviews=[],
+        unsupported_files=[
+            create_file_outcome_record(
+                source_pdf=source_pdf,
+                status="PLATFORM MISMATCH",
+                message=(
+                    f"Selected platform: {selected_platform}. Detected platform: "
+                    f"{detected_platform}. Upload the selected market's source or go "
+                    "Back and choose the matching platform."
+                ),
+            )
+        ],
         processing_errors=[],
     )
 
@@ -756,7 +821,9 @@ def apply_batch_rules(
         sku = str(product.get("seller_sku", "")).strip()
         product_name = str(product.get("product_name", "")).strip()
         quantity = parse_quantity(product.get("quantity"))
-        sku_missing_in_source = platform == "Shopee" and bool(product.get("sku_missing_in_source"))
+        sku_missing_in_source = platform in SHOPEE_PLATFORMS and bool(
+            product.get("sku_missing_in_source")
+        )
         if (not sku and not sku_missing_in_source) or not product_name or quantity <= 0:
             reviews.append(
                 {
@@ -777,7 +844,7 @@ def apply_batch_rules(
         # Combining same-SKU rows here can attach a promotion to an otherwise
         # normal row and make its actual selling value unavailable downstream.
         # Product Summary still aggregates after row-level pricing.
-        if platform == "Shopee":
+        if platform in SHOPEE_PLATFORMS:
             accepted_shopee_products.append(_normalize_product_record(normalized_product))
             continue
 
@@ -805,7 +872,9 @@ def apply_batch_rules(
         key=lambda row: (
             str(row.get("platform", "")),
             str(row.get("order_id", "")),
-            "" if str(row.get("platform", "")) == "Shopee" else str(row.get("product_name", "")),
+            ""
+            if str(row.get("platform", "")) in SHOPEE_PLATFORMS
+            else str(row.get("product_name", "")),
         ),
     )
     accepted_orders = sorted(
@@ -934,7 +1003,7 @@ def _normalize_order_record(row: dict[str, Any]) -> dict[str, Any]:
         normalized.setdefault(field, "")
     _sync_order_aliases(normalized)
     if (
-        str(normalized.get("platform", "")).strip() == "Shopee"
+        str(normalized.get("platform", "")).strip() in SHOPEE_PLATFORMS
         and has_missing_source_date(normalized.get("order_created_date"))
     ):
         derived_date = shopee_order_date_from_id(normalized.get("order_id"))
@@ -998,7 +1067,7 @@ def _normalize_product_record(row: dict[str, Any]) -> dict[str, Any]:
     _sync_product_aliases(normalized)
     _apply_platform_placeholders(normalized, PLATFORM_PRODUCT_PLACEHOLDER_FIELDS)
     if (
-        str(normalized.get("platform") or "").strip() == "Shopee"
+        str(normalized.get("platform") or "").strip() in SHOPEE_PLATFORMS
         and bool(normalized.get("sku_missing_in_source"))
         and str(row.get("seller_sku") or "").strip() in {"", MISSING_VALUE_PLACEHOLDER}
     ):
@@ -1046,7 +1115,7 @@ def _normalize_review_payload(review: dict[str, Any]) -> None:
 
 def _sync_order_aliases(row: dict[str, Any]) -> None:
     platform = str(row.get("platform", "")).strip()
-    if platform == "Shopee":
+    if platform in SHOPEE_PLATFORMS:
         _copy_if_blank(row, "order_created_date", "invoice_date")
         _copy_if_blank(row, "invoice_date", "order_created_date")
         _copy_if_blank(row, "merchandise_subtotal", "gross_sales")
@@ -1091,7 +1160,7 @@ def _sync_order_aliases(row: dict[str, Any]) -> None:
 
 def _sync_product_aliases(row: dict[str, Any]) -> None:
     platform = str(row.get("platform", "")).strip()
-    if platform == "Shopee":
+    if platform in SHOPEE_PLATFORMS:
         if str(row.get("line_total", "")).strip() != "":
             row["line_subtotal"] = row["line_total"]
         _copy_if_blank(row, "line_subtotal", "line_total")

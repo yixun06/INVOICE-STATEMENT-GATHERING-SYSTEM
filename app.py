@@ -19,6 +19,7 @@ from src.invoice_app.services.product_master_source import (
     configured_product_master_source_settings,
     load_configured_product_price_master,
 )
+from src.invoice_app.services.market_context import MarketConfigurationUnavailable
 from src.invoice_app.utils.order_dates import has_missing_source_date, shopee_order_date_from_id
 from src.invoice_app.utils.monetary import format_currency, streamlit_currency_format
 from src.invoice_app.services.analytics import (
@@ -71,6 +72,7 @@ from src.invoice_app.services.workflow_navigation import (
     request_navigation,
 )
 from src.invoice_app.services.data_import_state import has_unfinished_session_work
+from src.invoice_app.services.market_context import has_active_import_batch
 from src.invoice_app.services.exporter import (
     export_all_products_report,
     export_platform_report,
@@ -82,7 +84,9 @@ from src.invoice_app.ui.data_import import (
     DataImportPlatform,
     POST_DISCARD_PLATFORM_SWITCH_KEY,
     PLATFORM_ORDERS,
+    SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY,
     SHOPEE_WEEKLY_STATEMENT,
+    active_data_import_platform,
     clear_invoice_upload_attempt,
     bind_active_import_platform,
     initialize_data_import_state,
@@ -422,6 +426,7 @@ def dataframe_column_config(
     columns: list[str],
     column_labels: dict[str, str] | None = None,
     platform_name: str | None = None,
+    currency: str = "MYR",
 ) -> dict[str, Any]:
     config: dict[str, Any] = {}
     for column in columns:
@@ -437,7 +442,7 @@ def dataframe_column_config(
             if column not in {"income_type", "payment_method", "voucher_code", "voucher_funded_by", "voucher_type"} and not col_lower.endswith("quantity") and not col_lower.endswith("count"):
                 config[label] = st.column_config.NumberColumn(
                     label,
-                    format=streamlit_currency_format(),
+                    format=streamlit_currency_format(currency),
                     width="small",
                     alignment="right",
                 )
@@ -465,6 +470,7 @@ def show_data_table(
     available_columns: list[str] | None = None,
     height: int = 360,
     platform_name: str | None = None,
+    currency: str = "MYR",
 ) -> None:
     table_columns = available_columns or columns
     labels = column_labels or FIELD_LABELS
@@ -472,7 +478,12 @@ def show_data_table(
         display_frame(dataframe, table_columns, column_labels, platform_name),
         hide_index=True,
         column_order=[labels.get(column, column) for column in columns],
-        column_config=dataframe_column_config(table_columns, column_labels, platform_name),
+        column_config=dataframe_column_config(
+            table_columns,
+            column_labels,
+            platform_name,
+            currency,
+        ),
         key=key,
         height=height,
     )
@@ -493,10 +504,10 @@ def show_table_section_heading(title: str, description: str) -> None:
         st.caption(description)
 
 
-def show_manual_review_metric(review_count: int, scope: str) -> None:
+def show_manual_review_metric(review_count: int | str, scope: str, *, help: str | None = None) -> None:
     tone = "warning" if review_count else "neutral"
     with st.container(key=f"manual-review-{tone}-{scope}", gap=None):
-        st.metric("Manual Review", review_count, border=True)
+        st.metric("Manual Review", review_count, border=True, help=help)
 
 
 def show_login() -> None:
@@ -826,8 +837,10 @@ def show_sidebar(pdf_count: int) -> str:
         ):
             clear_product_master_source_cache()
             try:
-                price_master, source_label = load_configured_product_price_master()
-            except ProductMasterSourceError as error:
+                active_platform = active_data_import_platform(st.session_state)
+                context = active_platform.market_context if active_platform else None
+                price_master, source_label = load_configured_product_price_master(context)
+            except (ProductMasterSourceError, MarketConfigurationUnavailable) as error:
                 st.session_state.product_master_refresh_error = (
                     f"Product Master refresh failed: {error}"
                 )
@@ -844,8 +857,7 @@ def show_sidebar(pdf_count: int) -> str:
             st.rerun()
 
         st.html('<p class="sidebar-section-label">Current batch</p>')
-        batch_id = st.session_state.get("batch_id")
-        if batch_id:
+        if has_active_import_batch(st.session_state):
             st.html(f'<div class="sidebar-batch-summary"><span class="material-symbols-rounded">picture_as_pdf</span>{pdf_count} PDFs processed</div>')
         else:
             st.html('<div class="sidebar-batch-summary">No active batch</div>')
@@ -938,6 +950,12 @@ def show_current_batch_validation_summary() -> None:
     reviews = st.session_state.get("reviews", [])
     dashboard = compute_current_batch_validation_dashboard(orders, products)
     manual_review_count = sum(is_manual_review_record(review) for review in reviews)
+    active_platform = active_data_import_platform(st.session_state)
+    currency = (
+        active_platform.market_context.currency_code
+        if active_platform and active_platform.market_context
+        else "MYR"
+    )
 
     st.caption(
         "Accepted orders only. Missing Order Income or Final Amount values are "
@@ -947,15 +965,45 @@ def show_current_batch_validation_summary() -> None:
         st.metric("Orders", int(dashboard["orders"]), border=True)
         st.metric("Products", int(dashboard["products"]), border=True)
         st.metric("Quantity", int(dashboard["quantity"]), border=True)
-        st.metric("Order Income", format_currency(dashboard["order_income"]), border=True)
-        st.metric("Final Amount", format_currency(dashboard["final_amount"]), border=True)
-        show_manual_review_metric(manual_review_count, "data-import-current-batch")
+        st.metric(
+            "Order Income",
+            format_currency(dashboard["order_income"], currency),
+            border=True,
+        )
+        st.metric(
+            "Final Amount",
+            format_currency(dashboard["final_amount"], currency),
+            border=True,
+        )
+        if (
+            active_platform
+            and active_platform.key == "shopee_sg"
+            and not st.session_state.get(
+                SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY, False
+            )
+        ):
+            show_manual_review_metric(
+                "Pending",
+                "data-import-current-batch",
+                help=(
+                    "SG Product Listing reconciliation has not run yet. "
+                    "A final Manual Review count is available after Reconcile."
+                ),
+            )
+        else:
+            show_manual_review_metric(manual_review_count, "data-import-current-batch")
 
 
 def show_current_batch_validation_data() -> None:
     """Render filterable accepted-order business detail without summary duplication."""
     orders = st.session_state.get("orders", [])
     products = st.session_state.get("products", [])
+    active_platform = active_data_import_platform(st.session_state)
+    currency = (
+        active_platform.market_context.currency_code
+        if active_platform and active_platform.market_context
+        else "MYR"
+    )
     order_columns = [
         "platform",
         "order_id",
@@ -1029,6 +1077,7 @@ def show_current_batch_validation_data() -> None:
             key="data_import_current_batch_order_level_table",
             available_columns=available_order_columns,
             height=320,
+            currency=currency,
         )
     else:
         st.caption("No accepted orders are available in the current batch.")
@@ -1098,6 +1147,8 @@ def show_upload_panel(platform: DataImportPlatform) -> list[Any] | None:
 
 def process_uploads(uploaded_files: list[Any], platform: DataImportPlatform) -> None:
     bind_active_import_platform(st.session_state, platform)
+    if platform.key == "shopee_sg":
+        st.session_state[SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY] = False
     batch_id = st.session_state.get("batch_id") or create_batch_id()
     st.session_state.batch_id = batch_id
     existing_orders = st.session_state.get("orders", [])
@@ -1141,6 +1192,7 @@ def process_uploads(uploaded_files: list[Any], platform: DataImportPlatform) -> 
                         batch_id,
                         expected_platform=platform.expected_platform,
                         selected_platform_label=platform.display_name,
+                        market_context=platform.market_context,
                     )
                 except Exception as exc:
                     processing_errors.append(

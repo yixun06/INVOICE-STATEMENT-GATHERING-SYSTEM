@@ -4,7 +4,12 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.batch_service import process_pdf_text_with_outcome
-from src.invoice_app.services.market_context import ACTIVE_IMPORT_MARKET_KEY
+from src.invoice_app.services.market_context import (
+    ACTIVE_IMPORT_MARKET_KEY,
+    MarketStateIsolationError,
+    has_active_import_batch,
+)
+from src.invoice_app.services import product_master_source
 from src.invoice_app.ui import data_import
 
 
@@ -146,7 +151,6 @@ def test_shopee_cancelled_order_v1_real_pdf_completes_data_import_ui(tmp_path, m
 @pytest.mark.parametrize(
     ("platform_name", "source", "message"),
     (
-        ("Shopee SG", "Invoice Import", "not available for Shopee SG yet"),
         ("Lazada", "Weekly Statement", "not available for Lazada yet"),
         ("TikTok", "Monthly Statement", "not available for TikTok yet"),
     ),
@@ -162,6 +166,205 @@ def test_unsupported_platform_source_stays_in_shared_shell_without_upload(
     assert next(button for button in app.button if button.label == "Continue to upload").disabled
     assert app.file_uploader == []
     assert app.session_state.filtered_state.get("data_import_step") == 1
+
+
+def test_shopee_sg_invoice_import_opens_the_shared_pdf_zip_upload(tmp_path, monkeypatch):
+    app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
+
+    assert _source_selector(app).value == "Invoice Import"
+    continue_button = next(
+        button for button in app.button if button.label == "Continue to upload"
+    )
+    assert continue_button.disabled is False
+
+    continue_button.click().run(timeout=20)
+
+    assert app.exception == []
+    assert len(app.file_uploader) == 1
+
+
+@pytest.mark.parametrize(
+    ("platform_key", "market_key", "persisted_platform", "currency_format"),
+    (
+        ("shopee_my", "shopee_my", "Shopee", "RM %,.2f"),
+        ("shopee_sg", "shopee_sg", "Shopee SG", "S$ %,.2f"),
+    ),
+)
+def test_current_batch_money_uses_the_selected_market_currency(
+    tmp_path,
+    monkeypatch,
+    platform_key,
+    market_key,
+    persisted_platform,
+    currency_format,
+):
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "currency-test-batch",
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: platform_key,
+        ACTIVE_IMPORT_MARKET_KEY: market_key,
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: False,
+        "data_import_step": 3,
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "invoice_upload_attempt": "resolved",
+        "orders": [
+            {
+                "platform": persisted_platform,
+                "order_id": "CURRENCY-1",
+                "status": "Accepted",
+                "order_income": -123.45,
+                "final_amount": 1000.50,
+                "source_pdf": "currency.pdf",
+            }
+        ],
+        "products": [
+            {
+                "platform": persisted_platform,
+                "order_id": "CURRENCY-1",
+                "product_name": "Currency product",
+                "quantity": 1,
+                "source_pdf": "currency.pdf",
+            }
+        ],
+        "reviews": [],
+        "upload_result_summary": {
+            "pdfs_processed": 1,
+            "orders_imported": 1,
+            "manual_reviews": 0,
+            "duplicate_orders": 0,
+            "unsupported_files": 0,
+            "processing_errors": 0,
+        },
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+
+    app.run(timeout=20)
+
+    symbol = "S$" if platform_key == "shopee_sg" else "RM"
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert app.exception == []
+    assert metrics["Order Income"] == f"{symbol} -123.45"
+    assert metrics["Final Amount"] == f"{symbol} 1,000.50"
+    assert f'"format": "{currency_format}"' in app.dataframe[-1].proto.columns
+
+
+def test_sg_manual_review_metric_is_pending_until_product_listing_reconcile(
+    tmp_path, monkeypatch
+):
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "sg-pending-batch",
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: "shopee_sg",
+        ACTIVE_IMPORT_MARKET_KEY: "shopee_sg",
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: False,
+        "data_import_step": 3,
+        "import_source_type": data_import.PLATFORM_ORDERS,
+        "invoice_upload_attempt": "resolved",
+        "orders": [],
+        "products": [],
+        "reviews": [],
+        "upload_result_summary": {"pdfs_processed": 1},
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+
+    app.run(timeout=20)
+
+    manual_review = next(metric for metric in app.metric if metric.label == "Manual Review")
+    assert app.exception == []
+    assert manual_review.value == "Pending"
+
+    app.session_state[data_import.SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY] = True
+    app.run(timeout=20)
+
+    manual_review = next(metric for metric in app.metric if metric.label == "Manual Review")
+    assert app.exception == []
+    assert manual_review.value == "0"
+
+
+def test_sg_manual_review_money_uses_sgd_including_negative_values(monkeypatch):
+    monkeypatch.setattr(data_import, "_active_invoice_currency", lambda: "SGD")
+
+    summary = data_import._formula_mismatch_summary(
+        "seller components total -123.45, but Order Income is 1000.50"
+    )
+
+    assert summary == ("S$ -123.45", "S$ 1,000.50", "S$ 1,123.95")
+
+
+def test_shopee_sg_review_is_test_only_without_commit_control(tmp_path, monkeypatch):
+    app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
+    next(button for button in app.button if button.label == "Continue to upload").click().run(
+        timeout=20
+    )
+    app.session_state["data_import_step"] = 5
+    app.session_state["orders"] = [
+        {
+            "platform": "Shopee SG",
+            "order_id": "SG-TEST-1",
+            "source_pdf": "sg.pdf",
+            "status": "Accepted",
+        }
+    ]
+    app.session_state["products"] = []
+    app.session_state["reviews"] = []
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any("no SG Invoice_Orders or Invoice_Items write" in item.value for item in app.info)
+    assert not any("Commit Accepted" in button.label for button in app.button)
+
+
+def test_shopee_sg_reconcile_fails_closed_when_google_listing_is_unconfigured(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(product_master_source, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(
+        product_master_source, "_configured_product_master_secret_mapping", lambda: {}
+    )
+    monkeypatch.setattr(
+        product_master_source,
+        "_configured_market_product_master_secret_mapping",
+        lambda _context: {},
+    )
+    for name in (
+        "INV_SHOPEE_SG_PRODUCT_MASTER_SOURCE",
+        "INV_SHOPEE_SG_PRODUCT_MASTER_PATH",
+        "INV_SHOPEE_SG_GOOGLE_CREDENTIALS_PATH",
+        "INV_SHOPEE_SG_GOOGLE_SPREADSHEET_ID",
+        "INV_SHOPEE_SG_GOOGLE_WORKSHEET_NAME",
+        "INV_GOOGLE_CREDENTIALS_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    product_master_source.clear_product_master_source_cache()
+    app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
+    next(button for button in app.button if button.label == "Continue to upload").click().run(
+        timeout=20
+    )
+    app.session_state["data_import_step"] = 4
+    app.session_state["invoice_upload_attempt"] = "resolved"
+    app.session_state["orders"] = [
+        {
+            "platform": "Shopee SG",
+            "order_id": "SG-TEST-1",
+            "source_pdf": "sg.pdf",
+            "status": "Accepted",
+        }
+    ]
+    app.session_state["products"] = []
+    app.session_state["reviews"] = []
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any("SG Product Listing unavailable" in item.value for item in app.error)
+    assert not any("Commit Accepted" in button.label for button in app.button)
 
 
 @pytest.mark.parametrize(
@@ -280,6 +483,72 @@ def test_active_batch_platform_switch_renders_controlled_conflict(
     )
     assert state["batch_id"] == "active-batch"
     assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == current_platform
+
+
+@pytest.mark.parametrize(
+    ("current_platform", "current_market", "target_platform"),
+    (
+        ("shopee_my", "shopee_my", "Shopee SG"),
+        ("shopee_sg", "shopee_sg", "Shopee MY"),
+    ),
+)
+def test_stale_market_binding_without_batch_allows_cross_market_entry(
+    tmp_path, monkeypatch, current_platform, current_market, target_platform
+):
+    """The sidebar and switch guard share batch_id-only active-batch semantics."""
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: current_platform,
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: True,
+        ACTIVE_IMPORT_MARKET_KEY: current_market,
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+    app.run(timeout=20)
+
+    assert has_active_import_batch(app.session_state.filtered_state) is False
+    sidebar_source = APP_PATH.read_text(encoding="utf-8")
+    sidebar_start = sidebar_source.index('st.html(\'<p class="sidebar-section-label">Current batch')
+    sidebar_end = sidebar_source.index('if st.button("Discard current batch"', sidebar_start)
+    assert "has_active_import_batch(st.session_state)" in sidebar_source[sidebar_start:sidebar_end]
+
+    next(button for button in app.button if button.label == f"Enter {target_platform}").click().run(
+        timeout=20
+    )
+
+    state = app.session_state.filtered_state
+    target = next(
+        platform
+        for platform in data_import.DATA_IMPORT_PLATFORMS
+        if platform.display_name == target_platform
+    )
+    assert app.exception == []
+    assert any(
+        target_platform in title.value and "Data Import" in title.value
+        for title in app.title
+    )
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == target.key
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == target.market_context.key.value
+
+
+def test_market_isolation_error_is_translated_at_platform_chooser_boundary(tmp_path, monkeypatch):
+    def raise_isolation_error(*_args, **_kwargs):
+        raise MarketStateIsolationError("synthetic chooser conflict")
+
+    monkeypatch.setattr(data_import, "bind_active_import_platform", raise_isolation_error)
+    app = _data_import_app(tmp_path, monkeypatch)
+
+    next(button for button in app.button if button.label == "Enter Shopee SG").click().run(
+        timeout=20
+    )
+
+    assert app.exception == []
+    assert any(
+        "An import batch is still active" in item.value
+        for item in app.warning
+    )
 
 
 def test_my_to_sg_market_bound_switch_does_not_bind_target_before_discard(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@ from .shopee_extractor import SHOPEE_ORDER_STATUSES, extract_shopee_data
 from .shopee_mapper import map_shopee_records, map_shopee_review_payloads
 from .shopee_product_parser import parse_positioned_products
 from .shopee_review_policy import find_shopee_review_issue, source_incomplete_evidence
+from .shopee_sg_adapter import normalize_shopee_sg_document, normalize_shopee_sg_text
 
 
 class ShopeeParser(BaseParser):
@@ -47,14 +48,18 @@ class ShopeeParser(BaseParser):
         *,
         source_incomplete_evidence: str | None = None,
         document: PdfDocument | None = None,
+        allow_missing_source_sku: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         extracted = extract_shopee_data(text, source_pdf, positioned_items, document=document)
         review_issue = find_shopee_review_issue(
             extracted,
             source_incomplete_evidence=source_incomplete_evidence,
+            allow_missing_source_sku=allow_missing_source_sku,
         )
         if review_issue:
-            order_payload, product_payloads = map_shopee_review_payloads(extracted, batch_id)
+            order_payload, product_payloads = map_shopee_review_payloads(
+                extracted, batch_id, platform=self.platform
+            )
             review = self.create_review(
                 batch_id,
                 source_pdf,
@@ -68,5 +73,45 @@ class ShopeeParser(BaseParser):
             )
             return [], [], [review]
 
-        order, products = map_shopee_records(extracted, batch_id)
+        order, products = map_shopee_records(
+            extracted, batch_id, platform=self.platform
+        )
         return [order], products, []
+
+
+class ShopeeSGParser(ShopeeParser):
+    """SG source adapter over the proven Shopee parsing/validation core."""
+
+    platform = "Shopee SG"
+
+    def parse(
+        self,
+        text: str,
+        source_pdf: str,
+        batch_id: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        return self._parse(
+            normalize_shopee_sg_text(text),
+            source_pdf,
+            batch_id,
+            positioned_items=[],
+            allow_missing_source_sku=True,
+        )
+
+    def parse_document(
+        self,
+        document: PdfDocument,
+        source_pdf: str,
+        batch_id: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        normalized = normalize_shopee_sg_document(document)
+        positioned_items = parse_positioned_products(normalized)
+        return self._parse(
+            normalized.text,
+            source_pdf,
+            batch_id,
+            positioned_items,
+            source_incomplete_evidence=source_incomplete_evidence(normalized),
+            document=normalized,
+            allow_missing_source_sku=True,
+        )

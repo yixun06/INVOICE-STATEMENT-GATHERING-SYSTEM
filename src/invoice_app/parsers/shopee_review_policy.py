@@ -51,6 +51,7 @@ def find_shopee_review_issue(
     data: ShopeeExtractedData,
     *,
     source_incomplete_evidence: str | None = None,
+    allow_missing_source_sku: bool = False,
 ) -> ShopeeReviewIssue | None:
     if data.is_courier_only:
         return ShopeeReviewIssue(
@@ -68,7 +69,9 @@ def find_shopee_review_issue(
         )
 
     product_items = list(data.product_items)
-    product_anchor_count = count_product_anchor_items(product_items, require_sku=True)
+    product_anchor_count = count_product_anchor_items(
+        product_items, require_sku=not allow_missing_source_sku
+    )
     if product_anchor_count == 0:
         return ShopeeReviewIssue(
             order_id=data.order_id,
@@ -94,7 +97,7 @@ def find_shopee_review_issue(
         if bool(item.get("sku_missing_in_source"))
         and not str(item.get("seller_sku") or "").strip()
     ]
-    if source_missing_sku:
+    if source_missing_sku and not allow_missing_source_sku:
         names = ", ".join(
             str(item.get("product_name") or "Product").strip()
             for item in source_missing_sku
@@ -115,7 +118,9 @@ def find_shopee_review_issue(
             reason=promotion_evidence_error,
             reason_code=INCOMPLETE_PROMOTION_EVIDENCE,
         )
-    validation_errors = validate_product_items(product_items, require_sku=True)
+    validation_errors = validate_product_items(
+        product_items, require_sku=not allow_missing_source_sku
+    )
     if validation_errors:
         return ShopeeReviewIssue(
             order_id=data.order_id,
