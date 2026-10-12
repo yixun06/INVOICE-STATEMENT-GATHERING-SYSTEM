@@ -77,10 +77,7 @@ no quantity-match claim is made.
    streamlit run app.py
    ```
 
-4. Sign in with the default admin credentials:
 
-   - Username: `admin`
-   - Password: `admin123`
 
 ## Notes
 
