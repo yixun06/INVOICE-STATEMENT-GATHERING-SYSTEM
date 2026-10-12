@@ -70,12 +70,16 @@ source-safety, Statement, and historical rationale.
 - Cross Platform Summary exposes exactly `All`, `Shopee MY`, `Lazada`, and
   `TikTok`; its Platform, From Date, and To Date controls share one row.
   `Shopee SG` is excluded because this is an MYR-only reporting universe.
-- Cross Platform date filters use ordinary inclusive calendar ranges plus an
-  explicit `All dates` mode. Users may choose any valid From/To dates; only
-  `From Date > To Date` is invalid. The report aggregates actual committed rows
-  whose payout date falls inside the selected range. A valid range with no
-  matching rows shows the normal empty state, and `All dates` removes both
-  bounds. Do not require either endpoint to contain a payout row.
+- Cross Platform date filters use two explicit From Date / To Date calendar
+  controls plus an `All dates` mode. Every normal calendar day remains visible,
+  but only distinct valid non-null committed `payout_completed_date` values in
+  the current selected platform scope are enabled and selectable. Both active
+  endpoints must be members of that allowed-date set; no payout evidence means
+  never selectable. The report still uses the ordinary inclusive interval
+  `From <= payout_completed_date <= To`, so missing calendar dates inside the
+  selected interval are irrelevant. `From Date > To Date` is invalid; platform
+  changes must clear stale selections; and the backend must reject injected or
+  stale invalid endpoints before filtering. `All dates` removes both bounds.
 - Cross Platform `All` means all records supported by currently implemented,
   currency-compatible reporting adapters. It must not imply that every visible
   future platform already has a backend. Until additional adapters are approved,

@@ -190,6 +190,19 @@ def build_cross_platform_product_summary(
     """Filter one snapshot before aggregation and retain the exact final rowset."""
 
     _validate_platform(platform)
+    available_dates = set(snapshot.available_payout_dates(platform))
+    if (from_date is None) != (to_date is None):
+        raise CrossPlatformProductSummaryError(
+            "From Date and To Date must both be selected from committed payout dates."
+        )
+    if from_date is not None and from_date not in available_dates:
+        raise CrossPlatformProductSummaryError(
+            "From Date must be a committed payout date in the selected platform scope."
+        )
+    if to_date is not None and to_date not in available_dates:
+        raise CrossPlatformProductSummaryError(
+            "To Date must be a committed payout date in the selected platform scope."
+        )
     if from_date is not None and to_date is not None and from_date > to_date:
         raise CrossPlatformProductSummaryError(
             "From Date must be on or before To Date."

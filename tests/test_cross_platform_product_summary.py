@@ -212,7 +212,7 @@ def test_payout_date_options_are_platform_linked_and_ordinary_range_filters_befo
     filtered = build_cross_platform_product_summary(
         snapshot,
         platform="Shopee MY",
-        from_date=date(2026, 8, 2),
+        from_date=date(2026, 8, 3),
         to_date=date(2026, 8, 5),
     )
 
@@ -255,11 +255,46 @@ def test_invalid_payout_range_has_no_report():
         build_cross_platform_product_summary,
     )
 
+    snapshot = CrossPlatformReportingSnapshot(
+        (
+            _item(order_id="SHP-1", item_index=0, payout_date=date(2026, 8, 8), sku="SKU-1", unit_price="10.00", quantity=1, line_subtotal="10.00"),
+            _item(order_id="SHP-2", item_index=0, payout_date=date(2026, 8, 10), sku="SKU-2", unit_price="10.00", quantity=1, line_subtotal="10.00"),
+        )
+    )
+
     with pytest.raises(CrossPlatformProductSummaryError, match="From Date must be"):
         build_cross_platform_product_summary(
-            CrossPlatformReportingSnapshot(()),
+            snapshot,
             from_date=date(2026, 8, 10),
             to_date=date(2026, 8, 8),
+        )
+
+
+def test_payout_filter_rejects_dates_without_committed_payout_evidence():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
+        CrossPlatformReportingSnapshot,
+        build_cross_platform_product_summary,
+    )
+
+    snapshot = CrossPlatformReportingSnapshot(
+        (
+            _item(order_id="SHP-1", item_index=0, payout_date=date(2026, 8, 3), sku="SKU-1", unit_price="10.00", quantity=1, line_subtotal="10.00"),
+            _item(order_id="SHP-2", item_index=0, payout_date=date(2026, 8, 5), sku="SKU-2", unit_price="10.00", quantity=1, line_subtotal="10.00"),
+        )
+    )
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="From Date must be a committed payout date"):
+        build_cross_platform_product_summary(
+            snapshot,
+            from_date=date(2026, 8, 4),
+            to_date=date(2026, 8, 5),
+        )
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="must both be selected"):
+        build_cross_platform_product_summary(
+            snapshot,
+            from_date=date(2026, 8, 3),
         )
 
 

@@ -24,6 +24,10 @@ from src.invoice_app.services.cross_platform_product_summary_barcode_table_expor
 from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
+from src.invoice_app.ui.available_payout_date_calendar import (
+    available_payout_date_picker,
+    component_date_value,
+)
 from src.invoice_app.utils.monetary import format_currency, streamlit_currency_format
 
 
@@ -39,6 +43,9 @@ PRODUCT_SUMMARY_COLUMNS = (
     "Disc Amt",
     "Amount",
 )
+
+_FROM_PAYOUT_CALENDAR_KEY = "cross_platform_reporting_from_payout_calendar"
+_TO_PAYOUT_CALENDAR_KEY = "cross_platform_reporting_to_payout_calendar"
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -135,11 +142,13 @@ def _render_platform_filter():
             "Platform",
             PLATFORM_OPTIONS,
             key="cross_platform_reporting_platform",
+            on_change=_clear_payout_calendar_selection,
         )
         all_dates = st.toggle(
             "All dates",
             value=True,
             key="cross_platform_reporting_all_dates",
+            on_change=_clear_payout_calendar_selection,
         )
     return platform, all_dates, from_date_col, to_date_col
 
@@ -153,49 +162,58 @@ def _render_date_filters(
     to_date_col,
 ) -> tuple[date | None, date | None]:
     options = snapshot.available_payout_dates(platform)
+    _clear_invalid_payout_calendar_selection(options)
+    default_from = options[0] if options and not all_dates else None
+    default_to = options[-1] if options and not all_dates else None
     with from_date_col:
-        from_date = _payout_date_input(
-            "From Date",
-            options,
-            "cross_platform_reporting_from_date",
-            disabled=all_dates,
-            default_to_end=False,
+        from_date = available_payout_date_picker(
+            label="From Date",
+            allowed_dates=options,
+            value=default_from,
+            key=_FROM_PAYOUT_CALENDAR_KEY,
+            disabled=not options,
+            scope_id=platform,
+            on_value_change=_activate_payout_date_filter,
         )
     with to_date_col:
-        to_date = _payout_date_input(
-            "To Date",
-            options,
-            "cross_platform_reporting_to_date",
-            disabled=all_dates,
-            default_to_end=True,
+        to_date = available_payout_date_picker(
+            label="To Date",
+            allowed_dates=options,
+            value=default_to,
+            key=_TO_PAYOUT_CALENDAR_KEY,
+            disabled=not options,
+            scope_id=platform,
+            align_end=True,
+            on_value_change=_activate_payout_date_filter,
         )
-    if all_dates or not options:
+    if not options:
+        st.info("No payout dates are available for the selected platform.")
+        return None, None
+    if all_dates:
+        return None, None
+    if from_date is None or to_date is None:
+        st.caption("Select a valid From and To payout date.")
         return None, None
     return from_date, to_date
 
 
-def _payout_date_input(
-    label: str,
-    options: tuple[date, ...],
-    key: str,
-    *,
-    disabled: bool,
-    default_to_end: bool,
-) -> date | None:
-    if not options:
-        st.text_input(label, "No dates available", key=f"{key}_empty", disabled=True)
-        return None
-    current = st.session_state.get(key)
-    if not isinstance(current, date):
-        st.session_state.pop(key, None)
-    return st.date_input(
-        label,
-        value=options[-1] if default_to_end else options[0],
-        key=key,
-        format="YYYY/MM/DD",
-        disabled=disabled,
-        help="Includes committed payout rows within the selected date range.",
+def _clear_payout_calendar_selection() -> None:
+    st.session_state.pop(_FROM_PAYOUT_CALENDAR_KEY, None)
+    st.session_state.pop(_TO_PAYOUT_CALENDAR_KEY, None)
+
+
+def _activate_payout_date_filter() -> None:
+    st.session_state["cross_platform_reporting_all_dates"] = False
+
+
+def _clear_invalid_payout_calendar_selection(options: tuple[date, ...]) -> None:
+    allowed = set(options)
+    selected = (
+        component_date_value(st.session_state.get(_FROM_PAYOUT_CALENDAR_KEY)),
+        component_date_value(st.session_state.get(_TO_PAYOUT_CALENDAR_KEY)),
     )
+    if any(candidate is not None and candidate not in allowed for candidate in selected):
+        _clear_payout_calendar_selection()
 
 
 def _summary_frame(summary) -> pd.DataFrame:

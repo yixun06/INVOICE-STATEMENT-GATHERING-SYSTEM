@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+import json
 from pathlib import Path
 
 import pytest
@@ -141,11 +142,13 @@ def test_cross_platform_dashboard_uses_the_final_table_rowset_for_all_metrics(mo
     ]
 
 
-def test_cross_platform_dashboard_reacts_to_filters_and_shows_zero_for_a_valid_empty_result():
+def test_cross_platform_dashboard_uses_the_calendar_range_to_filter_results():
     app = AppTest.from_string(
         '''
 from datetime import date
 from decimal import Decimal
+
+import streamlit as st
 
 from src.invoice_app.services.cross_platform_product_summary import (
     CommittedReportingItem,
@@ -154,6 +157,15 @@ from src.invoice_app.services.cross_platform_product_summary import (
 from src.invoice_app.ui import cross_platform_product_summary as cross_ui
 
 cross_ui.export_cross_platform_product_summary_barcode_table_pdf = lambda *args, **kwargs: b"%PDF-test"
+if "calendar_range_seeded" not in st.session_state:
+    st.session_state["calendar_range_seeded"] = True
+    st.session_state["cross_platform_reporting_all_dates"] = False
+    st.session_state["cross_platform_reporting_from_payout_calendar"] = {
+        "value": "2026-08-09"
+    }
+    st.session_state["cross_platform_reporting_to_payout_calendar"] = {
+        "value": "2026-08-09"
+    }
 snapshot = CrossPlatformReportingSnapshot((
     CommittedReportingItem(
         platform="Shopee", currency="RM", order_id="SHP-1", item_index=0,
@@ -176,18 +188,6 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     app.run(timeout=20)
 
     assert [(element.label, element.value) for element in app.metric] == [
-        ("Total Product", "2"),
-        ("Total Quantity", "3"),
-        ("Total Original Sales", "RM 30.00"),
-        ("Total Discount Given", "RM 0.00"),
-        ("Total Amount", "RM 30.00"),
-    ]
-
-    app.toggle[0].set_value(False).run(timeout=20)
-    app.date_input[0].set_value(date(2026, 8, 9)).run(timeout=20)
-    app.date_input[1].set_value(date(2026, 8, 9)).run(timeout=20)
-
-    assert [(element.label, element.value) for element in app.metric] == [
         ("Total Product", "1"),
         ("Total Quantity", "2"),
         ("Total Original Sales", "RM 20.00"),
@@ -195,14 +195,15 @@ cross_ui.render_cross_platform_product_summary(snapshot)
         ("Total Amount", "RM 20.00"),
     ]
 
-    app.selectbox[0].set_value("TikTok")
-    app.run(timeout=20)
+    app.selectbox[0].set_value("TikTok").run(timeout=20)
 
     assert app.metric == []
     assert [message.value for message in app.info] == [
         "TikTok Cross Platform reporting is not configured yet."
     ]
     assert app.dataframe == []
+    assert "cross_platform_reporting_from_payout_calendar" not in app.session_state
+    assert "cross_platform_reporting_to_payout_calendar" not in app.session_state
 
 
 def test_cross_platform_page_renders_only_the_committed_product_summary_table():
@@ -239,10 +240,7 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     assert "Shopee SG" not in app.selectbox[0].options
     assert "Shopee" not in app.selectbox[0].options
     assert "ZENXIN" not in app.selectbox[0].options
-    assert [(element.label, element.value) for element in app.date_input] == [
-        ("From Date", date(2026, 8, 8)),
-        ("To Date", date(2026, 8, 8)),
-    ]
+    assert app.date_input == []
     assert [(element.label, element.value) for element in app.toggle] == [
         ("All dates", True)
     ]
@@ -273,8 +271,12 @@ from src.invoice_app.services.cross_platform_product_summary import (
 from src.invoice_app.ui import cross_platform_product_summary as cross_ui
 
 cross_ui.export_cross_platform_product_summary_barcode_table_pdf = lambda *args, **kwargs: b"%PDF-test"
-st.session_state["cross_platform_reporting_from_date"] = date(2026, 8, 10)
-st.session_state["cross_platform_reporting_to_date"] = date(2026, 8, 8)
+st.session_state["cross_platform_reporting_from_payout_calendar"] = {
+    "value": "2026-08-10"
+}
+st.session_state["cross_platform_reporting_to_payout_calendar"] = {
+    "value": "2026-08-08"
+}
 st.session_state["cross_platform_reporting_all_dates"] = False
 snapshot = CrossPlatformReportingSnapshot((
     CommittedReportingItem(
@@ -327,8 +329,12 @@ def capture_export(summary):
 
 cross_ui.export_cross_platform_product_summary_barcode_table_pdf = capture_export
 st.session_state["cross_platform_reporting_all_dates"] = False
-st.session_state["cross_platform_reporting_from_date"] = date(2026, 8, 2)
-st.session_state["cross_platform_reporting_to_date"] = date(2026, 8, 5)
+st.session_state["cross_platform_reporting_from_payout_calendar"] = {
+    "value": "2026-08-03"
+}
+st.session_state["cross_platform_reporting_to_payout_calendar"] = {
+    "value": "2026-08-05"
+}
 snapshot = CrossPlatformReportingSnapshot((
     CommittedReportingItem(
         platform="Shopee", currency="RM", order_id="SHP-1", item_index=0,
@@ -366,7 +372,7 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     ]
 
 
-def test_cross_platform_valid_range_without_rows_shows_the_normal_empty_state():
+def test_cross_platform_calendar_resets_a_stale_date_that_is_not_allowed():
     app = AppTest.from_string(
         '''
 from datetime import date
@@ -381,8 +387,12 @@ from src.invoice_app.services.cross_platform_product_summary import (
 from src.invoice_app.ui import cross_platform_product_summary as cross_ui
 
 st.session_state["cross_platform_reporting_all_dates"] = False
-st.session_state["cross_platform_reporting_from_date"] = date(2026, 8, 2)
-st.session_state["cross_platform_reporting_to_date"] = date(2026, 8, 2)
+st.session_state["cross_platform_reporting_from_payout_calendar"] = {
+    "value": "2026-08-02"
+}
+st.session_state["cross_platform_reporting_to_payout_calendar"] = {
+    "value": "2026-08-02"
+}
 snapshot = CrossPlatformReportingSnapshot((
     CommittedReportingItem(
         platform="Shopee", currency="RM", order_id="SHP-1", item_index=0,
@@ -406,11 +416,52 @@ cross_ui.render_cross_platform_product_summary(snapshot)
 
     assert app.exception == []
     assert app.error == []
-    assert [message.value for message in app.info] == [
-        "No committed product rows match the selected platform and payout dates."
+    assert app.dataframe[0].value["SKU Code"].tolist() == ["SKU-1", "SKU-2"]
+    assert app.get("download_button")
+
+
+def test_cross_platform_calendar_explains_when_the_payout_date_domain_is_empty():
+    app = AppTest.from_string(
+        '''
+from src.invoice_app.services.cross_platform_product_summary import CrossPlatformReportingSnapshot
+from src.invoice_app.ui import cross_platform_product_summary as cross_ui
+
+cross_ui.export_cross_platform_product_summary_barcode_table_pdf = lambda *args, **kwargs: b"%PDF-test"
+cross_ui.render_cross_platform_product_summary(CrossPlatformReportingSnapshot(()))
+'''
+    )
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert "No payout dates are available for the selected platform." in [
+        message.value for message in app.info
     ]
-    assert app.dataframe == []
-    assert app.get("download_button") == []
+    calendars = app.get("bidi_component")
+    assert len(calendars) == 2
+    assert [json.loads(calendar.proto.json) for calendar in calendars] == [
+        {
+            "label": "From Date",
+            "allowed_dates": [],
+            "min_date": None,
+            "max_date": None,
+            "value": None,
+            "disabled": True,
+            "scope_id": "All",
+            "align_end": False,
+        },
+        {
+            "label": "To Date",
+            "allowed_dates": [],
+            "min_date": None,
+            "max_date": None,
+            "value": None,
+            "disabled": True,
+            "scope_id": "All",
+            "align_end": True,
+        },
+    ]
+    assert app.session_state["cross_platform_reporting_from_payout_calendar"] == {}
+    assert app.session_state["cross_platform_reporting_to_payout_calendar"] == {}
 
 
 @pytest.mark.parametrize("platform", ("Lazada", "TikTok"))
@@ -443,7 +494,7 @@ cross_ui.render_cross_platform_product_summary()
     assert app.get("download_button") == []
 
 
-def test_cross_platform_filters_share_one_row():
+def test_cross_platform_filters_use_the_component_calendar_instead_of_native_date_inputs():
     from src.invoice_app.ui import cross_platform_product_summary as summary_ui
 
     source = Path(summary_ui.__file__).read_text(encoding="utf-8")
@@ -452,3 +503,5 @@ def test_cross_platform_filters_share_one_row():
         'platform_col, from_date_col, to_date_col = st.columns(3, gap="small")'
         in source
     )
+    assert "available_payout_date_picker(" in source
+    assert "st.date_input(" not in source
