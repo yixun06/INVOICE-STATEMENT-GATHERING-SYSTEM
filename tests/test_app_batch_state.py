@@ -215,17 +215,28 @@ def test_platform_tabs_derive_manual_reviews_without_exposing_internal_payloads(
         assert app.exception == []
         if platform_name == "Shopee MY":
             assert "Manual Review" not in {element.value for element in app.subheader}
+            assert "Shopee MY · Live Analysis" in {title.value for title in app.title}
+            assert {metric.label for metric in app.metric} == {
+                "Total Sales",
+                "Orders",
+                "Units Sold",
+                "Avg. Order Value",
+                "Refund Amount",
+            }
         else:
             assert "Manual Review" in {element.value for element in app.subheader}
-        assert ("Manual Review", "1") in {
-            (metric.label, metric.value) for metric in app.metric
-        }
+            assert ("Manual Review", "1") in {
+                (metric.label, metric.value) for metric in app.metric
+            }
         assert app.expander == []
         for dataframe in app.dataframe:
             assert "order_payload" not in dataframe.value.columns
             assert "product_payloads" not in dataframe.value.columns
         if platform_name == "Shopee MY":
-            assert app.dataframe == []
+            assert all(
+                "Order ID" not in dataframe.value.columns
+                for dataframe in app.dataframe
+            )
         else:
             assert all("Payment Status" not in dataframe.value.columns for dataframe in app.dataframe)
 
@@ -281,8 +292,13 @@ def test_platform_tabs_hide_manual_review_section_when_that_platform_has_none(tm
 
     assert app.exception == []
     assert "Manual Review" not in {element.value for element in app.subheader}
-    assert ("Manual Review", "1") in {
-        (metric.label, metric.value) for metric in app.metric
+    assert "Shopee MY · Live Analysis" in {title.value for title in app.title}
+    assert {metric.label for metric in app.metric} == {
+        "Total Sales",
+        "Orders",
+        "Units Sold",
+        "Avg. Order Value",
+        "Refund Amount",
     }
 
     for platform_name in ("Lazada",):
@@ -705,20 +721,25 @@ def test_upload_summary_is_action_scoped_and_skipped_items_stay_out_of_manual_re
     navigate(app, "Shopee MY")
 
     assert app.exception == []
-    assert {"Search and Filters", "Product Level"} <= {
+    assert {
+        "Analysis controls",
+        "Sales Trend",
+        "Sales vs Orders",
+        "Best Selling Products",
+        "Most Sold Products",
+    } == {
         element.value for element in app.subheader
     }
-    assert {"Order Level", "Manual Review"}.isdisjoint(
-        {element.value for element in app.subheader}
-    )
+    assert "Shopee MY · Live Analysis" in {title.value for title in app.title}
     assert app.expander == []
-    assert len(app.dataframe) == 1
-    assert {"Export full Shopee batch", "Export current filtered view"} <= {
-        button.label for button in app.get("download_button")
-    }
+    assert all(
+        "Order ID" not in dataframe.value.columns
+        for dataframe in app.dataframe
+    )
+    assert app.get("download_button") == []
 
 
-def test_platform_export_keeps_full_batch_separate_from_filtered_view(tmp_path, monkeypatch):
+def test_shopee_live_analysis_does_not_reuse_current_batch_or_legacy_exports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     app.session_state["authenticated"] = True
@@ -750,21 +771,16 @@ def test_platform_export_keeps_full_batch_separate_from_filtered_view(tmp_path, 
     app.session_state["navigation"] = "Shopee MY"
 
     app.run(timeout=20)
-    next(element for element in app.text_input if element.label == "Order ID").set_value("SHP-1").run(timeout=20)
 
     assert app.exception == []
-    assert {"Export full Shopee batch", "Export current filtered view"} <= {
-        button.label for button in app.get("download_button")
-    }
-
-    full_workbook = load_workbook(tmp_path / "exports" / "batch-export-scopes-shopee-full-batch-report.xlsx")
-    filtered_workbook = load_workbook(tmp_path / "exports" / "batch-export-scopes-shopee-filtered-view-report.xlsx")
-    assert full_workbook["Orders"].max_row == 5
-    assert full_workbook["Products"].max_row == 5
-    assert filtered_workbook["Orders"].max_row == 4
-    assert filtered_workbook["Products"].max_row == 4
-    assert dict(full_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 2
-    assert dict(filtered_workbook["Summary"].iter_rows(min_row=4, values_only=True))["Orders"] == 1
+    assert "Shopee MY · Live Analysis" in {title.value for title in app.title}
+    assert not [element for element in app.text_input if element.label == "Order ID"]
+    assert all(
+        "Order ID" not in dataframe.value.columns
+        for dataframe in app.dataframe
+    )
+    assert app.get("download_button") == []
+    assert not (tmp_path / "exports").exists()
 
 def test_cross_platform_page_does_not_keep_session_date_filtering_code():
     source = APP_PATH.read_text(encoding="utf-8")

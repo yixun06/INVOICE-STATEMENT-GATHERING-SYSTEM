@@ -108,6 +108,9 @@ from src.invoice_app.ui.monthly_billing import (
 from src.invoice_app.ui.cross_platform_product_summary import (
     render_cross_platform_product_summary,
 )
+from src.invoice_app.ui.shopee_my_live_analysis import (
+    render_shopee_my_live_analysis,
+)
 
 st.set_page_config(page_title=APP_TITLE, page_icon=":material/receipt_long:", layout="wide")
 
@@ -2062,15 +2065,7 @@ elif selected_page == MONTHLY_BILLING_PAGE:
 elif selected_page == "Cross Platform Summary":
     render_cross_platform_product_summary()
 elif selected_page == "Shopee MY":
-    orders_by_platform = split_by_platform(orders)
-    products_by_platform = split_by_platform(products)
-    show_platform_tab(
-        "Shopee",
-        orders_by_platform.get("Shopee", []),
-        products_by_platform.get("Shopee", []),
-        reviews_for_platform(reviews, "Shopee"),
-        display_name="Shopee MY",
-    )
+    render_shopee_my_live_analysis()
 elif selected_page in {"Shopee SG", "TikTok"}:
     st.title(selected_page)
     st.info(f"{selected_page} analysis is not configured yet.")

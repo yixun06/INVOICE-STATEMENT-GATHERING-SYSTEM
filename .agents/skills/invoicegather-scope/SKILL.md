@@ -296,6 +296,66 @@ representation, not a semantic business classification.
   canonical type is `RETURN_REFUND_ADJUSTMENT_COMPENSATION`; do not write or
   backfill it to UAT2 merely because this behavior is supported.
 
+## Shopee MY Live Analysis V1 — Approved
+
+`LIVE ANALYSIS -> Shopee MY` is a read-only dashboard over committed historical
+`Invoice_Orders` and `Invoice_Items` where persisted `platform = "Shopee"`. It
+must not use current-batch staging, another market/platform, temporary exports,
+or any write path.
+
+- One selected Date Basis governs every KPI and chart: `Order Created Date`
+  uses `order_created_date` and is the default; `Payout Date` uses
+  `payout_completed_date`. From/To date controls use the same evidence-constrained
+  calendar behavior as Cross Platform Summary: every calendar day remains
+  visible, but only distinct committed dates in the current Date Basis and
+  Payout Status scope are enabled/selectable. Both endpoints must be available
+  dates; stale selections clear when that scope changes. The report still uses
+  the ordinary inclusive interval, so missing dates inside the selected interval
+  do not alter membership.
+- In Order Created Date mode, Payout Status is `All`, `Released`, or
+  `Pending / No Payout Evidence`; Released means `payout_completed_date` is
+  present and Pending means only that no payout evidence is currently recorded.
+  Payout Date mode forces Released semantics and can never include Pending.
+- `invoice_financial_layout` is the V1 business classifier. `NORMAL_ORDER`
+  alone drives sales/order/unit/AOV and product analytics. `CANCELLED_ORDER` is
+  excluded. `RETURN_REFUND` is excluded from sales analytics and contributes
+  only `refund_amount` to Refund Amount. Unknown layouts fail closed and are
+  never treated as normal sales.
+- Total Sales is the sum of `NORMAL_ORDER.final_amount`; Orders is distinct
+  Order ID count; Units Sold is the sum of matching NORMAL_ORDER item quantity;
+  AOV is Total Sales divided by Orders with zero-safe presentation; Refund
+  Amount is the positive presentation magnitude of the signed sum of
+  `RETURN_REFUND.refund_amount`. Refund is not subtracted from Total Sales.
+- Product Sales intentionally uses `Invoice_Items.line_subtotal`, not allocated
+  Final Amount. Product grouping reuses the canonical `NAV + resolved Seller
+  SKU + persisted historical Product Master Unit Price` identity. Product Name
+  and Variation are display facts only. Returned quantity is never inferred.
+- Every KPI compares the current inclusive interval with the immediately
+  preceding interval of the same day count and inherits all non-date filters.
+  Zero baseline uses `New` or an em dash instead of infinity; a current zero
+  against a positive previous value is `-100%`. Increasing refunds are adverse
+  (red) and decreasing refunds are favourable (green).
+- Group By supports Day, selected-period-anchored seven-day Week buckets, and
+  calendar Month without changing membership. Partial first/final buckets show
+  their real boundaries. Top N is 5/10/20 for the two product rankings.
+- Time-series axes show real current-period bucket labels, never numeric relative
+  positions. Sales Trend compares current with the lighter/dashed previous
+  period and exposes both true date ranges in tooltips; Sales vs Orders remains
+  current-period only. Product rankings retain canonical identity, readable
+  full-name/SKU labels, actual visible values, and height that grows for Top 20.
+  Best Selling Products appears before Most Sold Products in a two-card
+  dashboard row (stacked naturally when the viewport is narrow). Each card is
+  a ranked list rather than a DataFrame: name, SKU/NAV evidence, text-free
+  normalized visual bar, and the actual Sales (RM) or Quantity. The bar is a
+  visual ranking aid only: highest sales/quantity is full width, and no
+  normalized ratio or percentage is rendered.
+- V1 deliberately renders no Sales Concentration/donut, Product Movers, or
+  standalone Payout Coverage visualization. Product Sales/Item Sales wording
+  remains distinct from order-level Total Sales.
+- V1 adds no analytics export, SST, profit, customer, conversion, category,
+  Shopee SG, Lazada, or TikTok behavior. It performs no UAT2, Product Master,
+  schema, or other business-data write.
+
 ## Current Cross Platform Summary — Locked
 
 Cross Platform Summary is an implemented, **live read-only database-backed
