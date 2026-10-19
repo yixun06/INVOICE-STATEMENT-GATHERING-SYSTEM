@@ -151,7 +151,7 @@ def test_order_created_date_filters_include_committed_rows_without_payout_eviden
         to_date=date(2026, 8, 2),
     )
 
-    assert snapshot.available_dates("All", CrossPlatformDateType.ORDER_CREATED) == (
+    assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED) == (
         date(2026, 8, 1),
         date(2026, 8, 2),
     )
@@ -227,12 +227,14 @@ def _item(
     variation="500ml",
     promotion_group_id=None,
     source_group_total=None,
+    platform="Shopee",
+    currency="MYR",
 ):
     from src.invoice_app.services.cross_platform_product_summary import CommittedReportingItem
 
     return CommittedReportingItem(
-        platform="Shopee",
-        currency="RM",
+        platform=platform,
+        currency=currency,
         order_id=order_id,
         item_index=item_index,
         payout_completed_date=payout_date,
@@ -275,12 +277,11 @@ def test_payout_date_options_are_platform_linked_and_ordinary_range_filters_befo
         to_date=date(2026, 8, 5),
     )
 
-    assert snapshot.available_payout_dates("All") == (
+    assert snapshot.available_payout_dates("Shopee MY") == (
         date(2026, 8, 1),
         date(2026, 8, 3),
         date(2026, 8, 5),
     )
-    assert snapshot.available_payout_dates("Lazada") == ()
     assert [(row.quantity, row.amount) for row in filtered.product_rows] == [
         (5, Decimal("45.00"))
     ]
@@ -483,9 +484,11 @@ def test_cross_persisted_item_missing_nav_is_blocking():
         build_cross_platform_reporting_snapshot(tabs)
 
 
-def test_shopee_sg_persisted_rows_are_excluded_at_cross_service_boundary():
+def test_shopee_sg_persisted_rows_use_their_own_market_identity_at_cross_service_boundary():
     from src.invoice_app.services.cross_platform_product_summary import (
         CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS,
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
         build_cross_platform_reporting_snapshot,
     )
 
@@ -519,5 +522,16 @@ def test_shopee_sg_persisted_rows_are_excluded_at_cross_service_boundary():
 
     snapshot = build_cross_platform_reporting_snapshot(tabs)
 
-    assert CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS == frozenset({"Shopee"})
-    assert snapshot.eligible_items == ()
+    assert CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS == frozenset({"Shopee", "Shopee SG"})
+    assert [(item.platform, item.currency, item.order_id) for item in snapshot.eligible_items] == [
+        ("Shopee SG", "SGD", "SG-PAYOUT")
+    ]
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        platform="Shopee SG",
+        date_type=CrossPlatformDateType.PAYOUT,
+        from_date=date(2026, 8, 8),
+        to_date=date(2026, 8, 8),
+    )
+    assert [item.order_id for item in summary.source_items] == ["SG-PAYOUT"]
+    assert summary.currency_code == "SGD"

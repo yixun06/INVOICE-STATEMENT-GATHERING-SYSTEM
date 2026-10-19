@@ -1,4 +1,4 @@
-"""Cross Platform Barcode Table PDF over one already-final Product Summary rowset."""
+"""Consolidated Product Summary Barcode Table PDF over one final rowset."""
 
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ def export_cross_platform_product_summary_barcode_table_pdf(
         (row.discount_amount for row in rows), Decimal("0.00")
     )
     total_amount = sum((row.amount for row in rows), Decimal("0.00"))
-    barcode_ready = sum(is_valid_ean13(row.sku_code) for row in rows)
+    barcode_ready = sum(_barcode_candidate(row.sku_code) is not None for row in rows)
     presentation = ProductSummaryBarcodeTablePresentation(
-        document_title="Cross Platform Product Summary Barcodes",
-        heading="CROSS PLATFORM PRODUCT SUMMARY",
+        document_title="Consolidated Product Summary Barcodes",
+        heading="CONSOLIDATED PRODUCT SUMMARY",
         metadata_lines=(
             f"Platform: {summary.platform}",
             f"Reporting Period: {_reporting_period_label(summary)}",
@@ -40,9 +40,9 @@ def export_cross_platform_product_summary_barcode_table_pdf(
         metrics=(
             ("Total Product", str(len(rows))),
             ("Total Qty", str(total_quantity)),
-            ("Total Original Sales", format_currency(total_original_sales)),
-            ("Total Discount Given", format_currency(total_discount_given)),
-            ("Total Amount", format_currency(total_amount)),
+            ("Total Original Sales", format_currency(total_original_sales, summary.currency_code)),
+            ("Total Discount Given", format_currency(total_discount_given, summary.currency_code)),
+            ("Total Amount", format_currency(total_amount, summary.currency_code)),
             ("Barcode Ready", str(barcode_ready)),
             ("Barcode Unavailable", str(len(rows) - barcode_ready)),
         ),
@@ -53,7 +53,16 @@ def export_cross_platform_product_summary_barcode_table_pdf(
     return render_product_summary_barcode_table_pdf(
         product_rows=rows,
         presentation=presentation,
+        barcode_candidate_resolver=_barcode_candidate,
     )
+
+
+def _barcode_candidate(sku_code: str) -> str | None:
+    """Use a valid EAN-13 SKU prefix only for barcode rendering."""
+
+    visible_sku = sku_code.strip()
+    candidate = visible_sku.split("-", 1)[0]
+    return candidate if is_valid_ean13(candidate) else None
 
 
 def _reporting_period_label(summary: CrossPlatformProductSummary) -> str:

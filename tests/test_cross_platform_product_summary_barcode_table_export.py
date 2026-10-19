@@ -2,10 +2,12 @@ from datetime import date
 from decimal import Decimal
 from io import BytesIO
 
+import pytest
 from pypdf import PdfReader
 
 from src.invoice_app.domain.weekly_billing import ProductSummaryRow
 from src.invoice_app.services.cross_platform_product_summary import (
+    CrossPlatformDateType,
     CrossPlatformProductSummary,
 )
 from src.invoice_app.services.weekly_billing_barcode_table_export import TABLE_HEADERS
@@ -45,7 +47,8 @@ def test_cross_platform_pdf_uses_the_final_summary_rows_and_cross_platform_metad
         ),
     )
     summary = CrossPlatformProductSummary(
-        platform="Shopee",
+        platform="Shopee MY",
+        date_type=CrossPlatformDateType.ORDER_CREATED,
         from_date=date(2026, 8, 8),
         to_date=date(2026, 8, 10),
         source_items=(),
@@ -57,8 +60,8 @@ def test_cross_platform_pdf_uses_the_final_summary_rows_and_cross_platform_metad
 
     assert pdf.startswith(b"%PDF-")
     assert "Zenxin Agri-Organic Food (AH) Sdn Bhd" in text
-    assert "CROSS PLATFORM PRODUCT SUMMARY" in text
-    assert "Platform: Shopee" in text
+    assert "CONSOLIDATED PRODUCT SUMMARY" in text
+    assert "Platform: Shopee MY" in text
     assert "Reporting Period: 08 Aug 2026 – 10 Aug 2026" in text
     assert "Source: Shopee Weekly Statement" not in text
     for metric in (
@@ -95,25 +98,28 @@ def test_cross_platform_pdf_passes_the_exact_final_product_rows_and_matching_ui_
         ),
     )
     summary = CrossPlatformProductSummary(
-        platform="All", from_date=None, to_date=None, source_items=(), product_rows=rows,
+        platform="Shopee SG", date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=None, to_date=None, source_items=(), product_rows=rows,
     )
     received = {}
 
-    def fake_renderer(*, product_rows, presentation):
+    def fake_renderer(*, product_rows, presentation, barcode_candidate_resolver=None):
         received["rows"] = product_rows
         received["presentation"] = presentation
+        received["barcode_candidate_resolver"] = barcode_candidate_resolver
         return b"%PDF-test"
 
     monkeypatch.setattr(exporter, "render_product_summary_barcode_table_pdf", fake_renderer)
 
     assert exporter.export_cross_platform_product_summary_barcode_table_pdf(summary) == b"%PDF-test"
     assert received["rows"] is rows
+    assert received["barcode_candidate_resolver"]("9555208105145-1 Lter") == "9555208105145"
     assert received["presentation"].metrics == (
         ("Total Product", "1"),
         ("Total Qty", "2"),
-        ("Total Original Sales", "RM 20.00"),
-        ("Total Discount Given", "RM 2.00"),
-        ("Total Amount", "RM 18.00"),
+        ("Total Original Sales", "S$ 20.00"),
+        ("Total Discount Given", "S$ 2.00"),
+        ("Total Amount", "S$ 18.00"),
         ("Barcode Ready", "1"),
         ("Barcode Unavailable", "0"),
     )
@@ -122,3 +128,74 @@ def test_cross_platform_pdf_passes_the_exact_final_product_rows_and_matching_ui_
     assert ui_frame["Original Sales"].sum() == 20.0
     assert ui_frame["Disc Amt"].sum() == 2.0
     assert ui_frame["Amount"].sum() == 18.0
+
+
+def test_cross_platform_pdf_uses_a_valid_ean13_prefix_without_changing_visible_sku(monkeypatch):
+    from src.invoice_app.services import weekly_billing_barcode_table_export as table_export
+    from src.invoice_app.services.cross_platform_product_summary_barcode_table_export import (
+        export_cross_platform_product_summary_barcode_table_pdf,
+    )
+
+    sku = "9555208105145-1 Lter"
+    row = ProductSummaryRow(
+        number=1, sku_code=sku, nav="300001", product_name="Prefix barcode",
+        uom="EA", unit_price=Decimal("10.00"), quantity=1,
+        discount_percent=None, discount_amount=Decimal("0.00"),
+        amount=Decimal("10.00"), source_item_count=1,
+    )
+    summary = CrossPlatformProductSummary(
+        platform="Shopee MY", date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 8, 1), to_date=date(2026, 8, 1),
+        source_items=(), product_rows=(row,),
+    )
+    draw_calls = []
+    original_draw = table_export._Ean13BarcodeFlowable.draw
+
+    def record_draw(flowable):
+        draw_calls.append(flowable.sku)
+        return original_draw(flowable)
+
+    monkeypatch.setattr(table_export._Ean13BarcodeFlowable, "draw", record_draw)
+
+    pdf = export_cross_platform_product_summary_barcode_table_pdf(summary)
+    text = PdfReader(BytesIO(pdf)).pages[0].extract_text()
+
+    assert draw_calls == ["9555208105145"]
+    assert "".join(sku.split()) in "".join(text.split())
+    assert "Barcode unavailable" not in text
+    assert summary.product_rows[0].sku_code == sku
+
+
+@pytest.mark.parametrize(
+    "sku",
+    ("ABC123-1", "9555208105146-1", "9555208107348"),
+)
+def test_cross_platform_pdf_rejects_invalid_barcode_candidates(monkeypatch, sku):
+    from src.invoice_app.services import weekly_billing_barcode_table_export as table_export
+    from src.invoice_app.services.cross_platform_product_summary_barcode_table_export import (
+        export_cross_platform_product_summary_barcode_table_pdf,
+    )
+
+    row = ProductSummaryRow(
+        number=1, sku_code=sku, nav="300001", product_name="Invalid barcode",
+        uom="EA", unit_price=Decimal("10.00"), quantity=1,
+        discount_percent=None, discount_amount=Decimal("0.00"),
+        amount=Decimal("10.00"), source_item_count=1,
+    )
+    summary = CrossPlatformProductSummary(
+        platform="Shopee MY", date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 8, 1), to_date=date(2026, 8, 1),
+        source_items=(), product_rows=(row,),
+    )
+    draw_calls = []
+    monkeypatch.setattr(
+        table_export._Ean13BarcodeFlowable,
+        "draw",
+        lambda flowable: draw_calls.append(flowable.sku),
+    )
+
+    text = PdfReader(BytesIO(export_cross_platform_product_summary_barcode_table_pdf(summary))).pages[0].extract_text()
+
+    assert draw_calls == []
+    assert "".join(sku.split()) in "".join(text.split())
+    assert "Barcode unavailable" in text

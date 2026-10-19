@@ -60,7 +60,7 @@ SHOPEE_SG = MarketContext(
     persisted_platform="Shopee SG",
     currency_code="SGD",
     currency_display="SGD",
-    cross_platform_eligible=False,
+    cross_platform_eligible=True,
     statement_commit_available=False,
     weekly_billing_available=False,
 )
@@ -99,10 +99,9 @@ BILLING_MARKET_CONTEXTS = (SHOPEE_MY, SHOPEE_SG, LAZADA, TIKTOK)
 BILLING_PLATFORM_OPTIONS = tuple(
     context.display_name for context in BILLING_MARKET_CONTEXTS
 )
-CROSS_PLATFORM_MARKET_CONTEXTS = (SHOPEE_MY, LAZADA, TIKTOK)
-CROSS_PLATFORM_OPTIONS = (
-    "All",
-    *(context.display_name for context in CROSS_PLATFORM_MARKET_CONTEXTS),
+CROSS_PLATFORM_MARKET_CONTEXTS = (SHOPEE_MY, SHOPEE_SG)
+CROSS_PLATFORM_OPTIONS = tuple(
+    context.display_name for context in CROSS_PLATFORM_MARKET_CONTEXTS
 )
 
 

@@ -215,7 +215,7 @@ DATE_COLUMNS = {
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 LIVE_ANALYSIS_NAVIGATION_PAGES = [
-    "Cross Platform Summary",
+    "Consolidated Product Summary",
     "Shopee MY",
     "Shopee SG",
     "Lazada",
@@ -227,7 +227,7 @@ NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
     WEEKLY_BILLING_PAGE: "calendar_month",
     MONTHLY_BILLING_PAGE: "calendar_view_month",
-    "Cross Platform Summary": "inventory_2",
+    "Consolidated Product Summary": "inventory_2",
     "Shopee MY": "storefront",
     "Shopee SG": "local_mall",
     "Lazada": "shopping_bag",
@@ -794,7 +794,9 @@ def show_sidebar(pdf_count: int) -> str:
 
         navigation = st.session_state.get("navigation", DATA_IMPORT_PAGE)
         if navigation == "All Products":
-            navigation = "Cross Platform Summary"
+            navigation = "Consolidated Product Summary"
+        if navigation == "Cross Platform Summary":
+            navigation = "Consolidated Product Summary"
         if navigation == "Shopee":
             navigation = "Shopee MY"
         if navigation not in {
@@ -2062,7 +2064,7 @@ elif selected_page == WEEKLY_BILLING_PAGE:
     render_weekly_billing()
 elif selected_page == MONTHLY_BILLING_PAGE:
     render_monthly_billing()
-elif selected_page == "Cross Platform Summary":
+elif selected_page == "Consolidated Product Summary":
     render_cross_platform_product_summary()
 elif selected_page == "Shopee MY":
     render_shopee_my_live_analysis()

@@ -46,9 +46,9 @@ def test_market_registry_preserves_my_identity_and_reserves_sg_identity():
     assert SHOPEE_SG.currency_code == "SGD"
     assert SHOPEE_SG.currency_display == "SGD"
     assert SHOPEE_MY.cross_platform_eligible is True
-    assert SHOPEE_SG.cross_platform_eligible is False
+    assert SHOPEE_SG.cross_platform_eligible is True
     assert BILLING_PLATFORM_OPTIONS == ("Shopee MY", "Shopee SG", "Lazada", "TikTok")
-    assert CROSS_PLATFORM_OPTIONS == ("All", "Shopee MY", "Lazada", "TikTok")
+    assert CROSS_PLATFORM_OPTIONS == ("Shopee MY", "Shopee SG")
     assert LAZADA.weekly_billing_available is False
     assert TIKTOK.weekly_billing_available is False
     assert resolve_market_context("Shopee MY") is SHOPEE_MY
@@ -163,8 +163,6 @@ def test_sg_market_capabilities_fail_closed_even_with_manually_constructed_setti
         settings.create_monthly_statement_writer()
     with pytest.raises(MarketConfigurationUnavailable, match="weekly billing is unavailable"):
         settings.create_weekly_billing_reader()
-    with pytest.raises(MarketConfigurationUnavailable, match="permanently excluded"):
-        settings.create_cross_platform_product_summary_reader()
 
 
 def test_sg_product_master_reuses_only_shared_google_credentials(monkeypatch, tmp_path):

@@ -67,10 +67,12 @@ source-safety, Statement, and historical rationale.
   unavailable message before any Shopee MY reader, dataset, calculation, or
   export can be reused. Their presence in a selector does not claim parser,
   persistence, Product Master, Statement, or billing support.
-- Cross Platform Summary exposes exactly `All`, `Shopee MY`, `Lazada`, and
-  `TikTok`; its Platform, From Date, and To Date controls share one row.
-  `Shopee SG` is excluded because this is an MYR-only reporting universe.
-- Cross Platform date filters expose `Date Type`: `Order Created Date` is the
+- Consolidated Product Summary exposes exactly `Shopee MY` and `Shopee SG`;
+  users select one concrete market and no `All`, Lazada, or TikTok filter is
+  offered without an approved committed-data adapter. Its Platform, From Date,
+  and To Date controls share one row. MY and SG are never combined or FX
+  converted.
+- Consolidated Product Summary date filters expose `Date Type`: `Order Created Date` is the
   default and `Payout Date` is the alternative. The same explicit From Date /
   To Date calendars plus `All dates` mode apply to the selected type. Every
   normal calendar day remains visible, but only distinct valid non-null
@@ -142,8 +144,10 @@ The following rules are locked for future implementation:
   or combine platform financial totals without later explicit approval. All
   business-facing Data Import money follows the active MarketContext (`RM` for
   MYR and `S$` for SGD); domain and persisted numeric values remain unchanged.
-- Shopee SG is permanently excluded from the existing Cross Platform Summary at
-  the service/data-eligibility layer, not only hidden in UI.
+- Consolidated Product Summary supports Shopee SG only as an independent,
+  explicitly configured SG committed-data source. It uses persisted
+  `platform = "Shopee SG"`, never falls back to MY, and shows an ordinary empty
+  result when its own committed data has no matching rows.
 - SG Product Summary reuses the canonical identity `NAV + resolved Seller SKU +
   persisted historical Product Master Unit Price`; names/variation are display
   only, missing NAV blocks, and differing NAV values remain separate.
@@ -313,7 +317,7 @@ or any write path.
 - One selected Date Basis governs every KPI and chart: `Order Created Date`
   uses `order_created_date` and is the default; `Payout Date` uses
   `payout_completed_date`. From/To date controls use the same evidence-constrained
-  calendar behavior as Cross Platform Summary: every calendar day remains
+  calendar behavior as Consolidated Product Summary: every calendar day remains
   visible, but only distinct committed dates in the current Date Basis and
   Payout Status scope are enabled/selectable. Both endpoints must be available
   dates; stale selections clear when that scope changes. The report still uses
@@ -363,9 +367,9 @@ or any write path.
   Shopee SG, Lazada, or TikTok behavior. It performs no UAT2, Product Master,
   schema, or other business-data write.
 
-## Current Cross Platform Summary — Locked
+## Current Consolidated Product Summary — Locked
 
-Cross Platform Summary is an implemented, **live read-only database-backed
+Consolidated Product Summary is an implemented, **live read-only database-backed
 report** over committed `Invoice_Orders` and `Invoice_Items`. It is not a
 current-session All Products view, does not have its own reporting table, and
 must make no UAT2/schema write merely to render or export.
@@ -392,11 +396,11 @@ merely because it appears in a Platform filter option.
 The reachable page contains only:
 
 ```text
-Cross Platform Summary
+Consolidated Product Summary
 Date Type / Platform / From Date / To Date / Date range
 Dashboard
 Product Summary
-Cross Platform Barcode Table PDF
+Consolidated Product Summary Barcode Table PDF
 ```
 
 Do not present legacy All Products, All Manual Review, Missing SKU, Excluded,
@@ -405,7 +409,7 @@ helpers may remain for compatibility but do not define reachable behavior.
 
 ### Shared canonical Product Summary policy — Locked
 
-Weekly Billing and Cross Platform Summary share one canonical grouping policy:
+Weekly Billing and Consolidated Product Summary share one canonical grouping policy:
 
 ```text
 NAV + resolved Seller SKU + persisted historical Product Master Unit Price
@@ -427,18 +431,25 @@ Original Sales | Disc Amt | Amount
 the exact final rowset: row count, quantity, Original Sales, signed Disc Amt,
 and Amount. Never `abs()` or clamp Discount Given.
 
-### Cross Platform Barcode Table PDF — Locked
+### Consolidated Product Summary Barcode Table PDF — Locked
 
-The `Cross Platform Barcode Table PDF` consumes the same final Product Summary
+The `Consolidated Product Summary Barcode Table PDF` consumes the same final Product Summary
 rowset as the UI. Its columns are No., SKU Code, Barcode, NAV, Description,
 Qty, UOM, Unit Price, Original Sales, Disc given, Amount. Summary metrics are
 Total Product, Total Qty, Total Original Sales, Total Discount Given, Total
 Amount, Barcode Ready, and Barcode Unavailable.
 
 For a valid EAN-13 SKU, render a vector barcode and digits. Otherwise preserve
-the full original SKU and render `Barcode unavailable`. Never suffix-strip,
-truncate to 13 digits, substitute a Product Master barcode, or omit a row.
-Currency is current Phase 1 Shopee MY/RM; do not invent FX semantics.
+the full original SKU and render `Barcode unavailable`. Never truncate to 13
+digits, substitute a Product Master barcode, or omit a row. Currency follows
+the selected market (MYR for Shopee MY, SGD for Shopee SG); do not invent FX
+or combine currencies.
+
+For this PDF only, a visible SKU with a hyphen suffix may use the substring
+before its first hyphen as an alternate barcode candidate, but only when that
+prefix is independently a valid EAN-13. The displayed SKU Code, canonical
+identity, Product Master lookup, data values, and grouping remain the full
+original SKU. An invalid/non-numeric prefix remains `Barcode unavailable`.
 
 ### Current Weekly Barcode UI — Locked
 
@@ -451,7 +462,7 @@ Excel, or write UAT2 data.
 
 Monthly Billing is a separate Shopee MY read-only projection over one committed
 full-calendar-month Monthly Statement. Weekly Billing remains the primary
-operational/debug Billing path; Cross Platform Summary remains the independent
+operational/debug Billing path; Consolidated Product Summary remains the independent
 payout-completed-date projection. Their outputs serve distinct business users
 and are not required to be numerically identical merely because they use
 overlapping committed evidence.

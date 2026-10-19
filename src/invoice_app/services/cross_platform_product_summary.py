@@ -31,6 +31,7 @@ from src.invoice_app.services.product_summary_identity import (
     resolve_product_summary_identity,
 )
 from src.invoice_app.services.market_context import (
+    CROSS_PLATFORM_MARKET_CONTEXTS,
     CROSS_PLATFORM_OPTIONS,
     SHOPEE_MY,
     resolve_market_context,
@@ -42,10 +43,9 @@ from src.invoice_app.utils.normalize import (
 
 CENT = Decimal("0.01")
 PLATFORM_OPTIONS = CROSS_PLATFORM_OPTIONS
-# Cross Platform Summary is a MY/local reporting domain.  This allowlist is a
-# data-service boundary, so a future "Shopee SG" persisted row cannot enter the
-# snapshot merely because a UI option is changed.
-CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS = frozenset({SHOPEE_MY.persisted_platform})
+CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS = frozenset(
+    context.persisted_platform for context in CROSS_PLATFORM_MARKET_CONTEXTS
+)
 
 
 class CrossPlatformDateType(str, Enum):
@@ -108,8 +108,7 @@ class CrossPlatformReportingSnapshot:
                     selected_date
                     for item in self.eligible_items
                     if (selected_date := _date_for_type(item, date_type)) is not None
-                    if platform == "All"
-                    or item.platform == _persisted_platform_for_filter(platform)
+                    if item.platform == _persisted_platform_for_filter(platform)
                 }
             )
         )
@@ -128,6 +127,10 @@ class CrossPlatformProductSummary:
     to_date: date | None
     source_items: tuple[CommittedReportingItem, ...]
     product_rows: tuple[ProductSummaryRow, ...]
+
+    @property
+    def currency_code(self) -> str:
+        return resolve_market_context(self.platform).currency_code
 
     @property
     def total_quantity(self) -> int:
@@ -153,7 +156,7 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
             raise
         except Exception as error:
             raise HistoricalInvoiceStorageError(
-                "Cross Platform Product Summary source snapshot read failed."
+                "Consolidated Product Summary source snapshot read failed."
             ) from error
         return build_cross_platform_reporting_snapshot(values)
 
@@ -204,7 +207,7 @@ def build_cross_platform_reporting_snapshot(
 def build_cross_platform_product_summary(
     snapshot: CrossPlatformReportingSnapshot,
     *,
-    platform: str = "All",
+    platform: str = SHOPEE_MY.display_name,
     date_type: CrossPlatformDateType = CrossPlatformDateType.PAYOUT,
     from_date: date | None = None,
     to_date: date | None = None,
@@ -213,7 +216,7 @@ def build_cross_platform_product_summary(
 
     _validate_platform(platform)
     if not isinstance(date_type, CrossPlatformDateType):
-        raise ValueError(f"Unsupported Cross Platform date type: {date_type}.")
+        raise ValueError(f"Unsupported Consolidated Product Summary date type: {date_type}.")
     available_dates = set(snapshot.available_dates(platform, date_type))
     if (from_date is None) != (to_date is None):
         raise CrossPlatformProductSummaryError(
@@ -238,8 +241,7 @@ def build_cross_platform_product_summary(
         item
         for item in snapshot.eligible_items
         if (
-            platform == "All"
-            or item.platform == _persisted_platform_for_filter(platform)
+            item.platform == _persisted_platform_for_filter(platform)
         )
         and (selected_date := _date_for_type(item, date_type)) is not None
         and (from_date is None or selected_date >= from_date)
@@ -264,7 +266,7 @@ def _reporting_item(
     )
     if not seller_sku:
         raise CrossPlatformProductSummaryError(
-            "BUSINESS DECISION REQUIRED — CROSS PLATFORM SKU MISSING: "
+            "BUSINESS DECISION REQUIRED — CONSOLIDATED PRODUCT SUMMARY SKU MISSING: "
             f"{item.order_id}/{item.item_index}."
         )
     description = _text(item.product_name)
@@ -285,9 +287,10 @@ def _reporting_item(
         raise CrossPlatformProductSummaryError(
             f"{item.order_id}/{item.item_index}: missing persisted Unit Price."
         )
+    context = _context_for_persisted_platform(item.platform)
     return CommittedReportingItem(
-        platform="Shopee",
-        currency="RM",
+        platform=context.persisted_platform,
+        currency=context.currency_code,
         order_id=item.order_id,
         item_index=item.item_index,
         payout_completed_date=order.payout_completed_date,
@@ -319,7 +322,7 @@ def _allocate_shopee_amounts(
     normal: list[CommittedReportingItem] = []
     groups: dict[tuple[str, str, str], list[CommittedReportingItem]] = defaultdict(list)
     for item in items:
-        if item.platform != "Shopee":
+        if item.platform not in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS:
             raise CrossPlatformProductSummaryError(
                 f"No committed reporting adapter exists for {item.platform}."
             )
@@ -504,24 +507,27 @@ def _date_for_type(
 
 def _validate_platform(platform: str) -> None:
     if platform not in PLATFORM_OPTIONS:
-        raise ValueError(f"Unsupported Cross Platform filter: {platform}.")
+        raise ValueError(f"Unsupported Consolidated Product Summary filter: {platform}.")
 
 
 def cross_platform_backend_available(platform: str) -> bool:
     """Return whether one visible filter has an implemented reporting adapter."""
 
     _validate_platform(platform)
-    return (
-        platform == "All"
-        or _persisted_platform_for_filter(platform)
-        in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS
-    )
+    return _persisted_platform_for_filter(platform) in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS
 
 
 def _persisted_platform_for_filter(platform: str) -> str:
-    if platform == "All":
-        raise ValueError("All does not identify one persisted platform.")
     return resolve_market_context(platform).persisted_platform
+
+
+def _context_for_persisted_platform(persisted_platform: str):
+    for context in CROSS_PLATFORM_MARKET_CONTEXTS:
+        if context.persisted_platform == persisted_platform:
+            return context
+    raise CrossPlatformProductSummaryError(
+        f"No committed reporting adapter exists for {persisted_platform}."
+    )
 
 
 def _text(value: Any) -> str:

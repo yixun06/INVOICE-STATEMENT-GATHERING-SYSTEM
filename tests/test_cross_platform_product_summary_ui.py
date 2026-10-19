@@ -197,15 +197,15 @@ cross_ui.render_cross_platform_product_summary(snapshot)
         ("Total Amount", "RM 30.00"),
     ]
 
-    app.selectbox[1].set_value("TikTok").run(timeout=20)
+    app.selectbox[1].set_value("Shopee SG").run(timeout=20)
 
     assert app.metric == []
     assert [message.value for message in app.info] == [
-        "TikTok Cross Platform reporting is not configured yet."
+        "No order created dates are available for the selected platform."
     ]
     assert app.dataframe == []
-    assert "cross_platform_reporting_from_date_calendar" not in app.session_state
-    assert "cross_platform_reporting_to_date_calendar" not in app.session_state
+    assert app.session_state["cross_platform_reporting_from_date_calendar"] == {}
+    assert app.session_state["cross_platform_reporting_to_date_calendar"] == {}
 
 
 def test_cross_platform_page_renders_only_the_committed_product_summary_table():
@@ -236,13 +236,14 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     app.run(timeout=20)
 
     assert app.exception == []
-    assert [element.value for element in app.title] == ["Cross Platform Summary"]
+    assert [element.value for element in app.title] == ["Consolidated Product Summary"]
     assert [element.label for element in app.selectbox] == [
         "Date Type", "Platform", "Date range"
     ]
     assert app.selectbox[0].value.value == "Order Created Date"
-    assert app.selectbox[1].options == ["All", "Shopee MY", "Lazada", "TikTok"]
-    assert "Shopee SG" not in app.selectbox[1].options
+    assert app.selectbox[1].options == ["Shopee MY", "Shopee SG"]
+    assert "Shopee SG" in app.selectbox[1].options
+    assert "All" not in app.selectbox[1].options
     assert "Shopee" not in app.selectbox[1].options
     assert "ZENXIN" not in app.selectbox[1].options
     assert [element.value for element in app.caption] == [
@@ -427,7 +428,7 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     assert app.dataframe[0].value["SKU Code"].tolist() == ["SKU-2", "SKU-3"]
     assert app.session_state["exported_payout_dates"] == ["2026-08-03", "2026-08-05"]
     assert [element.label for element in app.get("download_button")] == [
-        "Cross Platform Barcode Table PDF"
+        "Consolidated Product Summary Barcode Table PDF"
     ]
 
 
@@ -505,7 +506,7 @@ cross_ui.render_cross_platform_product_summary(CrossPlatformReportingSnapshot(()
             "max_date": None,
             "value": None,
             "disabled": True,
-            "scope_id": "All:ORDER_CREATED",
+            "scope_id": "Shopee MY:ORDER_CREATED",
             "align_end": False,
         },
         {
@@ -515,7 +516,7 @@ cross_ui.render_cross_platform_product_summary(CrossPlatformReportingSnapshot(()
             "max_date": None,
             "value": None,
             "disabled": True,
-            "scope_id": "All:ORDER_CREATED",
+            "scope_id": "Shopee MY:ORDER_CREATED",
             "align_end": True,
         },
     ]
@@ -523,34 +524,33 @@ cross_ui.render_cross_platform_product_summary(CrossPlatformReportingSnapshot(()
     assert app.session_state["cross_platform_reporting_to_date_calendar"] == {}
 
 
-@pytest.mark.parametrize("platform", ("Lazada", "TikTok"))
-def test_cross_platform_unsupported_platform_stops_before_my_snapshot_read(platform):
-    app = AppTest.from_string(
-        f'''
-import streamlit as st
-
-from src.invoice_app.ui import cross_platform_product_summary as cross_ui
-
-st.session_state["cross_platform_reporting_platform"] = {platform!r}
-st.session_state["reporting_snapshot_loader_calls"] = 0
-
-def forbidden_my_snapshot_load():
-    st.session_state["reporting_snapshot_loader_calls"] += 1
-    raise AssertionError("unsupported platform must stop before the MY snapshot read")
-
-cross_ui._load_cross_platform_reporting_snapshot = forbidden_my_snapshot_load
-cross_ui.render_cross_platform_product_summary()
-'''
+def test_consolidated_summary_sg_loader_uses_only_the_sg_market_context(monkeypatch):
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformReportingSnapshot,
     )
-    app.run(timeout=20)
+    from src.invoice_app.services.market_context import SHOPEE_SG
+    from src.invoice_app.ui import cross_platform_product_summary as cross_ui
 
-    assert app.exception == []
-    assert app.session_state["reporting_snapshot_loader_calls"] == 0
-    assert [message.value for message in app.info] == [
-        f"{platform} Cross Platform reporting is not configured yet."
-    ]
-    assert app.dataframe == []
-    assert app.get("download_button") == []
+    snapshot = CrossPlatformReportingSnapshot(())
+    contexts = []
+
+    class Reader:
+        def load_snapshot(self):
+            return snapshot
+
+    class Settings:
+        def create_cross_platform_product_summary_reader(self):
+            return Reader()
+
+    monkeypatch.setattr(
+        cross_ui,
+        "configured_uat2_data_settings",
+        lambda context: contexts.append(context) or Settings(),
+    )
+    cross_ui._load_cross_platform_reporting_snapshot.clear()
+
+    assert cross_ui._load_cross_platform_reporting_snapshot("Shopee SG") is snapshot
+    assert contexts == [SHOPEE_SG]
 
 
 def test_cross_platform_filters_use_the_component_calendar_instead_of_native_date_inputs():

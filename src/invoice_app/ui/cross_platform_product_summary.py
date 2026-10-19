@@ -1,4 +1,4 @@
-"""Live, read-only Cross Platform Product Summary page."""
+"""Live, read-only Consolidated Product Summary page."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from src.invoice_app.services.cross_platform_product_summary_barcode_table_expor
 from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
+from src.invoice_app.services.market_context import SHOPEE_MY, resolve_market_context
 from src.invoice_app.ui.available_payout_date_calendar import (
     available_payout_date_picker,
     component_date_value,
@@ -48,6 +49,7 @@ PRODUCT_SUMMARY_COLUMNS = (
 _FROM_DATE_CALENDAR_KEY = "cross_platform_reporting_from_date_calendar"
 _TO_DATE_CALENDAR_KEY = "cross_platform_reporting_to_date_calendar"
 _DATE_SCOPE_KEY = "cross_platform_reporting_date_scope"
+_PLATFORM_KEY = "cross_platform_reporting_platform"
 _LEGACY_FROM_PAYOUT_CALENDAR_KEY = "cross_platform_reporting_from_payout_calendar"
 _LEGACY_TO_PAYOUT_CALENDAR_KEY = "cross_platform_reporting_to_payout_calendar"
 _LEGACY_ALL_DATES_KEY = "cross_platform_reporting_all_dates"
@@ -56,8 +58,14 @@ _ALL_DATES_RANGE = "All dates"
 
 
 @st.cache_data(ttl=45, show_spinner=False)
-def _load_cross_platform_reporting_snapshot() -> CrossPlatformReportingSnapshot:
-    return configured_uat2_data_settings().create_cross_platform_product_summary_reader().load_snapshot()
+def _load_cross_platform_reporting_snapshot(
+    platform: str,
+) -> CrossPlatformReportingSnapshot:
+    return (
+        configured_uat2_data_settings(resolve_market_context(platform))
+        .create_cross_platform_product_summary_reader()
+        .load_snapshot()
+    )
 
 
 def render_cross_platform_product_summary(
@@ -65,7 +73,7 @@ def render_cross_platform_product_summary(
 ) -> None:
     """Render one source snapshot; its final rowset drives both table and PDF."""
 
-    st.title("Cross Platform Summary")
+    st.title("Consolidated Product Summary")
     (
         date_type,
         platform,
@@ -74,13 +82,13 @@ def render_cross_platform_product_summary(
         to_date_col,
     ) = _render_platform_filter()
     if not cross_platform_backend_available(platform):
-        st.info(f"{platform} Cross Platform reporting is not configured yet.")
+        st.info(f"{platform} Consolidated Product Summary is not configured yet.")
         return
 
     try:
-        source = snapshot if snapshot is not None else _load_cross_platform_reporting_snapshot()
+        source = snapshot if snapshot is not None else _load_cross_platform_reporting_snapshot(platform)
     except (HistoricalInvoiceStorageError, CrossPlatformProductSummaryError) as error:
-        st.error(f"Cross Platform Summary is unavailable: {error}")
+        st.error(f"Consolidated Product Summary is unavailable: {error}")
         return
 
     date_range = _render_date_filters(
@@ -106,11 +114,12 @@ def render_cross_platform_product_summary(
             to_date=to_date,
         )
     except CrossPlatformProductSummaryError as error:
-        st.error(f"Cross Platform Summary is unavailable: {error}")
+        st.error(f"Consolidated Product Summary is unavailable: {error}")
         return
 
     summary_frame = _summary_frame(summary)
-    _render_summary_dashboard(summary_frame)
+    currency_code = summary.currency_code
+    _render_summary_dashboard(summary_frame, currency_code=currency_code)
 
     st.subheader("Product Summary")
     if summary_frame.empty:
@@ -132,24 +141,24 @@ def render_cross_platform_product_summary(
             "Qty": st.column_config.NumberColumn("Qty", format="%d", width="small"),
             "UOM": st.column_config.TextColumn("UOM", width="small"),
             "Unit Price": st.column_config.NumberColumn(
-                "Unit Price", format=streamlit_currency_format()
+                "Unit Price", format=streamlit_currency_format(currency_code)
             ),
             "Original Sales": st.column_config.NumberColumn(
-                "Original Sales", format=streamlit_currency_format()
+                "Original Sales", format=streamlit_currency_format(currency_code)
             ),
             "Disc Amt": st.column_config.NumberColumn(
-                "Disc Amt", format=streamlit_currency_format()
+                "Disc Amt", format=streamlit_currency_format(currency_code)
             ),
             "Amount": st.column_config.NumberColumn(
-                "Amount", format=streamlit_currency_format()
+                "Amount", format=streamlit_currency_format(currency_code)
             ),
         },
         height=320,
     )
     st.download_button(
-        "Cross Platform Barcode Table PDF",
+        "Consolidated Product Summary Barcode Table PDF",
         export_cross_platform_product_summary_barcode_table_pdf(summary),
-        file_name="cross-platform-product-summary.pdf",
+        file_name="consolidated-product-summary.pdf",
         mime="application/pdf",
         icon=":material/picture_as_pdf:",
         type="primary",
@@ -171,10 +180,12 @@ def _render_platform_filter():
         )
         st.caption(f"Current view: {date_type.value}")
     with platform_col:
+        if st.session_state.get(_PLATFORM_KEY) not in PLATFORM_OPTIONS:
+            st.session_state[_PLATFORM_KEY] = SHOPEE_MY.display_name
         platform = st.selectbox(
             "Platform",
             PLATFORM_OPTIONS,
-            key="cross_platform_reporting_platform",
+            key=_PLATFORM_KEY,
             on_change=_clear_date_calendar_selection,
         )
     with all_dates_col:
@@ -290,7 +301,7 @@ def _summary_frame(summary) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=PRODUCT_SUMMARY_COLUMNS)
 
 
-def _render_summary_dashboard(summary_frame: pd.DataFrame) -> None:
+def _render_summary_dashboard(summary_frame: pd.DataFrame, *, currency_code: str) -> None:
     total_product = len(summary_frame)
     total_quantity = sum(int(value) for value in summary_frame["Qty"])
     total_original_sales = sum(
@@ -309,9 +320,9 @@ def _render_summary_dashboard(summary_frame: pd.DataFrame) -> None:
     with st.container(horizontal=True, gap="small"):
         st.metric("Total Product", f"{total_product:,}", border=True)
         st.metric("Total Quantity", f"{total_quantity:,}", border=True)
-        st.metric("Total Original Sales", format_currency(total_original_sales), border=True)
-        st.metric("Total Discount Given", format_currency(total_discount_given), border=True)
-        st.metric("Total Amount", format_currency(total_amount), border=True)
+        st.metric("Total Original Sales", format_currency(total_original_sales, currency_code), border=True)
+        st.metric("Total Discount Given", format_currency(total_discount_given, currency_code), border=True)
+        st.metric("Total Amount", format_currency(total_amount, currency_code), border=True)
 
 
 def _as_number(value: Decimal) -> float:

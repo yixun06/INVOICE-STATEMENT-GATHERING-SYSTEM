@@ -28,7 +28,7 @@ def test_weekly_billing_remains_the_single_uat2_sidebar_page(tmp_path, monkeypat
     assert app.exception == []
     assert WEEKLY_BILLING_PAGE in {title.value for title in app.title}
     labels = {button.label for button in app.button}
-    assert {"Data Import", "Cross Platform Summary", WEEKLY_BILLING_PAGE} <= labels
+    assert {"Data Import", "Consolidated Product Summary", WEEKLY_BILLING_PAGE} <= labels
     assert "Dashboard" not in labels
     assert "Settlement Test Lab" not in labels
     assert app.session_state.filtered_state["batch_id"] == "active-batch"

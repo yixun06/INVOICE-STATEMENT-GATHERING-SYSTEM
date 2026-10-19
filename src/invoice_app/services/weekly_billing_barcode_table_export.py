@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from src.invoice_app.utils.monetary import format_currency
 from io import BytesIO
-from typing import Sequence
+from typing import Callable, Sequence
 from xml.sax.saxutils import escape
 
 from reportlab.graphics import renderPDF
@@ -68,6 +68,7 @@ class ProductSummaryBarcodeTableRow:
     source: ProductSummaryRow
     values: tuple[str, ...]
     has_graphical_barcode: bool
+    barcode_value: str | None
 
 
 @dataclass(frozen=True)
@@ -109,16 +110,19 @@ def build_product_summary_barcode_table_rows(
 
 def build_product_summary_barcode_table_rows_from_product_rows(
     product_rows: Sequence[ProductSummaryRow],
+    *,
+    barcode_candidate_resolver: Callable[[str], str | None] | None = None,
 ) -> tuple[ProductSummaryBarcodeTableRow, ...]:
     """Render existing final Product Summary rows without querying or aggregating."""
 
+    resolver = barcode_candidate_resolver or _exact_ean13_candidate
     return tuple(
         ProductSummaryBarcodeTableRow(
             source=row,
             values=(
                 str(row.number),
                 row.sku_code,
-                "" if is_valid_ean13(row.sku_code) else "Barcode unavailable",
+                "" if (barcode_value := resolver(row.sku_code)) else "Barcode unavailable",
                 str(row.quantity),
                 row.nav,
                 row.product_name,
@@ -128,7 +132,8 @@ def build_product_summary_barcode_table_rows_from_product_rows(
                 format_currency(row.discount_amount),
                 format_currency(row.amount),
             ),
-            has_graphical_barcode=is_valid_ean13(row.sku_code),
+            has_graphical_barcode=barcode_value is not None,
+            barcode_value=barcode_value,
         )
         for row in product_rows
     )
@@ -174,11 +179,15 @@ def render_product_summary_barcode_table_pdf(
     *,
     product_rows: Sequence[ProductSummaryRow],
     presentation: ProductSummaryBarcodeTablePresentation,
+    barcode_candidate_resolver: Callable[[str], str | None] | None = None,
 ) -> bytes:
     """Render one final Product Summary rowset with caller-owned metadata only."""
 
     text_font = _ensure_label_text_font()
-    table_rows = build_product_summary_barcode_table_rows_from_product_rows(product_rows)
+    table_rows = build_product_summary_barcode_table_rows_from_product_rows(
+        product_rows,
+        barcode_candidate_resolver=barcode_candidate_resolver,
+    )
     output = BytesIO()
     document = SimpleDocTemplate(
         output,
@@ -197,7 +206,7 @@ def render_product_summary_barcode_table_pdf(
     for table_row in table_rows:
         values = table_row.values
         barcode_cell: object = (
-            _Ean13BarcodeFlowable(table_row.source.sku_code.strip())
+            _Ean13BarcodeFlowable(table_row.barcode_value)
             if table_row.has_graphical_barcode
             else Paragraph(escape(values[2]), styles["center"])
         )
@@ -251,6 +260,11 @@ def render_product_summary_barcode_table_pdf(
         ]
     )
     return output.getvalue()
+
+
+def _exact_ean13_candidate(sku_code: str) -> str | None:
+    candidate = sku_code.strip()
+    return candidate if is_valid_ean13(candidate) else None
 
 
 def _weekly_billing_presentation(
