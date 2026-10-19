@@ -28,7 +28,7 @@ class _Gateway:
         }
 
 
-def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee_rows():
+def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
     from src.invoice_app.services.cross_platform_product_summary import (
         GoogleSheetsCrossPlatformProductSummaryReader,
         build_cross_platform_product_summary,
@@ -42,6 +42,7 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
                     INVOICE_ORDERS_HEADERS,
                     platform="Shopee",
                     order_id="SHP-PAYOUT",
+                    order_created_date="2026-08-01",
                     payout_completed_date="2026-08-08",
                     first_imported_at="2026-08-08T10:00:00+00:00",
                 ),
@@ -49,6 +50,7 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
                     INVOICE_ORDERS_HEADERS,
                     platform="Shopee",
                     order_id="SHP-NO-PAYOUT",
+                    order_created_date="2026-08-02",
                     first_imported_at="2026-08-08T10:00:00+00:00",
                 ),
             ],
@@ -92,6 +94,10 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
         ("uat2", (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB))
     ]
     assert snapshot.available_payout_dates("Shopee MY") == (date(2026, 8, 8),)
+    assert [item.order_id for item in snapshot.eligible_items] == [
+        "SHP-PAYOUT",
+        "SHP-NO-PAYOUT",
+    ]
     assert [(row.sku_code, row.nav, row.uom, row.unit_price, row.quantity, row.original_sales, row.discount_amount, row.amount) for row in summary.product_rows] == [
         (
             "9555208107347",
@@ -104,6 +110,55 @@ def test_live_reader_uses_one_committed_snapshot_and_only_payout_eligible_shopee
             Decimal("18.00"),
         )
     ]
+
+
+def test_order_created_date_filters_include_committed_rows_without_payout_evidence():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        CrossPlatformReportingSnapshot,
+        build_cross_platform_product_summary,
+    )
+
+    snapshot = CrossPlatformReportingSnapshot(
+        (
+            _item(
+                order_id="SHP-PAYOUT",
+                item_index=0,
+                payout_date=date(2026, 8, 8),
+                order_created_date=date(2026, 8, 1),
+                sku="SKU-1",
+                unit_price="10.00",
+                quantity=1,
+                line_subtotal="10.00",
+            ),
+            _item(
+                order_id="SHP-PENDING",
+                item_index=0,
+                payout_date=None,
+                order_created_date=date(2026, 8, 2),
+                sku="SKU-2",
+                unit_price="10.00",
+                quantity=1,
+                line_subtotal="10.00",
+            ),
+        )
+    )
+
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 8, 1),
+        to_date=date(2026, 8, 2),
+    )
+
+    assert snapshot.available_dates("All", CrossPlatformDateType.ORDER_CREATED) == (
+        date(2026, 8, 1),
+        date(2026, 8, 2),
+    )
+    assert {item.order_id for item in summary.source_items} == {
+        "SHP-PAYOUT",
+        "SHP-PENDING",
+    }
 
 
 def test_cross_product_summary_excludes_cancelled_parent_by_status_or_layout():
@@ -162,6 +217,7 @@ def _item(
     order_id,
     item_index,
     payout_date,
+    order_created_date=None,
     sku,
     unit_price,
     quantity,
@@ -191,6 +247,9 @@ def _item(
         promotion_label="Any promotion" if promotion_group_id else None,
         source_group_total=(
             None if source_group_total is None else Decimal(source_group_total)
+        ),
+        order_created_date=(
+            payout_date if order_created_date is None else order_created_date
         ),
     )
 

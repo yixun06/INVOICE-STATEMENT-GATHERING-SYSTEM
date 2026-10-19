@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, ROUND_FLOOR
+from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
@@ -47,6 +48,17 @@ PLATFORM_OPTIONS = CROSS_PLATFORM_OPTIONS
 CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS = frozenset({SHOPEE_MY.persisted_platform})
 
 
+class CrossPlatformDateType(str, Enum):
+    """The committed order date fact used for Cross Platform filtering."""
+
+    ORDER_CREATED = "Order Created Date"
+    PAYOUT = "Payout Date"
+
+    @property
+    def calendar_label(self) -> str:
+        return "order created date" if self is self.ORDER_CREATED else "payout date"
+
+
 class CrossPlatformProductSummaryError(RuntimeError):
     """The committed reporting snapshot cannot prove a safe summary."""
 
@@ -63,7 +75,7 @@ class CommittedReportingItem:
     currency: str
     order_id: str
     item_index: int
-    payout_completed_date: date
+    payout_completed_date: date | None
     seller_sku: str
     nav: str
     description: str
@@ -74,6 +86,7 @@ class CommittedReportingItem:
     promotion_group_id: str | None
     promotion_label: str | None
     source_group_total: Decimal | None
+    order_created_date: date | None = None
     amount: Decimal | None = None
 
 
@@ -83,23 +96,34 @@ class CrossPlatformReportingSnapshot:
 
     eligible_items: tuple[CommittedReportingItem, ...]
 
-    def available_payout_dates(self, platform: str) -> tuple[date, ...]:
+    def available_dates(
+        self,
+        platform: str,
+        date_type: CrossPlatformDateType,
+    ) -> tuple[date, ...]:
         _validate_platform(platform)
         return tuple(
             sorted(
                 {
-                    item.payout_completed_date
+                    selected_date
                     for item in self.eligible_items
+                    if (selected_date := _date_for_type(item, date_type)) is not None
                     if platform == "All"
                     or item.platform == _persisted_platform_for_filter(platform)
                 }
             )
         )
 
+    def available_payout_dates(self, platform: str) -> tuple[date, ...]:
+        """Compatibility helper for existing payout-only callers."""
+
+        return self.available_dates(platform, CrossPlatformDateType.PAYOUT)
+
 
 @dataclass(frozen=True)
 class CrossPlatformProductSummary:
     platform: str
+    date_type: CrossPlatformDateType
     from_date: date | None
     to_date: date | None
     source_items: tuple[CommittedReportingItem, ...]
@@ -173,10 +197,7 @@ def build_cross_platform_reporting_snapshot(
         order = orders[order_identity]
         if is_cancelled_invoice_order(order):
             continue
-        payout_date = order.payout_completed_date
-        if payout_date is None:
-            continue
-        eligible.append(_reporting_item(item, payout_date))
+        eligible.append(_reporting_item(item, order))
     return CrossPlatformReportingSnapshot(eligible_items=tuple(eligible))
 
 
@@ -184,24 +205,30 @@ def build_cross_platform_product_summary(
     snapshot: CrossPlatformReportingSnapshot,
     *,
     platform: str = "All",
+    date_type: CrossPlatformDateType = CrossPlatformDateType.PAYOUT,
     from_date: date | None = None,
     to_date: date | None = None,
 ) -> CrossPlatformProductSummary:
     """Filter one snapshot before aggregation and retain the exact final rowset."""
 
     _validate_platform(platform)
-    available_dates = set(snapshot.available_payout_dates(platform))
+    if not isinstance(date_type, CrossPlatformDateType):
+        raise ValueError(f"Unsupported Cross Platform date type: {date_type}.")
+    available_dates = set(snapshot.available_dates(platform, date_type))
     if (from_date is None) != (to_date is None):
         raise CrossPlatformProductSummaryError(
-            "From Date and To Date must both be selected from committed payout dates."
+            "From Date and To Date must both be selected from committed "
+            f"{date_type.calendar_label}s."
         )
     if from_date is not None and from_date not in available_dates:
         raise CrossPlatformProductSummaryError(
-            "From Date must be a committed payout date in the selected platform scope."
+            "From Date must be a committed "
+            f"{date_type.calendar_label} in the selected platform scope."
         )
     if to_date is not None and to_date not in available_dates:
         raise CrossPlatformProductSummaryError(
-            "To Date must be a committed payout date in the selected platform scope."
+            "To Date must be a committed "
+            f"{date_type.calendar_label} in the selected platform scope."
         )
     if from_date is not None and to_date is not None and from_date > to_date:
         raise CrossPlatformProductSummaryError(
@@ -214,12 +241,14 @@ def build_cross_platform_product_summary(
             platform == "All"
             or item.platform == _persisted_platform_for_filter(platform)
         )
-        and (from_date is None or item.payout_completed_date >= from_date)
-        and (to_date is None or item.payout_completed_date <= to_date)
+        and (selected_date := _date_for_type(item, date_type)) is not None
+        and (from_date is None or selected_date >= from_date)
+        and (to_date is None or selected_date <= to_date)
     )
     source_items = _allocate_shopee_amounts(filtered)
     return CrossPlatformProductSummary(
         platform=platform,
+        date_type=date_type,
         from_date=from_date,
         to_date=to_date,
         source_items=source_items,
@@ -228,7 +257,7 @@ def build_cross_platform_product_summary(
 
 
 def _reporting_item(
-    item: CanonicalInvoiceItem, payout_date: date
+    item: CanonicalInvoiceItem, order: CanonicalInvoiceOrder
 ) -> CommittedReportingItem:
     seller_sku = normalize_sku_text(
         _text(item.resolved_seller_sku) or _text(item.seller_sku)
@@ -261,7 +290,7 @@ def _reporting_item(
         currency="RM",
         order_id=item.order_id,
         item_index=item.item_index,
-        payout_completed_date=payout_date,
+        payout_completed_date=order.payout_completed_date,
         seller_sku=seller_sku,
         nav=nav,
         description=description,
@@ -280,6 +309,7 @@ def _reporting_item(
             if item.source_group_total is None
             else _cent_money(item.source_group_total, item, "source_group_total")
         ),
+        order_created_date=order.order_created_date,
     )
 
 
@@ -452,12 +482,23 @@ def _cent_money(
 
 def _source_item_sort_key(item: CommittedReportingItem) -> tuple[Any, ...]:
     return (
-        item.payout_completed_date,
+        item.payout_completed_date or date.min,
         item.nav.casefold(),
         item.seller_sku.casefold(),
         item.unit_price,
         item.order_id,
         item.item_index,
+    )
+
+
+def _date_for_type(
+    item: CommittedReportingItem,
+    date_type: CrossPlatformDateType,
+) -> date | None:
+    return (
+        item.order_created_date
+        if date_type is CrossPlatformDateType.ORDER_CREATED
+        else item.payout_completed_date
     )
 
 

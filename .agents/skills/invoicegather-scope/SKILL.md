@@ -70,16 +70,23 @@ source-safety, Statement, and historical rationale.
 - Cross Platform Summary exposes exactly `All`, `Shopee MY`, `Lazada`, and
   `TikTok`; its Platform, From Date, and To Date controls share one row.
   `Shopee SG` is excluded because this is an MYR-only reporting universe.
-- Cross Platform date filters use two explicit From Date / To Date calendar
-  controls plus an `All dates` mode. Every normal calendar day remains visible,
-  but only distinct valid non-null committed `payout_completed_date` values in
-  the current selected platform scope are enabled and selectable. Both active
-  endpoints must be members of that allowed-date set; no payout evidence means
-  never selectable. The report still uses the ordinary inclusive interval
-  `From <= payout_completed_date <= To`, so missing calendar dates inside the
-  selected interval are irrelevant. `From Date > To Date` is invalid; platform
-  changes must clear stale selections; and the backend must reject injected or
-  stale invalid endpoints before filtering. `All dates` removes both bounds.
+- Cross Platform date filters expose `Date Type`: `Order Created Date` is the
+  default and `Payout Date` is the alternative. The same explicit From Date /
+  To Date calendars plus `All dates` mode apply to the selected type. Every
+  normal calendar day remains visible, but only distinct valid non-null
+  committed values for the selected date fact in the current platform scope are
+  enabled and selectable. Both active endpoints must be members of that
+  allowed-date set; in `Order Created Date` mode, eligible committed rows need
+  `order_created_date` but do not require payout evidence, while `Payout Date`
+  mode requires `payout_completed_date`. The report uses the ordinary inclusive
+  interval for the selected date fact, so missing calendar dates inside it are
+  irrelevant. `From Date > To Date` is invalid; platform or Date Type changes
+  must clear stale selections; and the backend must reject injected or stale
+  invalid endpoints before filtering. `Date range` is a fifth parallel filter
+  control after To Date and defaults to `Selected dates`; choosing `All dates`
+  disables the calendars while visibly showing the first and last valid dates,
+  and applies that complete inclusive interval.
+  It does not bypass the selected date-fact eligibility rule.
 - Cross Platform `All` means all records supported by currently implemented,
   currency-compatible reporting adapters. It must not imply that every visible
   future platform already has a backend. Until additional adapters are approved,
@@ -367,25 +374,26 @@ The current adapter reads one logical committed snapshot per render:
 
 ```text
 committed Invoice_Orders + Invoice_Items
--> payout eligibility
--> Platform / Payout Completed Date filters
+-> selected date-type eligibility
+-> Platform / Order Created Date or Payout Date filters
 -> persisted promotion allocation
 -> canonical Product Summary consolidation
 -> one final rowset
 -> dashboard + table + barcode-table PDF
 ```
 
-Current committed reporting scope is Shopee rows with a
+Current committed reporting scope is Shopee rows with the selected non-null
+date fact. `Order Created Date` is the default and may include committed rows
+without payout evidence; `Payout Date` includes only rows with
 `payout_completed_date`. The Platform / From Date / To Date controls apply to
-that payout date before aggregation; they are not Order Created Date filters.
-Do not claim a new platform adapter merely because it appears in a Platform
-filter option.
+the selected date fact before aggregation. Do not claim a new platform adapter
+merely because it appears in a Platform filter option.
 
 The reachable page contains only:
 
 ```text
 Cross Platform Summary
-Platform / From Date / To Date
+Date Type / Platform / From Date / To Date / Date range
 Dashboard
 Product Summary
 Cross Platform Barcode Table PDF
