@@ -50,6 +50,10 @@ def test_sidebar_uses_live_analysis_contract_in_exact_order(tmp_path, monkeypatc
     assert 'render_navigation_section("REPORTS"' not in source
     assert '"Shopee MY": "storefront"' in source
     assert '"Shopee SG": "local_mall"' in source
+    assert 'section[data-testid="stSidebar"][aria-expanded="true"]' in source
+    assert "width: 18rem !important;" in source
+    assert 'section[data-testid="stSidebar"][aria-expanded="false"]' in source
+    assert "width: 0 !important;" in source
 
 
 def test_navigation_preserves_current_invoice_batch_without_a_second_statement_entry(tmp_path, monkeypatch):

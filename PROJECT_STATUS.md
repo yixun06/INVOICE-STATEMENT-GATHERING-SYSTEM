@@ -269,6 +269,8 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-19; Task: Consolidated Product Summary sidebar-width follow-up; State: IMPLEMENTED / TESTED / READY FOR ISOLATED COMMIT; Outcome: expanded navigation width is 18rem so `Consolidated Product Summary` is fully visible. The width constraint applies only to the expanded sidebar; collapsed sidebar and child width are explicitly 0, allowing the main view to regain the full available width. No reporting, data, UAT2, Product Master, schema, or business-data behavior changed. Verification: 2 navigation UI tests, syntax, and diff checks passed. Deployment: **NOT VERIFIED**.
+
 
 - Date: 2026-10-19; Task: finalize Consolidated Product Summary UI, Shopee SG platform filter, and barcode prefix fallback; State: IMPLEMENTED / TESTED / READY FOR ISOLATED COMMIT; Outcome: renamed the reachable Cross Platform Summary UX to Consolidated Product Summary; the concrete platform filter is now Shopee MY / Shopee SG with no All, MY fallback, or currency merge. SG uses its own persisted identity, configured source, and SGD presentation; no matching SG rows is an ordinary empty result. Date Type and Date range behavior is preserved. The PDF keeps the full visible SKU but may barcode only a valid EAN-13 prefix before the first hyphen (for example `9555208105145-1 Lter` -> `9555208105145`); invalid candidates remain unavailable. UAT2/Product Master/schema/business-data write delta: 0. Verification: Cross/UI, market/navigation, barcode/export tests passed; two known obsolete legacy session-based Cross exclusion tests remain baseline failures. Git: isolated commit and push pending. Deployment: **NOT VERIFIED**. Decision required: none.
 

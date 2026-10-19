@@ -610,11 +610,18 @@ def show_sidebar(pdf_count: int) -> str:
         st.html(
             """
             <style>
-            section[data-testid="stSidebar"],
-            section[data-testid="stSidebar"] > div:first-child {
-                min-width: 15.5rem !important;
-                width: 15.5rem !important;
-                max-width: 15.5rem !important;
+            section[data-testid="stSidebar"][aria-expanded="true"],
+            section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
+                min-width: 18rem !important;
+                width: 18rem !important;
+                max-width: 18rem !important;
+            }
+
+            section[data-testid="stSidebar"][aria-expanded="false"],
+            section[data-testid="stSidebar"][aria-expanded="false"] > div:first-child {
+                min-width: 0 !important;
+                width: 0 !important;
+                max-width: 0 !important;
             }
 
             [data-testid="stMain"] [data-testid="stMetric"] {
