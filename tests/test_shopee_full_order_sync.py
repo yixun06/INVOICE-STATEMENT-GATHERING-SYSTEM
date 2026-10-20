@@ -272,6 +272,16 @@ class _Gateway:
                 append = request["appendDimension"]
                 self.row_counts[title_by_id[append["sheetId"]]] += append["length"]
                 continue
+            if "appendCells" in request:
+                append = request["appendCells"]
+                title = title_by_id[append["sheetId"]]
+                self.tabs[title].extend(
+                    [
+                        [cell["userEnteredValue"]["stringValue"] for cell in row["values"]]
+                        for row in append["rows"]
+                    ]
+                )
+                continue
             update = request["updateCells"]
             title = title_by_id[update["range"]["sheetId"]]
             values = [
@@ -327,6 +337,30 @@ def test_sync_is_idempotent_replaces_all_items_and_keeps_absent_orders():
     assert len(order_1_items) == 1
     assert order_1_items[0].product_subtotal == Decimal("9.50")
     assert any(item.order_id == "ORDER-2" for item in snapshot.items)
+
+
+def test_missing_only_sync_appends_absent_orders_without_rewriting_existing_current_facts():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    original = _batch([_rows()[0]])
+    repository.sync(original)
+    before = repository.read_snapshot()
+    changed_existing = list(_rows()[0])
+    changed_existing[9] = "9.50"
+    new_order = list(_rows()[0])
+    new_order[0] = "ORDER-2"
+    result = repository.sync_missing_only(_batch([tuple(changed_existing), tuple(new_order)]))
+    after = repository.read_snapshot()
+
+    assert result.new_count == 1
+    assert result.retained_count == 1
+    assert result.updated_count == 0
+    assert [item for item in after.items if item.order_id == "ORDER-1"] == [
+        item for item in before.items if item.order_id == "ORDER-1"
+    ]
+    assert {order.order_id for order in after.orders} == {"ORDER-1", "ORDER-2"}
+    assert all("updateCells" not in request for request in gateway.last_requests)
+    assert repository.sync_missing_only(_batch([tuple(changed_existing), tuple(new_order)])).new_count == 0
 
 
 def test_sync_expands_only_current_grid_rows_before_writing_a_larger_snapshot():

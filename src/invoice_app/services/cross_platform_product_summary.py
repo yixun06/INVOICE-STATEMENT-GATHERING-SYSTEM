@@ -25,6 +25,11 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+)
+from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    deserialize_full_order_current_snapshot,
 )
 from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
@@ -95,6 +100,16 @@ class CrossPlatformReportingSnapshot:
     """One in-memory committed snapshot shared by filters, UI, and export."""
 
     eligible_items: tuple[CommittedReportingItem, ...]
+    order_created_items: tuple[CommittedReportingItem, ...] | None = None
+
+    def items_for(self, date_type: CrossPlatformDateType) -> tuple[CommittedReportingItem, ...]:
+        """Select the approved authority without canonical fallback."""
+
+        if date_type is CrossPlatformDateType.PAYOUT:
+            return self.eligible_items
+        # Directly-built snapshots are legacy in-memory fixtures. The live reader
+        # always supplies this field, including an explicit empty Current source.
+        return self.eligible_items if self.order_created_items is None else self.order_created_items
 
     def available_dates(
         self,
@@ -106,7 +121,7 @@ class CrossPlatformReportingSnapshot:
             sorted(
                 {
                     selected_date
-                    for item in self.eligible_items
+                    for item in self.items_for(date_type)
                     if (selected_date := _date_for_type(item, date_type)) is not None
                     if item.platform == _persisted_platform_for_filter(platform)
                 }
@@ -149,7 +164,12 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
         self._gateway = gateway
 
     def load_snapshot(self) -> CrossPlatformReportingSnapshot:
-        tabs = (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB)
+        tabs = (
+            INVOICE_ORDERS_TAB,
+            INVOICE_ITEMS_TAB,
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+        )
         try:
             values = self._gateway.read_tabs(self._spreadsheet_id, tabs)
         except HistoricalInvoiceStorageError:
@@ -201,7 +221,17 @@ def build_cross_platform_reporting_snapshot(
         if is_cancelled_invoice_order(order):
             continue
         eligible.append(_reporting_item(item, order))
-    return CrossPlatformReportingSnapshot(eligible_items=tuple(eligible))
+    return CrossPlatformReportingSnapshot(
+        eligible_items=tuple(eligible),
+        order_created_items=(
+            _full_order_current_reporting_items(tabs)
+            if {
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+            } <= tabs.keys()
+            else ()
+        ),
+    )
 
 
 def build_cross_platform_product_summary(
@@ -239,7 +269,7 @@ def build_cross_platform_product_summary(
         )
     filtered = tuple(
         item
-        for item in snapshot.eligible_items
+        for item in snapshot.items_for(date_type)
         if (
             item.platform == _persisted_platform_for_filter(platform)
         )
@@ -247,7 +277,11 @@ def build_cross_platform_product_summary(
         and (from_date is None or selected_date >= from_date)
         and (to_date is None or selected_date <= to_date)
     )
-    source_items = _allocate_shopee_amounts(filtered)
+    source_items = (
+        _direct_full_order_amounts(filtered)
+        if date_type is CrossPlatformDateType.ORDER_CREATED
+        else _allocate_shopee_amounts(filtered)
+    )
     return CrossPlatformProductSummary(
         platform=platform,
         date_type=date_type,
@@ -264,6 +298,160 @@ def _reporting_item(
     seller_sku = normalize_sku_text(
         _text(item.resolved_seller_sku) or _text(item.seller_sku)
     )
+    if not seller_sku:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted Seller SKU."
+        )
+    description = _text(item.product_name)
+    nav = _text(item.nav)
+    if not description:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted Product Name."
+        )
+    if not nav:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted NAV."
+        )
+    if item.quantity is None or item.quantity <= 0:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted Qty."
+        )
+    if item.unit_price is None:
+        raise CrossPlatformProductSummaryError(
+            f"{item.order_id}/{item.item_index}: missing persisted Unit Price."
+        )
+    context = _context_for_persisted_platform(item.platform)
+    return CommittedReportingItem(
+        platform=context.persisted_platform,
+        currency=context.currency_code,
+        order_id=item.order_id,
+        item_index=item.item_index,
+        payout_completed_date=order.payout_completed_date,
+        seller_sku=seller_sku,
+        nav=nav,
+        description=description,
+        variation=_text(item.variation),
+        quantity=item.quantity,
+        unit_price=_cent_money(item.unit_price, item, "Unit Price"),
+        line_subtotal=(
+            None if item.line_subtotal is None else _cent_money(item.line_subtotal, item, "line_subtotal")
+        ),
+        promotion_group_id=_text(item.promotion_group_id) or None,
+        promotion_label=_text(item.promotion_label) or None,
+        source_group_total=(
+            None if item.source_group_total is None else _cent_money(item.source_group_total, item, "source_group_total")
+        ),
+        order_created_date=order.order_created_date,
+    )
+
+
+def _full_order_current_reporting_items(
+    tabs: Mapping[str, Sequence[Sequence[Any]]],
+) -> tuple[CommittedReportingItem, ...]:
+    """Map Full Order Current directly to gross order-created reporting facts."""
+
+    current = deserialize_full_order_current_snapshot(
+        {
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: tabs[
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB
+            ],
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: tabs[
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB
+            ],
+        }
+    )
+    orders = {(order.market, order.order_id): order for order in current.orders}
+    eligible: list[CommittedReportingItem] = []
+    for item in current.items:
+        order = orders[(item.market, item.order_id)]
+        if _is_explicitly_cancelled_full_order(order.order_status):
+            continue
+        context = resolve_market_context(item.market)
+        seller_sku = normalize_sku_text(_text(item.resolved_seller_sku))
+        if not seller_sku:
+            raise CrossPlatformProductSummaryError(
+                f"{item.order_id}/{item.item_index}: Full Order Current has no resolved Seller SKU."
+            )
+        if not _text(item.nav):
+            raise CrossPlatformProductSummaryError(
+                f"{item.order_id}/{item.item_index}: Full Order Current has no NAV."
+            )
+        if not _text(item.product_name):
+            raise CrossPlatformProductSummaryError(
+                f"{item.order_id}/{item.item_index}: Full Order Current has no Product Name."
+            )
+        if item.quantity <= 0:
+            raise CrossPlatformProductSummaryError(
+                f"{item.order_id}/{item.item_index}: Full Order Current has invalid Qty."
+            )
+        unit_price = _cent_current_money(item.unit_price, item.order_id, item.item_index, "Unit Price")
+        subtotal = _cent_current_money(
+            item.product_subtotal, item.order_id, item.item_index, "Product Subtotal"
+        )
+        eligible.append(
+            CommittedReportingItem(
+                platform=context.persisted_platform,
+                currency=context.currency_code,
+                order_id=item.order_id,
+                item_index=item.item_index,
+                payout_completed_date=None,
+                seller_sku=seller_sku,
+                nav=_text(item.nav),
+                description=_text(item.product_name),
+                variation=_text(item.variation),
+                quantity=item.quantity,
+                unit_price=unit_price,
+                line_subtotal=subtotal,
+                promotion_group_id=None,
+                promotion_label=None,
+                source_group_total=None,
+                order_created_date=order.order_created_date,
+                amount=subtotal,
+            )
+        )
+    return tuple(eligible)
+
+
+def _is_explicitly_cancelled_full_order(order_status: str) -> bool:
+    return _text(order_status).casefold() in {"cancelled", "canceled"}
+
+
+def _direct_full_order_amounts(
+    items: Sequence[CommittedReportingItem],
+) -> tuple[CommittedReportingItem, ...]:
+    """Full Order Product Subtotal is already the promotion-aware item amount."""
+
+    return tuple(
+        sorted(
+            (
+                replace(
+                    item,
+                    amount=(
+                        item.line_subtotal
+                        if item.line_subtotal is not None
+                        else _missing_current_subtotal(item)
+                    ),
+                )
+                for item in items
+            ),
+            key=_source_item_sort_key,
+        )
+    )
+
+
+def _missing_current_subtotal(item: CommittedReportingItem) -> Decimal:
+    raise CrossPlatformProductSummaryError(
+        f"{item.order_id}/{item.item_index}: Full Order Current has no Product Subtotal."
+    )
+
+
+def _cent_current_money(value: Decimal, order_id: str, item_index: int, field: str) -> Decimal:
+    quantized = value.quantize(CENT)
+    if value != quantized:
+        raise CrossPlatformProductSummaryError(
+            f"{order_id}/{item_index}: Full Order Current {field} is not at cent precision."
+        )
+    return quantized
     if not seller_sku:
         raise CrossPlatformProductSummaryError(
             "BUSINESS DECISION REQUIRED — CONSOLIDATED PRODUCT SUMMARY SKU MISSING: "

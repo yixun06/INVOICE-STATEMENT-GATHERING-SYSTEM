@@ -8,6 +8,10 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+    SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+    SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
 )
 
 
@@ -82,6 +86,34 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
                     line_subtotal="5.00",
                 ),
             ],
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: [
+                list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
+                _sheet_row(
+                    SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+                    market="shopee_my",
+                    order_id="SHP-CURRENT-ONLY",
+                    order_status="Shipping",
+                    order_created_date="2026-08-03",
+                    source_file="full-order.xlsx",
+                    snapshot_hash="a" * 64,
+                    last_synced_at="2026-08-08T10:00:00+00:00",
+                ),
+            ],
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: [
+                list(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS),
+                _sheet_row(
+                    SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+                    market="shopee_my",
+                    order_id="SHP-CURRENT-ONLY",
+                    item_index="0",
+                    resolved_seller_sku="9555208107000",
+                    nav="300003",
+                    product_name="Current only",
+                    quantity="1",
+                    unit_price="12.00",
+                    product_subtotal="10.00",
+                ),
+            ],
         }
     )
 
@@ -91,7 +123,15 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
     summary = build_cross_platform_product_summary(snapshot, platform="Shopee MY")
 
     assert gateway.read_calls == [
-        ("uat2", (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB))
+        (
+            "uat2",
+            (
+                INVOICE_ORDERS_TAB,
+                INVOICE_ITEMS_TAB,
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+            ),
+        )
     ]
     assert snapshot.available_payout_dates("Shopee MY") == (date(2026, 8, 8),)
     assert [item.order_id for item in snapshot.eligible_items] == [
@@ -112,7 +152,7 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
     ]
 
 
-def test_order_created_date_filters_include_committed_rows_without_payout_evidence():
+def test_order_created_date_uses_explicit_current_rows_without_payout_evidence():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,
         CrossPlatformReportingSnapshot,
@@ -141,24 +181,119 @@ def test_order_created_date_filters_include_committed_rows_without_payout_eviden
                 quantity=1,
                 line_subtotal="10.00",
             ),
-        )
+        ),
+        order_created_items=(
+            _item(
+                order_id="SHP-CURRENT-PENDING",
+                item_index=0,
+                payout_date=None,
+                order_created_date=date(2026, 8, 2),
+                sku="SKU-CURRENT",
+                unit_price="10.00",
+                quantity=1,
+                line_subtotal="8.00",
+            ),
+        ),
     )
 
     summary = build_cross_platform_product_summary(
         snapshot,
         date_type=CrossPlatformDateType.ORDER_CREATED,
-        from_date=date(2026, 8, 1),
+        from_date=date(2026, 8, 2),
         to_date=date(2026, 8, 2),
     )
 
     assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED) == (
-        date(2026, 8, 1),
         date(2026, 8, 2),
     )
     assert {item.order_id for item in summary.source_items} == {
-        "SHP-PAYOUT",
-        "SHP-PENDING",
+        "SHP-CURRENT-PENDING",
     }
+
+
+def test_order_created_current_source_excludes_cancelled_and_never_uses_canonical_fallback():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    tabs = {
+        INVOICE_ORDERS_TAB: [
+            list(INVOICE_ORDERS_HEADERS),
+            _sheet_row(
+                INVOICE_ORDERS_HEADERS,
+                platform="Shopee",
+                order_id="CANONICAL-ONLY",
+                payout_completed_date="2026-08-08",
+                first_imported_at="2026-08-08T10:00:00+00:00",
+            ),
+        ],
+        INVOICE_ITEMS_TAB: [
+            list(INVOICE_ITEMS_HEADERS),
+            _sheet_row(
+                INVOICE_ITEMS_HEADERS,
+                platform="Shopee",
+                order_id="CANONICAL-ONLY",
+                item_index="0",
+                seller_sku="CANONICAL",
+                nav="NAV-C",
+                product_name="Canonical only",
+                quantity="1",
+                unit_price="9.00",
+                line_subtotal="9.00",
+            ),
+        ],
+        SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: [
+            list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
+            _sheet_row(
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+                market="shopee_my", order_id="CURRENT-SHIPPING", order_status="Shipping",
+                order_created_date="2026-08-02", source_file="current.xlsx",
+                snapshot_hash="b" * 64, last_synced_at="2026-10-20T00:00:00+00:00",
+            ),
+            _sheet_row(
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+                market="shopee_my", order_id="CURRENT-CANCELLED", order_status="Cancelled",
+                order_created_date="2026-08-02", source_file="current.xlsx",
+                snapshot_hash="c" * 64, last_synced_at="2026-10-20T00:00:00+00:00",
+            ),
+        ],
+        SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: [
+            list(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS),
+            _sheet_row(
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+                market="shopee_my", order_id="CURRENT-SHIPPING", item_index="0",
+                resolved_seller_sku="CURRENT", nav="NAV-1", product_name="Current Shipping",
+                quantity="2", unit_price="10.00", product_subtotal="18.00",
+            ),
+            _sheet_row(
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+                market="shopee_my", order_id="CURRENT-CANCELLED", item_index="0",
+                resolved_seller_sku="CANCELLED", nav="NAV-2", product_name="Cancelled",
+                quantity="1", unit_price="8.00", product_subtotal="8.00",
+            ),
+        ],
+    }
+
+    snapshot = build_cross_platform_reporting_snapshot(tabs)
+    created = build_cross_platform_product_summary(
+        snapshot,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 8, 2),
+        to_date=date(2026, 8, 2),
+    )
+    payout = build_cross_platform_product_summary(
+        snapshot,
+        date_type=CrossPlatformDateType.PAYOUT,
+        from_date=date(2026, 8, 8),
+        to_date=date(2026, 8, 8),
+    )
+
+    assert [item.order_id for item in created.source_items] == ["CURRENT-SHIPPING"]
+    assert created.product_rows[0].amount == Decimal("18.00")
+    assert created.product_rows[0].discount_amount == Decimal("2.00")
+    assert [item.order_id for item in payout.source_items] == ["CANONICAL-ONLY"]
 
 
 def test_cross_product_summary_excludes_cancelled_parent_by_status_or_layout():

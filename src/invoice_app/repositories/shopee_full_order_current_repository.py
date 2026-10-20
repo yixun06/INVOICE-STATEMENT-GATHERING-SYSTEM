@@ -33,6 +33,7 @@ class FullOrderSyncStatus(str, Enum):
     NEW = "NEW"
     UPDATED = "UPDATED"
     UNCHANGED = "UNCHANGED"
+    RETAINED = "RETAINED"
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,12 @@ class FullOrderSyncResult:
     @property
     def unchanged_count(self) -> int:
         return sum(item.status is FullOrderSyncStatus.UNCHANGED for item in self.decisions)
+
+    @property
+    def retained_count(self) -> int:
+        """Orders deliberately left untouched by a historical missing-only sync."""
+
+        return sum(item.status is FullOrderSyncStatus.RETAINED for item in self.decisions)
 
 
 @dataclass(frozen=True)
@@ -98,33 +105,7 @@ class ShopeeFullOrderCurrentRepository:
                 SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
             ),
         )
-        order_rows = _validated_rows(
-            tabs,
-            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
-            SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
-        )
-        item_rows = _validated_rows(
-            tabs,
-            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
-            SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
-        )
-        orders = tuple(_deserialize_order(row, number) for number, row in order_rows)
-        items = tuple(_deserialize_item(row, number) for number, row in item_rows)
-        order_keys = {(order.market, order.order_id) for order in orders}
-        if len(order_keys) != len(orders):
-            raise HistoricalInvoiceStorageError(
-                "Shopee Full Order current Orders contains duplicate identities."
-            )
-        item_keys = {(item.market, item.order_id, item.item_index) for item in items}
-        if len(item_keys) != len(items):
-            raise HistoricalInvoiceStorageError(
-                "Shopee Full Order current Items contains duplicate identities."
-            )
-        if any((item.market, item.order_id) not in order_keys for item in items):
-            raise HistoricalInvoiceStorageError(
-                "Shopee Full Order current Item has no matching current Order."
-            )
-        return FullOrderCurrentSnapshot(orders=orders, items=items)
+        return deserialize_full_order_current_snapshot(tabs)
 
     def classify(self, batch: FullOrderCurrentBatch) -> FullOrderSyncResult:
         return _classify(batch, self.read_snapshot())
@@ -207,6 +188,90 @@ class ShopeeFullOrderCurrentRepository:
                 )
             return result
 
+    def sync_missing_only(self, batch: FullOrderCurrentBatch) -> FullOrderSyncResult:
+        """Append only verified missing historical orders; never replace Current facts."""
+
+        if not batch.syncable:
+            raise HistoricalInvoiceStorageError(
+                "Shopee Full Order historical backfill is blocked by validation or Product Master issues."
+            )
+        with self._commit_lock.acquire():
+            before = self.read_snapshot()
+            result = _classify_missing_only(batch, before)
+            additions = tuple(
+                order
+                for order in batch.orders
+                if (order.market, order.order_id)
+                not in {(existing.market, existing.order_id) for existing in before.orders}
+            )
+            if not additions:
+                return result
+            addition_keys = {(order.market, order.order_id) for order in additions}
+            addition_items = tuple(
+                item for item in batch.items if (item.market, item.order_id) in addition_keys
+            )
+            expected = FullOrderCurrentSnapshot(
+                orders=before.orders + additions,
+                items=before.items + addition_items,
+            )
+            sheet_ids = self._gateway.read_sheet_ids(
+                self._spreadsheet_id,
+                (
+                    SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+                    SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+                ),
+            )
+            row_counts = self._gateway.read_sheet_row_counts(
+                self._spreadsheet_id,
+                (
+                    SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+                    SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+                ),
+            )
+            requests = tuple(
+                request
+                for request in (
+                    _append_rows_request(
+                        sheet_ids[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB],
+                        current_row_count=row_counts[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB],
+                        required_row_count=1 + len(expected.orders),
+                    ),
+                    _append_rows_request(
+                        sheet_ids[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB],
+                        current_row_count=row_counts[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB],
+                        required_row_count=1 + len(expected.items),
+                    ),
+                )
+                if request is not None
+            ) + (
+                _append_data_request(
+                    sheet_ids[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB],
+                    tuple(_serialize_order(order) for order in additions),
+                ),
+                _append_data_request(
+                    sheet_ids[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB],
+                    tuple(_serialize_item(item) for item in addition_items),
+                ),
+            )
+            try:
+                self._gateway.batch_update(self._spreadsheet_id, requests)
+            except Exception as error:
+                after = self.read_snapshot()
+                if _same_snapshot(after, expected):
+                    return result
+                if _same_snapshot(after, before):
+                    raise HistoricalInvoiceStorageError(
+                        "Shopee Full Order historical backfill was not applied; retry from fresh validation."
+                    ) from error
+                raise HistoricalInvoiceStorageError(
+                    "Shopee Full Order historical backfill outcome is mixed; manual recovery is required."
+                ) from error
+            if not _same_snapshot(self.read_snapshot(), expected):
+                raise HistoricalInvoiceStorageError(
+                    "Shopee Full Order historical backfill readback did not match the intended append-only snapshot."
+                )
+            return result
+
 
 def _classify(
     batch: FullOrderCurrentBatch, snapshot: FullOrderCurrentSnapshot
@@ -232,6 +297,24 @@ def _classify(
     return FullOrderSyncResult(tuple(decisions))
 
 
+def _classify_missing_only(
+    batch: FullOrderCurrentBatch, snapshot: FullOrderCurrentSnapshot
+) -> FullOrderSyncResult:
+    existing = {(order.market, order.order_id) for order in snapshot.orders}
+    return FullOrderSyncResult(
+        tuple(
+            FullOrderSyncDecision(
+                order.market,
+                order.order_id,
+                FullOrderSyncStatus.RETAINED
+                if (order.market, order.order_id) in existing
+                else FullOrderSyncStatus.NEW,
+            )
+            for order in batch.orders
+        )
+    )
+
+
 def _merged_snapshot(
     before: FullOrderCurrentSnapshot,
     batch: FullOrderCurrentBatch,
@@ -249,7 +332,7 @@ def _merged_snapshot(
     }
     final_items = list(before.items)
     for identity, incoming in incoming_orders.items():
-        if status[identity] is FullOrderSyncStatus.UNCHANGED:
+        if status[identity] in {FullOrderSyncStatus.UNCHANGED, FullOrderSyncStatus.RETAINED}:
             continue
         if identity in order_position:
             final_orders[order_position[identity]] = incoming
@@ -265,6 +348,63 @@ def _merged_snapshot(
         key=lambda item: (item_order[(item.market, item.order_id)], item.item_index)
     )
     return FullOrderCurrentSnapshot(tuple(final_orders), tuple(final_items))
+
+
+def _append_data_request(
+    sheet_id: int,
+    rows: Sequence[Sequence[str]],
+) -> Mapping[str, Any]:
+    """Append new Current rows without rewriting any existing order or item cells."""
+
+    return {
+        "appendCells": {
+            "sheetId": sheet_id,
+            "rows": [
+                {
+                    "values": [
+                        {"userEnteredValue": {"stringValue": value}}
+                        for value in row
+                    ]
+                }
+                for row in rows
+            ],
+            "fields": "userEnteredValue",
+        }
+    }
+
+
+def deserialize_full_order_current_snapshot(
+    tabs: Mapping[str, Sequence[Sequence[Any]]],
+) -> FullOrderCurrentSnapshot:
+    """Read the locked Current schema for its repository and reporting consumer."""
+
+    order_rows = _validated_rows(
+        tabs,
+        SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+        SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+    )
+    item_rows = _validated_rows(
+        tabs,
+        SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+        SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+    )
+    orders = tuple(_deserialize_order(row, number) for number, row in order_rows)
+    items = tuple(_deserialize_item(row, number) for number, row in item_rows)
+    order_keys = {(order.market, order.order_id) for order in orders}
+    if len(order_keys) != len(orders):
+        raise HistoricalInvoiceStorageError(
+            "Shopee Full Order current Orders contains duplicate identities."
+        )
+    item_keys = {(item.market, item.order_id, item.item_index) for item in items}
+    if len(item_keys) != len(items):
+        raise HistoricalInvoiceStorageError(
+            "Shopee Full Order current Items contains duplicate identities."
+        )
+    if any((item.market, item.order_id) not in order_keys for item in items):
+        raise HistoricalInvoiceStorageError(
+            "Shopee Full Order current Item has no matching current Order."
+        )
+    return FullOrderCurrentSnapshot(orders=orders, items=items)
 
 
 def _replace_data_request(
