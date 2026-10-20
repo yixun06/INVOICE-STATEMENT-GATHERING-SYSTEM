@@ -101,16 +101,22 @@ def test_every_platform_enters_the_shared_data_import_shell(tmp_path, monkeypatc
     assert f"{platform_name} · Data Import" in {item.value for item in app.title}
     assert _source_selector(app).options == [
         "Invoice Import",
+        "Full Order Import",
         "Weekly Statement",
         "Monthly Statement",
     ]
 
 
-def test_shopee_my_keeps_all_three_current_source_workflows_available(tmp_path, monkeypatch):
+def test_shopee_my_keeps_all_four_current_source_workflows_available(tmp_path, monkeypatch):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee MY")
     selector = _source_selector(app)
 
-    for source in ("Invoice Import", "Weekly Statement", "Monthly Statement"):
+    for source in (
+        "Invoice Import",
+        "Full Order Import",
+        "Weekly Statement",
+        "Monthly Statement",
+    ):
         selector.set_value(source).run(timeout=20)
         continue_button = next(button for button in app.button if button.label == "Continue to upload")
         assert continue_button.disabled is False

@@ -24,6 +24,8 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
     HistoricalInvoiceStorageError,
     _deserialize_item,
     _deserialize_order,
+    _serialize_item,
+    _serialize_order,
 )
 from src.invoice_app.services.application_commit_lock import (
     APPLICATION_COMMIT_LOCK,
@@ -126,7 +128,9 @@ class _OrderAdjustmentTarget:
 class _WriterSnapshot:
     sheet_ids: Mapping[str, int]
     orders: Mapping[tuple[str, str], _OrderTarget]
+    invoice_order_append_row_index: int
     items: Mapping[tuple[str, str, int], _ItemTarget]
+    invoice_item_append_row_index: int
     statement_rows: tuple[_StatementTarget, ...]
     statement_append_row_index: int
     financial_component_rows: tuple[_FinancialComponentTarget, ...]
@@ -321,7 +325,9 @@ class GoogleSheetsStatementWriter:
         return _WriterSnapshot(
             sheet_ids=sheet_ids,
             orders=orders,
+            invoice_order_append_row_index=_append_row_index(tabs[INVOICE_ORDERS_TAB]),
             items=items,
+            invoice_item_append_row_index=_append_row_index(tabs[INVOICE_ITEMS_TAB]),
             statement_rows=persisted_statement_rows,
             statement_append_row_index=_append_row_index(tabs[STATEMENT_DATA_TAB]),
             financial_component_rows=tuple(
@@ -349,6 +355,7 @@ class GoogleSheetsStatementWriter:
     def _build_value_ranges(
         self, plan: StatementCommitPlan, snapshot: _WriterSnapshot
     ) -> tuple[Mapping[str, Any], ...]:
+        _validate_canonical_inserts(plan, snapshot, self._persisted_platform)
         _validate_incoming_statement_identities(plan, snapshot)
         _validate_incoming_financial_component_identities(plan, snapshot)
         _validate_incoming_summary_identities(plan, snapshot)
@@ -373,6 +380,24 @@ class GoogleSheetsStatementWriter:
                 plan.summary_rows,
             ),
         ]
+        if plan.invoice_order_inserts:
+            data.append(
+                _value_range(
+                    INVOICE_ORDERS_TAB,
+                    snapshot.invoice_order_append_row_index,
+                    0,
+                    tuple(_serialize_order(order) for order in plan.invoice_order_inserts),
+                )
+            )
+        if plan.invoice_item_inserts:
+            data.append(
+                _value_range(
+                    INVOICE_ITEMS_TAB,
+                    snapshot.invoice_item_append_row_index,
+                    0,
+                    tuple(_serialize_item(item) for item in plan.invoice_item_inserts),
+                )
+            )
         if new_adjustment_rows:
             data.append(
                 _value_range(
@@ -383,6 +408,10 @@ class GoogleSheetsStatementWriter:
                 )
             )
         seen_orders: set[tuple[str, str]] = set()
+        inserted_orders = {
+            (order.platform, order.order_id): order
+            for order in plan.invoice_order_inserts
+        }
         for update in plan.invoice_order_updates:
             key = (self._persisted_platform, _text(update.order_id))
             if key in seen_orders:
@@ -390,12 +419,19 @@ class GoogleSheetsStatementWriter:
             seen_orders.add(key)
             target = snapshot.orders.get(key)
             if target is None:
-                raise StatementCommitBlocked(f"Invoice_Orders target is missing: {key!r}.")
+                inserted = inserted_orders.get(key)
+                if inserted is None or not _inserted_order_has_update(inserted, update):
+                    raise StatementCommitBlocked(f"Invoice_Orders target is missing: {key!r}.")
+                continue
             data.append(
                 _order_update_value_range(INVOICE_ORDERS_TAB, target, update)
             )
 
         seen_items: set[tuple[str, str, int]] = set()
+        inserted_items = {
+            (item.platform, item.order_id, item.item_index): item
+            for item in plan.invoice_item_inserts
+        }
         for update in plan.invoice_item_updates:
             key = (self._persisted_platform, _text(update.order_id), update.item_index)
             if key in seen_items:
@@ -403,7 +439,10 @@ class GoogleSheetsStatementWriter:
             seen_items.add(key)
             target = snapshot.items.get(key)
             if target is None:
-                raise StatementCommitBlocked(f"Invoice_Items target is missing: {key!r}.")
+                inserted = inserted_items.get(key)
+                if inserted is None or not _inserted_item_has_update(inserted, update):
+                    raise StatementCommitBlocked(f"Invoice_Items target is missing: {key!r}.")
+                continue
             data.append(
                 _item_update_value_range(INVOICE_ITEMS_TAB, target, update)
             )
@@ -1001,6 +1040,20 @@ def _validate_group_protection(
         protected_keys.add(key)
         target = snapshot.items.get(key)
         if target is None:
+            inserted = next(
+                (
+                    item
+                    for item in plan.invoice_item_inserts
+                    if (item.platform, item.order_id, item.item_index) == key
+                ),
+                None,
+            )
+            if inserted is not None and (
+                _serialize(inserted.statement_product_price),
+                _serialize(inserted.statement_refund_amount),
+                _serialize(inserted.statement_net_selling_amount),
+            ) == _expected_protected_values(protected):
+                continue
             raise StatementCommitBlocked(
                 f"GROUP protected Invoice_Items target is missing: {key!r}."
             )
@@ -1018,6 +1071,55 @@ def _protected_values(target: _ItemTarget) -> tuple[str, str, str]:
             "statement_refund_amount",
             "statement_net_selling_amount",
         )
+    )
+
+
+def _validate_canonical_inserts(
+    plan: StatementCommitPlan,
+    snapshot: _WriterSnapshot,
+    persisted_platform: str,
+) -> None:
+    order_keys = [(order.platform, order.order_id) for order in plan.invoice_order_inserts]
+    if len(set(order_keys)) != len(order_keys):
+        raise StatementCommitBlocked("Full Order canonical plan duplicates Invoice_Orders keys.")
+    if any(platform != persisted_platform for platform, _ in order_keys):
+        raise StatementCommitBlocked("Full Order canonical Order belongs to another market.")
+    conflicts = [key for key in order_keys if key in snapshot.orders]
+    if conflicts:
+        raise StatementCommitBlocked(
+            f"Full Order canonical Order already exists: {conflicts[0]!r}."
+        )
+    item_keys = [
+        (item.platform, item.order_id, item.item_index)
+        for item in plan.invoice_item_inserts
+    ]
+    if len(set(item_keys)) != len(item_keys):
+        raise StatementCommitBlocked("Full Order canonical plan duplicates Invoice_Items keys.")
+    if any(key in snapshot.items for key in item_keys):
+        raise StatementCommitBlocked("Full Order canonical Item already exists.")
+    planned_orders = set(order_keys)
+    if any((platform, order_id) not in planned_orders for platform, order_id, _ in item_keys):
+        raise StatementCommitBlocked("Full Order canonical Item has no planned Order.")
+
+
+def _inserted_order_has_update(
+    order: CanonicalInvoiceOrder, update: InvoiceOrderStatementUpdate
+) -> bool:
+    return (
+        _serialize(order.payment_status) == _serialize(update.payment_status)
+        and _serialize(order.payout_completed_date) == _serialize(update.payout_completed_date)
+        and _serialize(order.difference) == _serialize(update.difference)
+    )
+
+
+def _inserted_item_has_update(
+    item: CanonicalInvoiceItem, update: InvoiceItemStatementUpdate
+) -> bool:
+    return (
+        _serialize(item.statement_product_price) == _serialize(update.statement_product_price)
+        and _serialize(item.statement_refund_amount) == _serialize(update.statement_refund_amount)
+        and _serialize(item.statement_net_selling_amount)
+        == _serialize(update.statement_net_selling_amount)
     )
 
 
@@ -1159,6 +1261,8 @@ def _classify_write_result(
         expected_values = tuple(value for _, value in field_values)
         all_enrichments = all_enrichments and after_values == expected_values
         no_enrichments = no_enrichments and after_values == before_values
+    all_inserts = _canonical_inserts_applied(plan, after, persisted_platform)
+    no_inserts = _canonical_inserts_absent(plan, before, after, persisted_platform)
     protected_unchanged = _protected_items_unchanged(
         plan, before, after, persisted_platform
     )
@@ -1168,6 +1272,7 @@ def _classify_write_result(
         and all_summary
         and all_adjustments
         and all_enrichments
+        and all_inserts
         and protected_unchanged
     ):
         return StatementWriteVerification.ALL_APPLIED
@@ -1177,6 +1282,7 @@ def _classify_write_result(
         and no_summary
         and no_adjustments
         and no_enrichments
+        and no_inserts
         and protected_unchanged
     ):
         return StatementWriteVerification.NONE_APPLIED
@@ -1193,15 +1299,54 @@ def _protected_items_unchanged(
         key = (persisted_platform, _text(protected.order_id), protected.item_index)
         before_target = before.items.get(key)
         after_target = after.items.get(key)
-        if before_target is None or after_target is None:
-            return False
         expected = _expected_protected_values(protected)
+        if before_target is None:
+            if after_target is None:
+                continue
+            if _protected_values(after_target) == expected:
+                continue
+            return False
+        if after_target is None:
+            return False
         if (
             _protected_values(before_target) != expected
             or _protected_values(after_target) != expected
         ):
             return False
     return True
+
+
+def _canonical_inserts_applied(
+    plan: StatementCommitPlan,
+    snapshot: _WriterSnapshot,
+    persisted_platform: str,
+) -> bool:
+    for order in plan.invoice_order_inserts:
+        target = snapshot.orders.get((persisted_platform, order.order_id))
+        if target is None or tuple(_cell_string(value) for value in target.values) != _serialize_order(order):
+            return False
+    for item in plan.invoice_item_inserts:
+        target = snapshot.items.get((persisted_platform, item.order_id, item.item_index))
+        if target is None or tuple(_cell_string(value) for value in target.values) != _serialize_item(item):
+            return False
+    return True
+
+
+def _canonical_inserts_absent(
+    plan: StatementCommitPlan,
+    before: _WriterSnapshot,
+    after: _WriterSnapshot,
+    persisted_platform: str,
+) -> bool:
+    return all(
+        (persisted_platform, order.order_id) not in before.orders
+        and (persisted_platform, order.order_id) not in after.orders
+        for order in plan.invoice_order_inserts
+    ) and all(
+        (persisted_platform, item.order_id, item.item_index) not in before.items
+        and (persisted_platform, item.order_id, item.item_index) not in after.items
+        for item in plan.invoice_item_inserts
+    )
 
 
 def _expected_target_values(
@@ -1258,6 +1403,14 @@ def _validate_plan_market_identity(
     if any(event.platform != persisted_platform for event in plan.order_adjustments):
         raise StatementCommitBlocked(
             "Statement adjustment platform does not match the locked writer market."
+        )
+    if any(order.platform != persisted_platform for order in plan.invoice_order_inserts):
+        raise StatementCommitBlocked(
+            "Full Order canonical Order does not match the locked writer market."
+        )
+    if any(item.platform != persisted_platform for item in plan.invoice_item_inserts):
+        raise StatementCommitBlocked(
+            "Full Order canonical Item does not match the locked writer market."
         )
 
 

@@ -27,8 +27,22 @@ class PriceLookupStatus(str, Enum):
     MATCHED = "matched"
     MATCHED_BY_ALIAS = "matched_by_alias"
     MATCHED_BY_NAME_VARIATION = "matched_by_name_variation"
+    MATCHED_BY_FULL_ORDER_MATCH_ONLY = "matched_by_full_order_match_only"
     PRICING_CONFLICT = "pricing_conflict"
     PRICE_NOT_FOUND = "price_not_found"
+
+
+_NORMAL_MATCHED_STATUSES = frozenset(
+    {
+        PriceLookupStatus.MATCHED_BY_SKU,
+        PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
+        PriceLookupStatus.MATCHED_BY_PARENT_SKU,
+        PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION,
+        PriceLookupStatus.MATCHED,
+        PriceLookupStatus.MATCHED_BY_ALIAS,
+        PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +56,7 @@ class ProductPriceMasterRecord:
     nav_code: str | None = None
     product_id: str | None = None
     usoft_product_description: str | None = None
+    remark: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +96,8 @@ _REQUIRED_HEADERS = {
 _NAV_HEADER = "nav code"
 _PRODUCT_ID_HEADER = "product id"
 _USOFT_PRODUCT_DESCRIPTION_HEADER = "usoft product description"
+_REMARK_HEADER = "remark"
+_FULL_ORDER_MATCH_ONLY_REMARK = "full_order_match_only"
 _STRICT_PRICE = re.compile(
     r"^(?:RM\s*)?(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)$",
     re.IGNORECASE,
@@ -100,8 +117,14 @@ class ProductPriceMaster:
     ) -> None:
         self.metadata = metadata
         self.records = tuple(records)
-        self._seller_sku_index = _build_index(self.records, "seller_sku")
-        self._parent_sku_index = _build_index(self.records, "parent_sku")
+        self._normal_records = tuple(
+            record for record in self.records if not _is_full_order_match_only(record)
+        )
+        self._full_order_match_only_records = tuple(
+            record for record in self.records if _is_full_order_match_only(record)
+        )
+        self._seller_sku_index = _build_index(self._normal_records, "seller_sku")
+        self._parent_sku_index = _build_index(self._normal_records, "parent_sku")
         self._sku_parent_peer_keys = sku_parent_peer_keys
         self._allow_less_suffix_alias = allow_less_suffix_alias
 
@@ -149,6 +172,7 @@ class ProductPriceMaster:
                         usoft_product_description=(
                             _display_text(values.get("usoft_product_description")) or None
                         ),
+                        remark=_display_text(values.get("remark")) or None,
                     )
                 )
 
@@ -199,6 +223,7 @@ class ProductPriceMaster:
                     usoft_product_description=(
                         _display_text(row.get("usoft_product_description")) or None
                     ),
+                    remark=_display_text(row.get("remark")) or None,
                 )
             )
         return cls(
@@ -264,6 +289,65 @@ class ProductPriceMaster:
                 )
         return self._not_found(
             f"No Product Listing SKU or Parent SKU matches '{requested_seller_sku}'."
+        )
+
+    def lookup_full_order(
+        self,
+        *,
+        seller_sku: str | None,
+        parent_sku: str | None,
+        product_name: str | None,
+        variation_name: str | None,
+    ) -> ProductPriceLookupResult:
+        """Resolve a Shopee Full Order row using its explicit compatibility rows last.
+
+        ``FULL_ORDER_MATCH_ONLY`` records are intentionally absent from the normal
+        SKU, Parent SKU, and name/variation indexes.  They are examined only after
+        all normal Full Order resolution steps have returned not found.
+        """
+        earlier_ambiguous_result: ProductPriceLookupResult | None = None
+        for source_sku in dict.fromkeys((seller_sku, parent_sku)):
+            if not normalize_sku_text(source_sku):
+                continue
+            result = self.lookup(
+                seller_sku=source_sku,
+                product_name=product_name,
+                variation_name=variation_name,
+            )
+            if result.status in _NORMAL_MATCHED_STATUSES:
+                return result
+            if (
+                result.status
+                is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
+                and earlier_ambiguous_result is None
+            ):
+                earlier_ambiguous_result = result
+
+        normal_name_result = self._resolve_name_variation(product_name, variation_name)
+        if normal_name_result.status in _NORMAL_MATCHED_STATUSES:
+            return normal_name_result
+        if normal_name_result.status is not PriceLookupStatus.PRICE_NOT_FOUND:
+            return earlier_ambiguous_result or normal_name_result
+
+        compatibility_candidates = _exact_name_variation(
+            self._full_order_match_only_records,
+            product_name,
+            variation_name,
+        )
+        if not compatibility_candidates:
+            return earlier_ambiguous_result or self._not_found(
+                "No normal Product Listing or FULL_ORDER_MATCH_ONLY identity exactly "
+                "matches Product Name / Variation."
+            )
+        if _has_one_company_identity(compatibility_candidates):
+            return self._matched_identity(
+                compatibility_candidates,
+                status=PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY,
+            )
+        return self._conflict(
+            compatibility_candidates,
+            "FULL_ORDER_MATCH_ONLY Product Name / Variation matches multiple "
+            "company product identities.",
         )
 
     def _sku_candidates(
@@ -353,7 +437,9 @@ class ProductPriceMaster:
             return self._not_found(
                 "Seller SKU is blank, N/A, or exp and Product Name is unavailable."
             )
-        candidates = _match_name_variation(self.records, product_name, variation_name)
+        candidates = _match_name_variation(
+            self._normal_records, product_name, variation_name
+        )
         if not candidates:
             return self._not_found(
                 "No Product Listing identity exactly matches Product Name / Variation."
@@ -513,6 +599,8 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
+            if _REMARK_HEADER in headers:
+                columns["remark"] = headers[_REMARK_HEADER]
             return row_number, columns
         if row_number >= 50:
             break
@@ -599,6 +687,10 @@ def _has_one_identity(records: tuple[ProductPriceMasterRecord, ...]) -> bool:
     return len({_identity_key(record) for record in records}) == 1
 
 
+def _has_one_company_identity(records: tuple[ProductPriceMasterRecord, ...]) -> bool:
+    return len({_company_identity_key(record) for record in records}) == 1
+
+
 def _identity_key(record: ProductPriceMasterRecord) -> tuple[str, str, str, str, Decimal]:
     return (
         normalize_sku_text(record.seller_sku),
@@ -606,6 +698,39 @@ def _identity_key(record: ProductPriceMasterRecord) -> tuple[str, str, str, str,
         _match_text(record.product_name),
         _match_text(record.variation_name),
         record.unit_selling_price,
+    )
+
+
+def _company_identity_key(
+    record: ProductPriceMasterRecord,
+) -> tuple[str, str, str, Decimal, str]:
+    return (
+        normalize_sku_text(record.seller_sku),
+        normalize_sku_text(record.parent_sku),
+        _display_text(record.nav_code),
+        record.unit_selling_price,
+        _match_text(record.usoft_product_description),
+    )
+
+
+def _is_full_order_match_only(record: ProductPriceMasterRecord) -> bool:
+    return _match_text(record.remark) == _FULL_ORDER_MATCH_ONLY_REMARK
+
+
+def _exact_name_variation(
+    records: tuple[ProductPriceMasterRecord, ...],
+    product_name: str | None,
+    variation_name: str | None,
+) -> tuple[ProductPriceMasterRecord, ...]:
+    product_key = _match_text(product_name)
+    if not product_key:
+        return ()
+    variation_key = _match_text(variation_name)
+    return tuple(
+        record
+        for record in records
+        if _match_text(record.product_name) == product_key
+        and _match_text(record.variation_name) == variation_key
     )
 
 

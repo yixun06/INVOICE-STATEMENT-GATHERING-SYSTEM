@@ -15,6 +15,9 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
     GoogleSheetsHistoricalInvoiceRepository,
     HistoricalInvoiceStorageError,
 )
+from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    ShopeeFullOrderCurrentRepository,
+)
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
@@ -71,6 +74,25 @@ class UAT2DataSettings:
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(credentials),
             cache_ttl_seconds=self.cache_ttl_seconds,
+        )
+
+    def create_full_order_current_repository(self) -> ShopeeFullOrderCurrentRepository:
+        """Bind Full Order current data to this market's explicit spreadsheet."""
+        context = resolve_market_context(self.market_context)
+        if context.key not in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
+            raise MarketConfigurationUnavailable(
+                f"{context.display_name} Full Order current persistence is unavailable."
+            )
+        if (
+            context.key is MarketKey.SHOPEE_SG
+            and self.google_spreadsheet_id == DEFAULT_UAT2_DATA_SPREADSHEET_ID
+        ):
+            raise MarketConfigurationUnavailable(
+                "Shopee SG Full Order persistence requires an explicit SG spreadsheet."
+            )
+        return ShopeeFullOrderCurrentRepository(
+            spreadsheet_id=self.google_spreadsheet_id,
+            gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )
 
     def create_statement_writer(self) -> GoogleSheetsStatementWriter:

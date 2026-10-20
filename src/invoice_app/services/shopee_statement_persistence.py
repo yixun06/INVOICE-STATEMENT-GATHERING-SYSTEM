@@ -8,7 +8,7 @@ contract against authoritative persisted state.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -18,6 +18,7 @@ from typing import Callable, Iterable, Mapping, Protocol, Sequence
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
+    InvoiceBundle,
 )
 from src.invoice_app.domain.order_adjustment import (
     CanonicalOrderAdjustment,
@@ -141,6 +142,8 @@ class StatementCommitPlan:
     order_adjustments: tuple[CanonicalOrderAdjustment, ...] = ()
     protected_invoice_items: tuple[ProtectedInvoiceItemStatementFields, ...] = ()
     invoice_snapshot_sha256: str | None = None
+    invoice_order_inserts: tuple[CanonicalInvoiceOrder, ...] = ()
+    invoice_item_inserts: tuple[CanonicalInvoiceItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -285,6 +288,7 @@ def prepare_v2_statement_commit_plan(
     invoice_items: Iterable[CanonicalInvoiceItem],
     reconciliation: StatementReconciliationBatch,
     validation_passed: bool,
+    canonical_inserts: Iterable[InvoiceBundle] = (),
 ) -> StatementCommitPlan:
     """Build a fail-closed V2 plan without fabricating GROUP allocation."""
 
@@ -548,6 +552,28 @@ def prepare_v2_statement_commit_plan(
         raise StatementCommitBlocked(
             "V2 order update lacks a settlement difference."
         )
+    insert_bundles = tuple(canonical_inserts)
+    insert_orders = tuple(bundle.order for bundle in insert_bundles)
+    item_update_by_key = {
+        (update.order_id, update.item_index): update for update in item_updates
+    }
+    insert_items = tuple(
+        replace(
+            item,
+            statement_product_price=update.statement_product_price,
+            statement_refund_amount=update.statement_refund_amount,
+            statement_net_selling_amount=update.statement_net_selling_amount,
+        )
+        if (update := item_update_by_key.get((item.order_id, item.item_index)))
+        else item
+        for bundle in insert_bundles
+        for item in bundle.items
+    )
+    insert_order_ids = {order.order_id for order in insert_orders}
+    if len(insert_order_ids) != len(insert_orders):
+        raise StatementCommitBlocked("Full Order canonical insert plan duplicates an Order ID.")
+    if any(item.order_id not in insert_order_ids for item in insert_items):
+        raise StatementCommitBlocked("Full Order canonical insert Item lacks its planned Order.")
     return StatementCommitPlan(
         statement=statement,
         audit=audit,
@@ -565,6 +591,8 @@ def prepare_v2_statement_commit_plan(
             invoice_orders,
             invoice_items,
         ),
+        invoice_order_inserts=insert_orders,
+        invoice_item_inserts=insert_items,
     )
 
 
@@ -593,18 +621,32 @@ def validate_current_statement_state(
 
     if plan.invoice_snapshot_sha256 is not None:
         order_ids = {row.order_id for row in plan.statement.order_rows}
+        insert_orders = {order.order_id: order for order in plan.invoice_order_inserts}
+        insert_items = tuple(plan.invoice_item_inserts)
+        for order_id in insert_orders:
+            if order_id in state.orders:
+                reasons.append(f"INVOICE_INSERT_CONFLICT:{order_id}")
         current_orders = tuple(
-            state.orders[order_id]
+            state.orders.get(order_id) or insert_orders[order_id]
             for order_id in sorted(order_ids)
-            if order_id in state.orders
+            if order_id in state.orders or order_id in insert_orders
         )
         current_items = tuple(
             item
             for item in state.items
             if item.platform == "Shopee" and item.order_id in order_ids
+        ) + tuple(
+            replace(
+                item,
+                statement_product_price=None,
+                statement_refund_amount=None,
+                statement_net_selling_amount=None,
+            )
+            for item in insert_items
+            if item.order_id in order_ids
         )
         if len(current_orders) != len(order_ids):
-            missing = sorted(order_ids - set(state.orders))
+            missing = sorted(order_ids - set(state.orders) - set(insert_orders))
             reasons.extend(f"UNMATCHED_ORDER:{order_id}" for order_id in missing)
         elif invoice_snapshot_sha256(current_orders, current_items) != plan.invoice_snapshot_sha256:
             reasons.append("INVOICE_SNAPSHOT_CHANGED")

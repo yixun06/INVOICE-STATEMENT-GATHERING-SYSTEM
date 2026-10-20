@@ -106,6 +106,14 @@ from ..services.shopee_statement_persistence import (
     StatementCommitBlocked,
     StatementWriteIntegrityError,
 )
+from ..services.shopee_full_order_import import (
+    ShopeeFullOrderImportReview,
+    commit_shopee_full_order_review,
+    review_shopee_full_order_upload,
+)
+from ..services.shopee_full_order_reconciliation import (
+    FULL_ORDER_STATEMENT_PROOF_RULE_VERSION,
+)
 from ..services.shopee_monthly_statement_service import (
     StagedShopeeMonthlyStatement,
 )
@@ -158,6 +166,7 @@ DATA_IMPORT_PAGE = "Data Import"
 PLATFORM_ORDERS = "Platform Orders"
 SHOPEE_WEEKLY_STATEMENT = "Shopee Weekly Statement"
 SHOPEE_MONTHLY_STATEMENT = "Shopee Monthly Statement"
+SHOPEE_FULL_ORDER_LIST = "Shopee Full Order List"
 
 
 @dataclass(frozen=True)
@@ -171,7 +180,12 @@ class DataImportPlatform:
 
 
 _ALL_SOURCE_TYPES = frozenset(
-    {PLATFORM_ORDERS, SHOPEE_WEEKLY_STATEMENT, SHOPEE_MONTHLY_STATEMENT}
+    {
+        PLATFORM_ORDERS,
+        SHOPEE_FULL_ORDER_LIST,
+        SHOPEE_WEEKLY_STATEMENT,
+        SHOPEE_MONTHLY_STATEMENT,
+    }
 )
 DATA_IMPORT_PLATFORMS = (
     DataImportPlatform(
@@ -187,7 +201,7 @@ DATA_IMPORT_PLATFORMS = (
         display_name="Shopee SG",
         subtitle="Singapore marketplace import workspace.",
         expected_platform="Shopee",
-        supported_source_types=frozenset({PLATFORM_ORDERS}),
+        supported_source_types=frozenset({PLATFORM_ORDERS, SHOPEE_FULL_ORDER_LIST}),
         market_context=SHOPEE_SG,
     ),
     DataImportPlatform(
@@ -243,6 +257,9 @@ _WORKFLOW_KEYS = (
     "monthly_statement_review",
     "monthly_statement_commit_result",
     "monthly_statement_uploader_version",
+    "full_order_review",
+    "full_order_sync_result",
+    "full_order_uploader_version",
     "uat2_historical_commit_entries",
     "uat2_historical_commit_refresh_required",
     "uat2_historical_commit_signature",
@@ -291,6 +308,7 @@ def initialize_data_import_state() -> None:
     st.session_state.setdefault("import_source_type", None)
     st.session_state.setdefault("weekly_statement_uploader_version", 0)
     st.session_state.setdefault("monthly_statement_uploader_version", 0)
+    st.session_state.setdefault("full_order_uploader_version", 0)
     st.session_state.setdefault(
         SHOW_PLATFORM_SELECTOR_KEY,
         not bool(
@@ -309,6 +327,7 @@ def reset_data_import_state() -> None:
         if isinstance(key, str) and (
             key.startswith("weekly_statement_uploader_")
             or key.startswith("monthly_statement_uploader_")
+            or key.startswith("full_order_uploader_")
         ):
             st.session_state.pop(key, None)
 
@@ -663,6 +682,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             "Import workflow",
             (
                 "Invoice Import",
+                "Full Order Import",
                 "Weekly Statement",
                 "Monthly Statement",
             ),
@@ -671,6 +691,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
         )
         source_type = {
             "Invoice Import": PLATFORM_ORDERS,
+            "Full Order Import": SHOPEE_FULL_ORDER_LIST,
             "Weekly Statement": SHOPEE_WEEKLY_STATEMENT,
             "Monthly Statement": SHOPEE_MONTHLY_STATEMENT,
         }[source_label]
@@ -678,9 +699,13 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             f"PDF or ZIP order documents for {platform.display_name}."
             if source_type == PLATFORM_ORDERS
             else (
+                "Native Shopee Full Order List export (.xlsx)."
+                if source_type == SHOPEE_FULL_ORDER_LIST
+            else (
                 "Native Shopee Weekly Statement settlement export (.xlsx)."
                 if source_type == SHOPEE_WEEKLY_STATEMENT
                 else "Native Shopee full-calendar-month Statement export (.xlsx)."
+            )
             )
         )
         available = platform_supports_source(platform, source_type)
@@ -700,6 +725,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
 def _render_unavailable_capability(platform: DataImportPlatform, source_type: str) -> None:
     source_label = {
         PLATFORM_ORDERS: "Invoice Import",
+        SHOPEE_FULL_ORDER_LIST: "Full Order Import",
         SHOPEE_WEEKLY_STATEMENT: "Weekly Statement",
         SHOPEE_MONTHLY_STATEMENT: "Monthly Statement",
     }[source_type]
@@ -737,11 +763,100 @@ def _render_upload_step(
     if source_type == SHOPEE_WEEKLY_STATEMENT:
         _render_weekly_statement_upload()
         return
+    if source_type == SHOPEE_FULL_ORDER_LIST:
+        _render_full_order_upload(platform)
+        return
     if source_type == SHOPEE_MONTHLY_STATEMENT:
         _render_monthly_statement_upload()
         return
     _set_step(1)
     st.rerun()
+
+
+def _render_full_order_upload(platform: DataImportPlatform) -> None:
+    st.subheader("Upload Shopee Full Order List")
+    st.caption("Upload one native Shopee Full Order List workbook (.xlsx).")
+    review = _full_order_review()
+    if review is not None:
+        st.info(
+            f"Validated Full Order source: {review.parsed.source_filename}.",
+            icon=":material/info:",
+        )
+        with st.container(horizontal=True):
+            if st.button(
+                "Continue to validate",
+                type="primary",
+                icon=":material/arrow_forward:",
+                key="full_order_resume_validation",
+            ):
+                _set_step(3)
+                st.rerun()
+            if st.button(
+                "Clear staged source",
+                icon=":material/close:",
+                key="full_order_clear_staged",
+            ):
+                st.session_state.pop("full_order_review", None)
+                st.session_state.pop("full_order_sync_result", None)
+                st.session_state.full_order_uploader_version = int(
+                    st.session_state.get("full_order_uploader_version", 0)
+                ) + 1
+                st.session_state.pop("batch_id", None)
+                st.rerun()
+        return
+    version = int(st.session_state.get("full_order_uploader_version", 0))
+    uploaded_file = st.file_uploader(
+        "Shopee Full Order List (.xlsx)",
+        type=["xlsx"],
+        key=f"full_order_uploader_{version}",
+    )
+    with st.container(horizontal=True):
+        validate_clicked = st.button(
+            "Validate Full Order",
+            type="primary" if uploaded_file is not None else "secondary",
+            icon=":material/fact_check:",
+            disabled=uploaded_file is None,
+            key="full_order_validate",
+        )
+        clear_clicked = st.button(
+            "Clear selected file",
+            icon=":material/close:",
+            disabled=uploaded_file is None,
+            key="full_order_clear_selected",
+        )
+    if clear_clicked:
+        st.session_state.full_order_uploader_version = version + 1
+        st.rerun()
+    if validate_clicked and uploaded_file is not None:
+        if platform.market_context is None:
+            st.error("Shopee market context is unavailable.")
+            return
+        begin_workflow_activity(st.session_state, "Validating")
+        try:
+            settings = configured_uat2_data_settings(platform.market_context)
+            master, _source_label = load_configured_product_price_master(
+                platform.market_context
+            )
+            review = review_shopee_full_order_upload(
+                uploaded_file,
+                source_filename=uploaded_file.name,
+                market=platform.market_context,
+                product_master=master,
+                repository=settings.create_full_order_current_repository(),
+            )
+            st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
+            st.session_state.full_order_review = review
+            st.session_state.pop("full_order_sync_result", None)
+        except (ValueError, HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
+            st.error(f"Full Order validation is unavailable: {error}")
+        finally:
+            end_workflow_activity(st.session_state)
+        if _full_order_review() is not None:
+            _set_step(3)
+            st.rerun()
+    if st.button("Back", icon=":material/arrow_back:", key="full_order_upload_back"):
+        _set_step(1)
+        st.rerun()
 
 
 def _render_weekly_statement_upload() -> None:
@@ -796,6 +911,7 @@ def _render_weekly_statement_upload() -> None:
                 repository=settings.create_repository(),
                 writer=settings.create_statement_writer(),
                 product_master=master,
+                full_order_repository=settings.create_full_order_current_repository(),
             )
             st.session_state.weekly_statement_review = review
             st.session_state.weekly_statement_stage = review.stage
@@ -897,6 +1013,9 @@ def _render_validation_step(
     if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
         _render_monthly_statement_validation()
         return
+    if st.session_state.get("import_source_type") == SHOPEE_FULL_ORDER_LIST:
+        _render_full_order_validation()
+        return
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         presentation_state = invoice_upload_presentation_state(st.session_state)
         if presentation_state != _INVOICE_UPLOAD_RESOLVED:
@@ -956,6 +1075,60 @@ def _render_validation_step(
         _render_contract_validation(result)
         _render_source_summary(result)
         _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
+
+
+def _render_full_order_validation() -> None:
+    review = _full_order_review()
+    if review is None:
+        st.warning("Upload and validate a Shopee Full Order List first.")
+        _render_back_button(2, key="full_order_validation_missing_back")
+        return
+    preview = review.sync_preview
+    issues = review.current_batch.issues
+    ready = review.ready
+    render_authoritative_status(
+        title="Ready" if ready else "Needs Attention",
+        message=(
+            "Full Order source, Product Master identity, and current-store preview passed."
+            if ready
+            else "Resolve every Full Order Product Master or source issue before sync."
+        ),
+        state="ready" if ready else "blocked",
+    )
+    with st.container(horizontal=True):
+        st.metric("Orders", len(review.parsed.order_ids), border=True)
+        st.metric("New", preview.new_count if preview else 0, border=True)
+        st.metric("Updated", preview.updated_count if preview else 0, border=True)
+        st.metric("Unchanged", preview.unchanged_count if preview else 0, border=True)
+        st.metric("Need Review", len({issue.order_id for issue in issues}), border=True)
+    st.caption(
+        "Only Order IDs present in this workbook are inserted or replaced. "
+        "Current orders absent from the workbook remain untouched."
+    )
+    if review.parsed.dimension_fallback_used:
+        st.caption("Malformed worksheet dimensions were recovered from populated cell bounds.")
+    if issues:
+        st.dataframe(
+            [
+                {
+                    "Order ID": issue.order_id,
+                    "Source row": issue.source_row_number,
+                    "Status": issue.code,
+                    "Reason": issue.message,
+                }
+                for issue in issues
+            ],
+            hide_index=True,
+        )
+    _render_next_step(
+        "Continue to review sync",
+        4,
+        back_step=2,
+        allowed=ready,
+        disabled_reason=(
+            None if ready else "All Full Order rows require deterministic Product Master resolution."
+        ),
+    )
 
 
 def _render_monthly_statement_validation() -> None:
@@ -1278,7 +1451,7 @@ def _render_statement_source_error(result: ImportResult) -> bool:
 
 
 def _statement_invoice_coverage(result: ImportResult) -> Any | None:
-    coverage = result.source_specific_details.get("invoice_coverage")
+    coverage = result.source_specific_details.get("statement_evidence_coverage")
     if coverage is None or coverage.complete:
         return None
     return coverage
@@ -1289,28 +1462,25 @@ def _render_statement_invoice_coverage_status(result: ImportResult) -> bool:
     if coverage is None:
         return False
     render_authoritative_status(
-        title="Invoices still required",
+        title="Additional evidence required",
         message=(
-            "This Statement contains orders that are not yet fully available in "
-            "the Invoice database. Upload or repair the invoices listed below, "
-            "then refresh validation."
+            f"{len(coverage.additional_evidence)} order"
+            f"{'s require' if len(coverage.additional_evidence) != 1 else ' requires'} "
+            "additional evidence before reconciliation can continue."
         ),
         state="blocked",
     )
     with st.container(horizontal=True, gap="small"):
         st.metric("Statement Orders", len(coverage.statement_order_ids), border=True)
-        st.metric("Invoices Found", len(coverage.invoice_order_ids), border=True)
+        st.metric("Already Verified", len(coverage.already_verified_order_ids), border=True)
         st.metric(
-            "Invoices Missing",
-            len(coverage.missing_invoice_order_ids),
+            "Ready from Full Order",
+            len(coverage.ready_from_full_order_order_ids),
             border=True,
         )
-        if coverage.missing_invoice_item_order_ids:
-            st.metric(
-                "Invoice Items Missing",
-                len(coverage.missing_invoice_item_order_ids),
-                border=True,
-            )
+        st.metric(
+            "Need Additional Evidence", len(coverage.additional_evidence), border=True
+        )
     return True
 
 
@@ -1320,23 +1490,13 @@ def _render_statement_invoice_coverage_details(result: ImportResult) -> None:
         return
     rows = [
         {
-            "Order ID": order_id,
-            "Statement status": "Found in Statement",
-            "Database status": "Invoice not imported",
-            "Next step": "Upload the Invoice for this Order",
+            "Order ID": item.order_id,
+            "Order Status": item.order_status or "Not available",
+            "Reason": item.reason,
         }
-        for order_id in coverage.missing_invoice_order_ids
+        for item in coverage.additional_evidence
     ]
-    rows.extend(
-        {
-            "Order ID": order_id,
-            "Statement status": "Found in Statement",
-            "Database status": "Invoice items missing",
-            "Next step": "Re-import or repair the Invoice item data",
-        }
-        for order_id in coverage.missing_invoice_item_order_ids
-    )
-    st.subheader("Invoice coverage required")
+    st.subheader("Additional evidence required")
     st.dataframe(
         rows,
         hide_index=True,
@@ -3087,6 +3247,29 @@ def _render_reconciliation_step() -> None:
     st.subheader("Reconcile")
     if _has_pending_recovery():
         _render_recovery_confirmation()
+    if st.session_state.get("import_source_type") == SHOPEE_FULL_ORDER_LIST:
+        review = _full_order_review()
+        ready = review is not None and review.ready
+        render_authoritative_status(
+            title="Ready" if ready else "Needs Attention",
+            message=(
+                "Current snapshot replacement preview is complete. Statement proof remains a separate fail-closed step."
+                if ready
+                else "Return to Validate and resolve the Full Order review."
+            ),
+            state="ready" if ready else "blocked",
+        )
+        st.caption(
+            "This sync changes only mutable Full Order current data. It does not overwrite Invoice_Orders or Invoice_Items."
+        )
+        _render_next_step(
+            "Continue to review & sync",
+            5,
+            back_step=3,
+            allowed=ready,
+            disabled_reason=None if ready else "Full Order validation is not ready.",
+        )
+        return
     if st.session_state.get("import_source_type") == PLATFORM_ORDERS:
         eligibility = invoice_upload_downstream_eligibility(st.session_state)
         if not eligibility.eligible:
@@ -3486,6 +3669,9 @@ def _render_review_and_commit_step() -> None:
     if st.session_state.get("import_source_type") == SHOPEE_MONTHLY_STATEMENT:
         _render_monthly_statement_review_and_commit()
         return
+    if st.session_state.get("import_source_type") == SHOPEE_FULL_ORDER_LIST:
+        _render_full_order_review_and_sync()
+        return
     if _has_pending_recovery():
         _render_recovery_confirmation()
     result = _current_import_result()
@@ -3608,6 +3794,76 @@ def _render_review_and_commit_step() -> None:
             st.rerun()
         _render_statement_exit_button(key="exit_blocked_statement_commit")
         _render_source_summary(result)
+
+
+def _render_full_order_review_and_sync() -> None:
+    review = _full_order_review()
+    if review is None or not review.ready:
+        st.warning("Full Order validation is not ready to sync.")
+        _render_back_button(3, key="full_order_commit_missing_back")
+        return
+    completed = st.session_state.get("full_order_sync_result")
+    if completed is not None:
+        st.success("Full Order current sync complete.", icon=":material/check_circle:")
+        with st.container(horizontal=True):
+            st.metric("New", completed.new_count, border=True)
+            st.metric("Updated", completed.updated_count, border=True)
+            st.metric("Unchanged", completed.unchanged_count, border=True)
+        st.caption(
+            "Canonical Invoice history was not overwritten. Re-uploading the same source creates no duplicates."
+        )
+        return
+    preview = review.sync_preview
+    assert preview is not None
+    render_authoritative_status(
+        title="Ready to Sync",
+        message="Fresh source and Product Master validation will run again before write.",
+        state="ready",
+    )
+    with st.container(horizontal=True):
+        st.metric("New", preview.new_count, border=True)
+        st.metric("Updated", preview.updated_count, border=True)
+        st.metric("Unchanged", preview.unchanged_count, border=True)
+    st.caption(
+        "Updated current Order IDs are replaced with their complete item snapshot. "
+        "Orders absent from this workbook are not deleted."
+    )
+    with st.container(horizontal=True):
+        sync_clicked = st.button(
+            "Sync Full Order current data",
+            type="primary",
+            icon=":material/sync:",
+            key="full_order_sync_current",
+        )
+        back_clicked = st.button(
+            "Back", icon=":material/arrow_back:", key="full_order_sync_back"
+        )
+    if back_clicked:
+        _set_step(4)
+        st.rerun()
+    if not sync_clicked:
+        return
+    context = _active_invoice_market_context()
+    begin_workflow_activity(st.session_state, "Processing")
+    try:
+        settings = configured_uat2_data_settings(context)
+        result = commit_shopee_full_order_review(
+            review,
+            load_product_master=lambda: load_configured_product_price_master(context)[0],
+            repository=settings.create_full_order_current_repository(),
+        )
+        st.session_state.full_order_sync_result = result
+    except (
+        ValueError,
+        HistoricalInvoiceStorageError,
+        ProductMasterSourceError,
+        ApplicationCommitInProgress,
+    ) as error:
+        st.error(f"Full Order sync failed before safe completion: {error}")
+    finally:
+        end_workflow_activity(st.session_state)
+    if st.session_state.get("full_order_sync_result") is not None:
+        st.rerun()
 
 
 def _render_shopee_sg_test_review(result: ImportResult) -> None:
@@ -3995,6 +4251,11 @@ def _weekly_stage() -> StagedShopeeWeeklyStatement | None:
     return stage if isinstance(stage, StagedShopeeWeeklyStatement) else None
 
 
+def _full_order_review() -> ShopeeFullOrderImportReview | None:
+    review = st.session_state.get("full_order_review")
+    return review if isinstance(review, ShopeeFullOrderImportReview) else None
+
+
 def _weekly_review() -> StatementImportReview | None:
     review = st.session_state.get("weekly_statement_review")
     return review if isinstance(review, StatementImportReview) else None
@@ -4206,6 +4467,7 @@ def _render_statement_commit(ready: bool) -> None:
             repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
             product_master=master,
+            full_order_repository=settings.create_full_order_current_repository(),
         )
         if not currency.is_current:
             st.warning(
@@ -4221,6 +4483,7 @@ def _render_statement_commit(ready: bool) -> None:
             repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
             load_product_master=lambda: load_configured_product_price_master()[0],
+            full_order_repository=settings.create_full_order_current_repository(),
         )
     except ApplicationCommitInProgress as error:
         st.warning(str(error))
@@ -4253,6 +4516,7 @@ def _refresh_statement_review(review: StatementImportReview) -> bool:
             repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
             product_master=master,
+            full_order_repository=settings.create_full_order_current_repository(),
         )
     except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
         st.error(f"Statement validation refresh failed: {error}")
@@ -4378,20 +4642,12 @@ def _statement_forward_gate() -> tuple[bool, str | None]:
     result = _current_import_result()
     coverage = _statement_invoice_coverage(result)
     if coverage is not None:
-        missing_invoices = len(coverage.missing_invoice_order_ids)
-        missing_items = len(coverage.missing_invoice_item_order_ids)
-        parts = []
-        if missing_invoices:
-            parts.append(
-                f"{missing_invoices} invoice"
-                f"{'s are' if missing_invoices != 1 else ' is'} still required"
-            )
-        if missing_items:
-            parts.append(
-                f"{missing_items} order"
-                f"{'s are' if missing_items != 1 else ' is'} missing Invoice items"
-            )
-        return False, f"{' and '.join(parts)} before reconciliation can continue."
+        count = len(coverage.additional_evidence)
+        return (
+            False,
+            f"{count} order{'s' if count != 1 else ''} "
+            f"{'require' if count != 1 else 'requires'} additional evidence before reconciliation can continue.",
+        )
     if result.commit_readiness.ready and review.commit_ready:
         return True, None
     affected_orders, issue_count = _statement_blocker_counts(result)
@@ -4480,7 +4736,22 @@ def _render_invoice_exit_button(*, key: str) -> None:
 
 
 def _statement_review_stale() -> bool:
-    return bool(st.session_state.get("weekly_statement_review_stale_reason"))
+    if st.session_state.get("weekly_statement_review_stale_reason"):
+        return True
+    review = _weekly_review()
+    evidence_version = getattr(review, "evidence_version", None)
+    if evidence_version is None:
+        return False
+    if (
+        getattr(evidence_version, "full_order_proof_rule_version", None)
+        == FULL_ORDER_STATEMENT_PROOF_RULE_VERSION
+    ):
+        return False
+    st.session_state["weekly_statement_review_stale_reason"] = (
+        "Full Order Statement proof rules changed after this review. "
+        "Refresh validation before continuing."
+    )
+    return True
 
 
 def _order_merchandise_value(result: Any, field: str) -> Any:

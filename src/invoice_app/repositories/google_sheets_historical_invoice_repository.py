@@ -100,6 +100,10 @@ class GoogleSheetsHistoricalInvoiceGateway(Protocol):
         self, spreadsheet_id: str, tabs: Sequence[str]
     ) -> Mapping[str, int]: ...
 
+    def read_sheet_row_counts(
+        self, spreadsheet_id: str, tabs: Sequence[str]
+    ) -> Mapping[str, int]: ...
+
 
 GoogleServiceAccountInfo = Mapping[str, Any]
 GoogleCredentialsSource = Path | GoogleServiceAccountInfo
@@ -261,6 +265,35 @@ class GoogleApiHistoricalInvoiceGateway:
         except Exception as error:
             raise HistoricalInvoiceStorageError(
                 "UAT2 Google Sheets sheet-ID read failed; no write was attempted."
+            ) from error
+
+    def read_sheet_row_counts(
+        self, spreadsheet_id: str, tabs: Sequence[str]
+    ) -> Mapping[str, int]:
+        """Freshly read grid capacity so controlled writers can grow, never shrink, a tab."""
+        try:
+            response = self._service_client().spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="sheets(properties(sheetId,title,gridProperties(rowCount)))",
+            ).execute()
+            counts = {
+                properties.get("title"): properties.get("gridProperties", {}).get("rowCount")
+                for sheet in response.get("sheets") or ()
+                if isinstance(sheet, Mapping)
+                and isinstance((properties := sheet.get("properties")), Mapping)
+            }
+            missing = [tab for tab in tabs if not isinstance(counts.get(tab), int)]
+            if missing:
+                raise HistoricalInvoiceStorageError(
+                    "UAT2 spreadsheet required tab has no readable row capacity: "
+                    + ", ".join(missing)
+                )
+            return {tab: counts[tab] for tab in tabs}  # type: ignore[misc]
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "UAT2 Google Sheets row-capacity read failed; no write was attempted."
             ) from error
 
     def _sheet_ids(self, spreadsheet_id: str) -> Mapping[str, int]:

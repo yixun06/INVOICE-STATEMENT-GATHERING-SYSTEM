@@ -74,6 +74,16 @@ def test_google_sheet_rows_become_canonical_records_with_text_skus(tmp_path):
     assert record.usoft_product_description == "USOFT Fresh Oil 500ml"
 
 
+def test_google_sheet_optional_remark_is_loaded_by_header_name(tmp_path):
+    rows = _sheet_rows()
+    rows[1].append("REMARK")
+    rows[2].append("FULL_ORDER_MATCH_ONLY")
+
+    loaded = _google_source(tmp_path, rows).load()
+
+    assert loaded.records[0].remark == "FULL_ORDER_MATCH_ONLY"
+
+
 def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_path):
     rows = [
         ["SHOPEE PRODUCT LISTING"],

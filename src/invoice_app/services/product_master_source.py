@@ -22,6 +22,7 @@ from .product_price_master import (
     _REQUIRED_HEADERS,
     _NAV_HEADER,
     _PRODUCT_ID_HEADER,
+    _REMARK_HEADER,
     _USOFT_PRODUCT_DESCRIPTION_HEADER,
     _display_text,
     _strict_decimal,
@@ -483,6 +484,8 @@ def _find_tabular_listing_headers(
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
+            if _REMARK_HEADER in headers:
+                columns["remark"] = headers[_REMARK_HEADER]
             return row_number, columns
         if row_number >= 50:
             break
@@ -527,6 +530,7 @@ def _canonical_records_from_rows(
                 usoft_product_description=(
                     _display_text(values.get("usoft_product_description")) or None
                 ),
+                remark=_display_text(values.get("remark")) or None,
             )
         )
     return tuple(records), candidate_rows, invalid_prices

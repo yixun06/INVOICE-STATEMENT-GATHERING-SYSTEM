@@ -9,6 +9,8 @@ STATEMENT_DATA_TAB = "Statement_Data"
 STATEMENT_FINANCIAL_COMPONENTS_TAB = "Statement_Financial_Components"
 STATEMENT_SUMMARY_TAB = "Statement_Summary"
 ORDER_ADJUSTMENTS_TAB = "Order_Adjustments"
+SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB = "Shopee_FullOrder_Current_Orders"
+SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB = "Shopee_FullOrder_Current_Items"
 MONTHLY_STATEMENT_DATA_TAB = "Monthly_Statement_Data"
 MONTHLY_STATEMENT_FINANCIAL_COMPONENTS_TAB = "Monthly_Statement_Financial_Components"
 MONTHLY_STATEMENT_SUMMARY_TAB = "Monthly_Statement_Summary"
@@ -92,6 +94,17 @@ ORDER_ADJUSTMENTS_HEADERS = (
     "invoice_source_pdf", "invoice_source_hash", "first_observed_at",
 )
 
+SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS = (
+    "market", "order_id", "order_status", "order_created_date", "source_file",
+    "snapshot_hash", "last_synced_at",
+)
+
+SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS = (
+    "market", "order_id", "item_index", "source_parent_sku", "source_seller_sku",
+    "resolved_seller_sku", "nav", "product_name", "variation", "quantity",
+    "unit_price", "product_subtotal", "return_refund_status",
+)
+
 
 assert len(LEGACY_INVOICE_ORDERS_HEADERS) == 39
 assert len(PRE_FINANCIAL_INVOICE_ORDERS_HEADERS) == 40
@@ -107,3 +120,5 @@ assert len(MONTHLY_STATEMENT_DATA_HEADERS) == 34
 assert len(MONTHLY_STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
 assert len(MONTHLY_STATEMENT_SUMMARY_HEADERS) == 14
 assert len(ORDER_ADJUSTMENTS_HEADERS) == 21
+assert len(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS) == 7
+assert len(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS) == 13

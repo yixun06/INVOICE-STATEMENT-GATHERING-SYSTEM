@@ -22,8 +22,16 @@ from src.invoice_app.parsers.shopee_weekly_statement_parser import (
 from src.invoice_app.repositories.historical_invoice_repository import (
     InMemoryHistoricalInvoiceRepository,
 )
+from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    FullOrderCurrentSnapshot,
+)
+from src.invoice_app.services.shopee_full_order_adapter import (
+    FullOrderCurrentItem,
+    FullOrderCurrentOrder,
+)
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_import import (
+    ADDITIONAL_EVIDENCE_REQUIRED,
     INVOICE_COVERAGE_INCOMPLETE,
     check_statement_review_currency,
     classify_statement_invoice_coverage,
@@ -41,6 +49,11 @@ from src.invoice_app.services.shopee_statement_persistence import (
 from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
 from src.invoice_app.services.shopee_weekly_statement_service import (
     stage_parsed_shopee_weekly_statement,
+)
+from src.invoice_app.domain.weekly_billing import BillingPeriod
+from src.invoice_app.services.weekly_billing import (
+    WeeklyBillingDataset,
+    build_weekly_billing_summary,
 )
 from src.invoice_app.ui import data_import
 
@@ -276,6 +289,50 @@ class _Writer:
         self.writes += 1
 
 
+class _FullOrderCurrentRepository:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.reads = 0
+
+    def read_snapshot(self):
+        self.reads += 1
+        return self.snapshot
+
+
+class _CurrentCanonicalWriter:
+    """Small stateful writer proving the service-level Current-to-canonical plan."""
+
+    def __init__(self):
+        self.orders = {}
+        self.items = ()
+        self.committed_statements = ()
+        self.order_adjustments = ()
+        self.writes = 0
+        self.plans = []
+
+    def reload_commit_state(self):
+        return StatementCommitState(
+            orders=dict(self.orders),
+            committed_statements=self.committed_statements,
+            items=self.items,
+            order_adjustments=self.order_adjustments,
+        )
+
+    def write_statement_batch(self, plan):
+        self.writes += 1
+        self.plans.append(plan)
+        self.orders.update({order.order_id: order for order in plan.invoice_order_inserts})
+        self.items = (*self.items, *plan.invoice_item_inserts)
+        self.committed_statements = (
+            *self.committed_statements,
+            CommittedStatementReference(
+                file_hash=plan.statement.file_hash,
+                statement_period_from=plan.statement.statement_period_from,
+                statement_period_to=plan.statement.statement_period_to,
+            ),
+        )
+
+
 def _review(
     monkeypatch,
     *,
@@ -320,6 +377,9 @@ def test_statement_review_is_ready_when_coverage_and_sku_matching_are_complete(m
 
     assert review.ready is True
     assert review.blockers == ()
+    assert review.evidence_coverage.already_verified_order_ids == ("ORDER-1",)
+    assert review.evidence_coverage.ready_from_full_order_order_ids == ()
+    assert review.evidence_coverage.additional_evidence == ()
     assert review.stage.order_reconciliations[0].status == "Matched"
     assert review.sku_matches.eligible_for_commit is True
 
@@ -372,7 +432,7 @@ def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):
     assert review.ready is False
     assert review.plan is None
     assert review.blockers == ()
-    assert review.persistence_blockers == (INVOICE_COVERAGE_INCOMPLETE,)
+    assert review.persistence_blockers == (ADDITIONAL_EVIDENCE_REQUIRED,)
     assert review.reconciliation_v2 is None
     assert review.invoice_coverage.missing_invoice_order_ids == ("ORDER-1",)
 
@@ -504,10 +564,10 @@ def test_partial_coverage_adapter_keeps_statement_summary_and_hides_reconciliati
     )
     summary = {item.label: item.value for item in result.source_summary.items}
 
-    assert result.batch_status == INVOICE_COVERAGE_INCOMPLETE
+    assert result.batch_status == "ADDITIONAL_EVIDENCE_REQUIRED"
     assert result.validation.blocking_issues == ()
     assert result.reconciliation.available is False
-    assert result.reconciliation.status == "Invoices still required"
+    assert result.reconciliation.status == "Additional evidence required"
     assert summary["Statement Period"].startswith("10/08/2026")
     assert summary["Statement Period"].endswith("16/08/2026")
     assert summary["Order Rows"] == 1
@@ -628,6 +688,356 @@ def test_ready_statement_commit_reaches_existing_atomic_writer(monkeypatch):
 
     assert attempt.committed is True
     assert writer.writes == 1
+
+
+def test_clean_full_order_current_statement_commit_inserts_canonical_and_supports_weekly_billing(
+    monkeypatch,
+):
+    """A canonical-missing normal order may be proven without a PDF."""
+
+    statement = _statement()
+    current_order = FullOrderCurrentOrder(
+        market="shopee_my",
+        order_id="ORDER-1",
+        order_status="Completed",
+        order_created_date=date(2026, 8, 10),
+        source_file="full-order.xlsx",
+        snapshot_hash="current-snapshot-hash",
+        last_synced_at=NOW,
+    )
+    current_item = FullOrderCurrentItem(
+        market="shopee_my",
+        order_id="ORDER-1",
+        item_index=0,
+        source_parent_sku="PARENT-1",
+        source_seller_sku="SKU-1",
+        resolved_seller_sku="SKU-1",
+        nav="5001",
+        product_name="Green Tea",
+        variation="Original",
+        quantity=1,
+        unit_price=Decimal("12.00"),
+        product_subtotal=Decimal("10.00"),
+        return_refund_status="",
+    )
+    current_snapshot = FullOrderCurrentSnapshot((current_order,), (current_item,))
+    current_repository = _FullOrderCurrentRepository(current_snapshot)
+    writer = _CurrentCanonicalWriter()
+    repository = _Repository(items=())
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    review = review_statement_upload(
+        b"current-statement",
+        source_filename="statement.xlsx",
+        batch_id="current-batch",
+        uploaded_by="admin",
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=current_repository,
+        now=lambda: NOW,
+    )
+
+    assert review.commit_ready is True
+    assert [bundle.order.order_id for bundle in review.full_order_canonical_inserts] == [
+        "ORDER-1"
+    ]
+    assert review.full_order_canonical_inserts[0].items[0].actual_selling_unit_price is None
+    assert review.full_order_canonical_inserts[0].items[0].source_pdf == "full-order.xlsx"
+    assert review.full_order_canonical_inserts[0].items[0].source_hash == "current-snapshot-hash"
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+        full_order_repository=current_repository,
+    )
+
+    assert attempt.committed is True
+    assert writer.writes == 1
+    assert tuple(writer.orders) == ("ORDER-1",)
+    assert len(writer.items) == 1
+    assert writer.items[0].statement_product_price == Decimal("10.00")
+    assert current_repository.reads >= 2
+    assert current_repository.snapshot == current_snapshot
+
+    period = BillingPeriod(
+        statement.statement_period_from,
+        statement.statement_period_to,
+        "current-batch",
+        statement.file_hash,
+    )
+    billing = build_weekly_billing_summary(
+        WeeklyBillingDataset(
+            periods=(period,),
+            order_ids_by_batch={period.statement_batch_id: ("ORDER-1",)},
+            orders=writer.orders,
+            items=writer.items,
+        ),
+        period,
+    )
+    assert billing.total_quantity == 1
+    assert billing.product_rows[0].unit_price == Decimal("12.00")
+    assert billing.total_amount == Decimal("10.00")
+
+    duplicate = review_statement_upload(
+        b"current-statement",
+        source_filename="statement.xlsx",
+        batch_id="current-batch-duplicate",
+        uploaded_by="admin",
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=current_repository,
+        now=lambda: NOW,
+    )
+    duplicate_attempt = commit_statement_review(
+        duplicate,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+        full_order_repository=current_repository,
+    )
+
+    assert duplicate.stage.already_imported is True
+    assert duplicate_attempt.reasons == ("ALREADY_IMPORTED",)
+    assert writer.writes == 1
+    assert tuple(writer.orders) == ("ORDER-1",)
+
+
+def test_marked_full_order_item_commits_only_with_exact_nonzero_item_refund(
+    monkeypatch,
+):
+    statement = _statement(sku_rows=(_income("Sku", 3, refund="-2.00"),))
+    current_order = FullOrderCurrentOrder(
+        market="shopee_my",
+        order_id="ORDER-1",
+        order_status="Completed",
+        order_created_date=date(2026, 8, 10),
+        source_file="full-order.xlsx",
+        snapshot_hash="current-snapshot-hash",
+        last_synced_at=NOW,
+    )
+    current_item = FullOrderCurrentItem(
+        market="shopee_my",
+        order_id="ORDER-1",
+        item_index=0,
+        source_parent_sku="PARENT-1",
+        source_seller_sku="SKU-1",
+        resolved_seller_sku="SKU-1",
+        nav="5001",
+        product_name="Green Tea",
+        variation="Original",
+        quantity=1,
+        unit_price=Decimal("12.00"),
+        product_subtotal=Decimal("10.00"),
+        return_refund_status="Request Approved",
+    )
+    current_snapshot = FullOrderCurrentSnapshot((current_order,), (current_item,))
+    current_repository = _FullOrderCurrentRepository(current_snapshot)
+    writer = _CurrentCanonicalWriter()
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    review = review_statement_upload(
+        b"marked-current-statement",
+        source_filename="statement.xlsx",
+        batch_id="marked-current-batch",
+        uploaded_by="admin",
+        repository=_Repository(items=()),
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=current_repository,
+        now=lambda: NOW,
+    )
+
+    assert review.commit_ready is True
+    assert review.evidence_coverage.ready_from_full_order_order_ids == ("ORDER-1",)
+    assert review.full_order_canonical_inserts[0].items[0].quantity == 1
+    assert review.full_order_canonical_inserts[0].items[0].line_subtotal == Decimal("10.00")
+    assert not hasattr(review.full_order_canonical_inserts[0].items[0], "returned_quantity")
+    assert current_snapshot.items[0].return_refund_status == "Request Approved"
+
+    attempt = commit_statement_review(
+        review,
+        repository=_Repository(items=()),
+        writer=writer,
+        load_product_master=_master,
+        full_order_repository=current_repository,
+    )
+
+    assert attempt.committed is True
+    assert writer.items[0].statement_product_price == Decimal("10.00")
+    assert writer.items[0].statement_refund_amount == Decimal("-2.00")
+    assert writer.items[0].statement_net_selling_amount == Decimal("8.00")
+
+
+def test_statement_evidence_coverage_keeps_clean_current_orders_when_one_marker_blocks(
+    monkeypatch,
+):
+    """A Current exception must not hide independently proven normal orders."""
+
+    order_ids = ("CANONICAL", "CURRENT-CLEAN-1", "CURRENT-CLEAN-2", "CURRENT-REFUND")
+    statement = _statement_for_order_ids(order_ids)
+    canonical_order = replace(_order(refund=None), order_id="CANONICAL")
+    canonical_item = replace(_item(), order_id="CANONICAL")
+    writer = _CurrentCanonicalWriter()
+    writer.orders = {"CANONICAL": canonical_order}
+    writer.items = (canonical_item,)
+    current_snapshot = _full_order_snapshot(
+        "CURRENT-CLEAN-1",
+        "CURRENT-CLEAN-2",
+        "CURRENT-REFUND",
+        marker_order_id="CURRENT-REFUND",
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    review = review_statement_upload(
+        b"evidence-coverage",
+        source_filename="statement.xlsx",
+        batch_id="evidence-coverage",
+        uploaded_by="admin",
+        repository=_Repository(items=()),
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=_FullOrderCurrentRepository(current_snapshot),
+        now=lambda: NOW,
+    )
+
+    coverage = review.evidence_coverage
+    assert coverage is not None
+    assert coverage.already_verified_order_ids == ("CANONICAL",)
+    assert coverage.ready_from_full_order_order_ids == (
+        "CURRENT-CLEAN-1",
+        "CURRENT-CLEAN-2",
+    )
+    assert coverage.additional_evidence[0].order_id == "CURRENT-REFUND"
+    assert coverage.additional_evidence[0].order_status == "Completed"
+    assert coverage.additional_evidence[0].reason == "Return/refund request detected."
+    assert [bundle.order.order_id for bundle in review.full_order_canonical_inserts] == [
+        "CURRENT-CLEAN-1",
+        "CURRENT-CLEAN-2",
+    ]
+    assert review.invoice_coverage.missing_invoice_order_ids == ("CURRENT-REFUND",)
+    assert ADDITIONAL_EVIDENCE_REQUIRED in review.persistence_blockers
+
+
+def test_statement_evidence_coverage_requires_current_evidence_when_canonical_is_missing(
+    monkeypatch,
+):
+    statement = _statement_for_order_ids(("CURRENT-ABSENT",))
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+
+    review = review_statement_upload(
+        b"evidence-absent",
+        source_filename="statement.xlsx",
+        batch_id="evidence-absent",
+        uploaded_by="admin",
+        repository=_Repository(items=()),
+        writer=_CurrentCanonicalWriter(),
+        product_master=_master(),
+        full_order_repository=_FullOrderCurrentRepository(FullOrderCurrentSnapshot((), ())),
+        now=lambda: NOW,
+    )
+
+    coverage = review.evidence_coverage
+    assert coverage is not None
+    assert coverage.ready_from_full_order_order_ids == ()
+    assert coverage.additional_evidence == (
+        type(coverage.additional_evidence[0])(
+            "CURRENT-ABSENT", None, "Full Order Current evidence is missing."
+        ),
+    )
+
+
+def _statement_for_order_ids(order_ids: tuple[str, ...]) -> ParsedShopeeWeeklyStatement:
+    sku_rows = tuple(
+        replace(_income("Sku", index + 10), order_id=order_id, sequence_no=f"SKU-{index}")
+        for index, order_id in enumerate(order_ids)
+    )
+    order_rows = tuple(
+        replace(_income("Order", index + 2), order_id=order_id, sequence_no=f"ORDER-{index}")
+        for index, order_id in enumerate(order_ids)
+    )
+    total = Decimal("10.00") * len(order_ids)
+    return replace(
+        _statement(),
+        income_rows=(*order_rows, *sku_rows),
+        summary_total_released=total,
+        summary_lines=(
+            StatementSummaryLine("Summary", 40, "3. Total Released Amount", "TOTAL", None, total, "RM"),
+        ),
+    )
+
+
+def _full_order_snapshot(*order_ids: str, marker_order_id: str | None = None) -> FullOrderCurrentSnapshot:
+    orders = tuple(
+        FullOrderCurrentOrder(
+            market="shopee_my",
+            order_id=order_id,
+            order_status="Completed",
+            order_created_date=date(2026, 8, 10),
+            source_file="full-order.xlsx",
+            snapshot_hash=f"current-{order_id}",
+            last_synced_at=NOW,
+        )
+        for order_id in order_ids
+    )
+    items = tuple(
+        FullOrderCurrentItem(
+            market="shopee_my",
+            order_id=order_id,
+            item_index=0,
+            source_parent_sku="PARENT-1",
+            source_seller_sku="SKU-1",
+            resolved_seller_sku="SKU-1",
+            nav="5001",
+            product_name="Green Tea",
+            variation="Original",
+            quantity=1,
+            unit_price=Decimal("12.00"),
+            product_subtotal=Decimal("10.00"),
+            return_refund_status="Request Approved" if order_id == marker_order_id else "",
+        )
+        for order_id in order_ids
+    )
+    return FullOrderCurrentSnapshot(orders, items)
 
 
 def test_exact_committed_statement_is_terminal_success_without_reconciliation_or_write(
@@ -784,7 +1194,7 @@ def test_data_import_ui_has_no_direct_google_write_call():
     assert "batch_update(" not in source
     assert "write_statement_batch(" not in source
     assert "commit_statement_review(" in source
-    assert "Billing" not in source
+    assert "View Weekly Billing" in source
     assert "Live Analysis" not in source
 
 
@@ -1177,6 +1587,29 @@ def test_product_master_snapshot_change_marks_existing_review_stale(monkeypatch)
     assert current.is_current is True
     assert stale.is_current is False
     assert "PRODUCT_MASTER_SNAPSHOT_CHANGED" in stale.changed_evidence
+
+
+def test_full_order_proof_rule_change_marks_existing_review_stale(monkeypatch):
+    review, repository, writer = _review(monkeypatch)
+    assert review.evidence_version is not None
+    legacy_review = replace(
+        review,
+        evidence_version=replace(
+            review.evidence_version,
+            full_order_proof_rule_version="legacy-full-order-proof-rule",
+        ),
+    )
+
+    stale = check_statement_review_currency(
+        legacy_review,
+        repository=repository,
+        writer=writer,
+        product_master=_master(),
+    )
+
+    assert stale.is_current is False
+    assert "FULL_ORDER_PROOF_RULE_CHANGED" in stale.changed_evidence
+    assert writer.writes == 0
 
 
 def test_product_master_change_after_review_blocks_commit_with_zero_write(monkeypatch):

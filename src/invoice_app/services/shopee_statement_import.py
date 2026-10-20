@@ -6,14 +6,16 @@ matching, persistence planning, or Google Sheets write rules.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
 
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
+    INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
 )
 from src.invoice_app.repositories.historical_invoice_repository import (
@@ -22,6 +24,14 @@ from src.invoice_app.repositories.historical_invoice_repository import (
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
+    InvoiceBundle,
+)
+from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    ShopeeFullOrderCurrentRepository,
+)
+from src.invoice_app.services.shopee_full_order_reconciliation import (
+    FULL_ORDER_STATEMENT_PROOF_RULE_VERSION,
+    prove_full_order_current_against_statement,
 )
 from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment
 from src.invoice_app.domain.statement_reconciliation_v2 import (
@@ -36,6 +46,7 @@ from src.invoice_app.services.application_commit_lock import (
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
+from src.invoice_app.services.market_context import resolve_market_context
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_item_matching import (
     StatementItemMatchBatch,
@@ -63,6 +74,7 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 
 
 INVOICE_COVERAGE_INCOMPLETE = "INVOICE_COVERAGE_INCOMPLETE"
+ADDITIONAL_EVIDENCE_REQUIRED = "ADDITIONAL_EVIDENCE_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -83,12 +95,36 @@ class StatementInvoiceCoverage:
 
 
 @dataclass(frozen=True)
+class StatementEvidenceRequirement:
+    """One Statement order that remains outside safe canonical evidence."""
+
+    order_id: str
+    order_status: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class StatementEvidenceCoverage:
+    """Statement coverage after canonical and strict Full Order evidence."""
+
+    statement_order_ids: tuple[str, ...]
+    already_verified_order_ids: tuple[str, ...]
+    ready_from_full_order_order_ids: tuple[str, ...]
+    additional_evidence: tuple[StatementEvidenceRequirement, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.additional_evidence
+
+
+@dataclass(frozen=True)
 class StatementReviewEvidenceVersion:
     statement_file_hash: str
     invoice_snapshot_sha256: str
     product_family_snapshot_sha256: str
     order_adjustment_snapshot_sha256: str
     rule_version: str
+    full_order_proof_rule_version: str
     reconciliation_sha256: str
 
 
@@ -117,6 +153,8 @@ class StatementImportReview:
     # persistence input and never authorizes a source correction or match.
     invoice_items: tuple[CanonicalInvoiceItem, ...] = ()
     invoice_coverage: StatementInvoiceCoverage | None = None
+    evidence_coverage: StatementEvidenceCoverage | None = None
+    full_order_canonical_inserts: tuple[InvoiceBundle, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -144,6 +182,7 @@ def review_statement_upload(
     repository: HistoricalInvoiceRepository,
     writer: GoogleSheetsStatementWriter,
     product_master: ProductPriceMaster,
+    full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> StatementImportReview:
@@ -158,13 +197,23 @@ def review_statement_upload(
         existing_orders=(asdict(order) for order in state.orders.values()),
         existing_statements=state.committed_statements,
     )
+    invoice_orders, invoice_items, canonical_inserts, full_order_blockers, evidence_coverage = (
+        _statement_inputs_with_full_order(
+            stage.statement,
+            tuple(state.orders.values()),
+            _state_statement_items(stage.statement, state.items),
+            product_master=product_master,
+            full_order_repository=full_order_repository,
+            imported_at=uploaded_at,
+        )
+    )
     return _build_review(
         stage,
         batch_id=batch_id,
         uploaded_at=uploaded_at,
         uploaded_by=uploaded_by,
-        invoice_orders=tuple(state.orders.values()),
-        invoice_items=_state_statement_items(stage.statement, state.items),
+        invoice_orders=invoice_orders,
+        invoice_items=invoice_items,
         canonical_adjustments=_cross_period_order_adjustments(
             stage.statement, state.order_adjustments
         ),
@@ -172,6 +221,9 @@ def review_statement_upload(
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
         source_bytes=source_bytes,
+        canonical_inserts=canonical_inserts,
+        full_order_blockers=full_order_blockers,
+        evidence_coverage=evidence_coverage,
     )
 
 
@@ -181,6 +233,7 @@ def refresh_statement_review(
     repository: HistoricalInvoiceRepository,
     writer: GoogleSheetsStatementWriter,
     product_master: ProductPriceMaster,
+    full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> StatementImportReview:
@@ -195,13 +248,23 @@ def refresh_statement_review(
         existing_orders=(asdict(order) for order in state.orders.values()),
         existing_statements=state.committed_statements,
     )
+    invoice_orders, invoice_items, canonical_inserts, full_order_blockers, evidence_coverage = (
+        _statement_inputs_with_full_order(
+            stage.statement,
+            tuple(state.orders.values()),
+            _state_statement_items(stage.statement, state.items),
+            product_master=product_master,
+            full_order_repository=full_order_repository,
+            imported_at=review.uploaded_at,
+        )
+    )
     return _build_review(
         stage,
         batch_id=review.batch_id,
         uploaded_at=review.uploaded_at,
         uploaded_by=review.uploaded_by,
-        invoice_orders=tuple(state.orders.values()),
-        invoice_items=_state_statement_items(stage.statement, state.items),
+        invoice_orders=invoice_orders,
+        invoice_items=invoice_items,
         canonical_adjustments=_cross_period_order_adjustments(
             stage.statement, state.order_adjustments
         ),
@@ -209,6 +272,9 @@ def refresh_statement_review(
         verified_artifact_repairs=verified_artifact_repairs,
         now=now,
         source_bytes=review.source_bytes,
+        canonical_inserts=canonical_inserts,
+        full_order_blockers=full_order_blockers,
+        evidence_coverage=evidence_coverage,
     )
 
 
@@ -218,6 +284,7 @@ def commit_statement_review(
     repository: HistoricalInvoiceRepository,
     writer: GoogleSheetsStatementWriter,
     load_product_master: Callable[[], ProductPriceMaster],
+    full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
     commit_lock: ApplicationCommitLock = APPLICATION_COMMIT_LOCK,
 ) -> StatementCommitAttempt:
@@ -226,8 +293,8 @@ def commit_statement_review(
     if review.stage.already_imported:
         return StatementCommitAttempt(False, ("ALREADY_IMPORTED",))
 
-    if review.invoice_coverage is not None and not review.invoice_coverage.complete:
-        return StatementCommitAttempt(False, (INVOICE_COVERAGE_INCOMPLETE,))
+    if review.evidence_coverage is not None and not review.evidence_coverage.complete:
+        return StatementCommitAttempt(False, (ADDITIONAL_EVIDENCE_REQUIRED,))
 
     if not review.commit_ready or review.source_bytes is None:
         return StatementCommitAttempt(
@@ -261,15 +328,27 @@ def commit_statement_review(
                 + tuple(issue.message for issue in stage.validation_issues),
             )
 
-        current_orders = _statement_orders(statement, state.orders.values())
-        current_items = _state_statement_items(statement, state.items)
+        current_master = load_product_master()
+        current_orders, current_items, canonical_inserts, full_order_blockers, current_evidence_coverage = (
+            _statement_inputs_with_full_order(
+                statement,
+                tuple(state.orders.values()),
+                _state_statement_items(statement, state.items),
+                product_master=current_master,
+                full_order_repository=full_order_repository,
+                imported_at=review.uploaded_at,
+            )
+        )
+        current_orders = _statement_orders(statement, current_orders)
         current_coverage = classify_statement_invoice_coverage(
             statement,
             current_orders,
             current_items,
         )
-        if not current_coverage.complete:
-            return StatementCommitAttempt(False, (INVOICE_COVERAGE_INCOMPLETE,))
+        if not current_evidence_coverage.complete:
+            return StatementCommitAttempt(False, (ADDITIONAL_EVIDENCE_REQUIRED,))
+        if full_order_blockers:
+            return StatementCommitAttempt(False, full_order_blockers)
         current_adjustments = _cross_period_order_adjustments(
             statement, state.order_adjustments
         )
@@ -278,7 +357,7 @@ def commit_statement_review(
             current_orders,
             current_items,
             product_families=product_family_resolver_from_price_master(
-                load_product_master()
+                current_master
             ),
             verified_artifact_repairs=repairs,
             canonical_adjustments=current_adjustments,
@@ -317,6 +396,7 @@ def commit_statement_review(
                 invoice_items=current_items,
                 reconciliation=current_reconciliation,
                 validation_passed=True,
+                canonical_inserts=canonical_inserts,
             )
             writer.write_statement_batch(plan)
         except StatementWriteNotApplied:
@@ -330,6 +410,7 @@ def check_statement_review_currency(
     repository: HistoricalInvoiceRepository,
     writer: GoogleSheetsStatementWriter,
     product_master: ProductPriceMaster,
+    full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
 ) -> StatementReviewCurrency:
     """Compare a stored V2 review with current Invoice and Product Master evidence.
@@ -342,8 +423,19 @@ def check_statement_review_currency(
     if statement is None or review.evidence_version is None:
         return StatementReviewCurrency(False, ("REVIEW_EVIDENCE_UNAVAILABLE",))
     state = writer.reload_commit_state()
-    current_items = _state_statement_items(statement, state.items)
-    current_orders = _statement_orders(statement, state.orders.values())
+    current_orders, current_items, _inserts, full_order_blockers, _evidence_coverage = (
+        _statement_inputs_with_full_order(
+            statement,
+            tuple(state.orders.values()),
+            _state_statement_items(statement, state.items),
+            product_master=product_master,
+            full_order_repository=full_order_repository,
+            imported_at=review.uploaded_at,
+        )
+    )
+    if full_order_blockers:
+        return StatementReviewCurrency(False, full_order_blockers)
+    current_orders = _statement_orders(statement, current_orders)
     current_adjustments = _cross_period_order_adjustments(
         statement, state.order_adjustments
     )
@@ -379,6 +471,9 @@ def _build_review(
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair],
     now: Callable[[], datetime],
     source_bytes: bytes,
+    canonical_inserts: Iterable[InvoiceBundle] = (),
+    full_order_blockers: Iterable[str] = (),
+    evidence_coverage: StatementEvidenceCoverage | None = None,
 ) -> StatementImportReview:
     statement = stage.statement
     empty_matches = StatementItemMatchBatch((), False)
@@ -416,6 +511,8 @@ def _build_review(
             source_bytes=source_bytes,
         )
 
+    canonical_inserts = tuple(canonical_inserts)
+    full_order_blockers = tuple(full_order_blockers)
     invoice_items = tuple(invoice_items)
     canonical_adjustments = tuple(canonical_adjustments)
     invoice_orders = _statement_orders(statement, invoice_orders)
@@ -425,7 +522,8 @@ def _build_review(
         invoice_items,
     )
     if (
-        not invoice_coverage.complete
+        evidence_coverage is not None
+        and not evidence_coverage.complete
         and not stage.rejection_reasons
         and not stage.validation_issues
         and stage.duplicate_status is None
@@ -441,10 +539,14 @@ def _build_review(
             plan=None,
             blockers=(),
             limitations=(),
-            persistence_blockers=(INVOICE_COVERAGE_INCOMPLETE,),
+            persistence_blockers=tuple(
+                dict.fromkeys((*full_order_blockers, ADDITIONAL_EVIDENCE_REQUIRED))
+            ),
             source_bytes=source_bytes,
             invoice_items=invoice_items,
             invoice_coverage=invoice_coverage,
+            evidence_coverage=evidence_coverage,
+            full_order_canonical_inserts=canonical_inserts,
         )
     repairs = tuple(verified_artifact_repairs)
     product_families = product_family_resolver_from_price_master(product_master)
@@ -463,12 +565,14 @@ def _build_review(
         verified_artifact_repairs=repairs,
     )
     persistence_blockers = list(stage.rejection_reasons)
+    persistence_blockers.extend(full_order_blockers)
     persistence_blockers.extend(
         issue.message for issue in stage.validation_issues
     )
     if stage.duplicate_status:
         persistence_blockers.extend(stage.review_reasons)
     blockers = list(stage.rejection_reasons)
+    blockers.extend(full_order_blockers)
     blockers.extend(issue.message for issue in stage.validation_issues)
     if stage.duplicate_status:
         blockers.extend(stage.review_reasons)
@@ -499,6 +603,7 @@ def _build_review(
                 invoice_items=invoice_items,
                 reconciliation=reconciliation_v2,
                 validation_passed=True,
+                canonical_inserts=canonical_inserts,
             )
         except StatementCommitBlocked as error:
             persistence_blockers.append(str(error))
@@ -523,6 +628,8 @@ def _build_review(
         source_bytes=source_bytes,
         invoice_items=invoice_items,
         invoice_coverage=invoice_coverage,
+        evidence_coverage=evidence_coverage,
+        full_order_canonical_inserts=canonical_inserts,
     )
 
 
@@ -565,6 +672,242 @@ def classify_statement_invoice_coverage(
             if order_id in persisted_orders and order_id not in persisted_items
         ),
     )
+
+
+def _statement_inputs_with_full_order(
+    statement: ParsedShopeeWeeklyStatement | None,
+    invoice_orders: Iterable[CanonicalInvoiceOrder],
+    invoice_items: Iterable[CanonicalInvoiceItem],
+    *,
+    product_master: ProductPriceMaster,
+    full_order_repository: ShopeeFullOrderCurrentRepository | None,
+    imported_at: datetime | None = None,
+) -> tuple[
+    tuple[CanonicalInvoiceOrder, ...],
+    tuple[CanonicalInvoiceItem, ...],
+    tuple[InvoiceBundle, ...],
+    tuple[str, ...],
+    StatementEvidenceCoverage | None,
+]:
+    orders = tuple(invoice_orders)
+    items = tuple(invoice_items)
+    if statement is None:
+        return orders, items, (), (), None
+    statement_order_ids = tuple(
+        dict.fromkeys(row.order_id for row in statement.order_rows if row.order_id)
+    )
+    required = set(statement_order_ids)
+    canonical_orders = {
+        order.order_id: order
+        for order in orders
+        if order.platform == "Shopee" and order.order_id in required
+    }
+    canonical_item_ids = {
+        item.order_id
+        for item in items
+        if item.platform == "Shopee" and item.order_id in required
+    }
+    already_verified = tuple(
+        order_id
+        for order_id in statement_order_ids
+        if order_id in canonical_orders and order_id in canonical_item_ids
+    )
+    pending = tuple(
+        order_id for order_id in statement_order_ids if order_id not in already_verified
+    )
+    if not pending:
+        return (
+            orders,
+            items,
+            (),
+            (),
+            StatementEvidenceCoverage(statement_order_ids, already_verified, (), ()),
+        )
+    if full_order_repository is None:
+        requirements = tuple(
+            StatementEvidenceRequirement(
+                order_id,
+                canonical_orders.get(order_id).order_status
+                if order_id in canonical_orders
+                else None,
+                (
+                    "Canonical Invoice items are incomplete."
+                    if order_id in canonical_orders
+                    else "Full Order Current evidence is unavailable."
+                ),
+            )
+            for order_id in pending
+        )
+        return (
+            orders,
+            items,
+            (),
+            (),
+            StatementEvidenceCoverage(statement_order_ids, already_verified, (), requirements),
+        )
+    try:
+        snapshot = full_order_repository.read_snapshot()
+    except Exception as error:
+        requirements = tuple(
+            StatementEvidenceRequirement(
+                order_id,
+                canonical_orders.get(order_id).order_status
+                if order_id in canonical_orders
+                else None,
+                "Full Order Current evidence is unavailable.",
+            )
+            for order_id in pending
+        )
+        return (
+            orders,
+            items,
+            (),
+            (f"FULL_ORDER_CURRENT_UNAVAILABLE:{error}",),
+            StatementEvidenceCoverage(statement_order_ids, already_verified, (), requirements),
+        )
+    current_orders = {
+        order.order_id: order
+        for order in snapshot.orders
+        if resolve_market_context(order.market).persisted_platform == "Shopee"
+    }
+    current_items = snapshot.items_by_identity()
+    statement_order_rows = {row.order_id: row for row in statement.order_rows}
+    inserts: list[InvoiceBundle] = []
+    blockers: list[str] = []
+    ready_from_full_order: list[str] = []
+    requirements: list[StatementEvidenceRequirement] = []
+    strict_candidates: list[str] = []
+    for order_id in pending:
+        current = current_orders.get(order_id)
+        order_items = (
+            current_items.get((current.market, order_id), ()) if current is not None else ()
+        )
+        statement_row = statement_order_rows[order_id]
+        if current is None or not order_items:
+            reason = f"{order_id}: Full Order current snapshot is missing."
+        elif current.order_status.casefold() in {"cancelled", "canceled"}:
+            reason = f"{order_id}: cancelled order remains on the PDF exception path."
+        elif any(
+            statement_row.financial_components.get(name) is None
+            for name in INCOME_COMPONENT_COLUMNS
+        ):
+            reason = f"{order_id}: Statement financial bridge is incomplete."
+        else:
+            strict_candidates.append(order_id)
+            continue
+        blockers.append(reason)
+        requirements.append(
+            StatementEvidenceRequirement(
+                order_id,
+                current.order_status if current is not None else None,
+                _full_order_evidence_reason((reason,)),
+            )
+        )
+    if strict_candidates:
+        batch_proof = prove_full_order_current_against_statement(
+            _statement_subset_for_orders(statement, tuple(strict_candidates)),
+            snapshot,
+            product_master=product_master,
+            imported_at=imported_at,
+        )
+        if batch_proof.ready:
+            inserts.extend(batch_proof.bundles)
+            ready_from_full_order.extend(strict_candidates)
+        else:
+            for order_id in strict_candidates:
+                proof = prove_full_order_current_against_statement(
+                    _statement_subset_for_order(statement, order_id),
+                    snapshot,
+                    product_master=product_master,
+                    imported_at=imported_at,
+                )
+                if proof.ready:
+                    inserts.extend(proof.bundles)
+                    ready_from_full_order.append(order_id)
+                    continue
+                proof_blockers = proof.blockers or (INVOICE_COVERAGE_INCOMPLETE,)
+                blockers.extend(proof_blockers)
+                requirements.append(
+                    StatementEvidenceRequirement(
+                        order_id,
+                        current_orders.get(order_id).order_status
+                        if order_id in current_orders
+                        else None,
+                        _full_order_evidence_reason(proof_blockers),
+                    )
+                )
+    return (
+        orders + tuple(bundle.order for bundle in inserts),
+        items + tuple(item for bundle in inserts for item in bundle.items),
+        tuple(inserts),
+        tuple(dict.fromkeys(blockers)),
+        StatementEvidenceCoverage(
+            statement_order_ids,
+            already_verified,
+            tuple(ready_from_full_order),
+            tuple(requirements),
+        ),
+    )
+
+
+def _statement_subset_for_order(
+    statement: ParsedShopeeWeeklyStatement,
+    order_id: str,
+) -> ParsedShopeeWeeklyStatement:
+    """Keep exact Statement evidence for one Current-only order proof."""
+
+    return _statement_subset_for_orders(statement, (order_id,))
+
+
+def _statement_subset_for_orders(
+    statement: ParsedShopeeWeeklyStatement,
+    order_ids: tuple[str, ...],
+) -> ParsedShopeeWeeklyStatement:
+    """Keep exact Statement evidence for one or more Current-only order proofs."""
+
+    selected = set(order_ids)
+    income_rows = tuple(row for row in statement.income_rows if row.order_id in selected)
+    order_rows = tuple(row for row in income_rows if row.view_by == "Order")
+    return replace(
+        statement,
+        summary_total_released=sum(
+            (
+                row.total_released_amount
+                for row in order_rows
+                if row.total_released_amount is not None
+            ),
+            start=Decimal("0"),
+        ),
+        adjustment_control_total=Decimal("0"),
+        adjustment_footer_total=None,
+        income_rows=income_rows,
+        service_fee_details=tuple(
+            row for row in statement.service_fee_details if row.order_id in selected
+        ),
+        shipping_fee_discrepancies=tuple(
+            row
+            for row in statement.shipping_fee_discrepancies
+            if row.order_id in selected
+        ),
+        adjustments=(),
+    )
+
+
+def _full_order_evidence_reason(blockers: Iterable[str]) -> str:
+    text = " ".join(blockers).casefold()
+    if "return/refund marker" in text:
+        return "Return/refund request detected."
+    if "cancelled order" in text:
+        return "Cancelled order requires existing exception evidence."
+    if "snapshot is missing" in text:
+        return "Full Order Current evidence is missing."
+    if "product master identity" in text:
+        return "Product Master identity requires additional evidence."
+    if "financial bridge" in text:
+        return "Statement financial evidence is incomplete."
+    if "product price proof" in text or "non-zero" in text:
+        return "Full Order and Statement product evidence does not match."
+    return "Additional evidence is required before reconciliation."
 
 
 def _statement_items(
@@ -699,6 +1042,7 @@ def _evidence_version(
             tuple(asdict(event) for event in canonical_adjustments)
         ),
         rule_version=reconciliation.rule_version,
+        full_order_proof_rule_version=FULL_ORDER_STATEMENT_PROOF_RULE_VERSION,
         reconciliation_sha256=_stable_hash(asdict(reconciliation)),
     )
 
@@ -726,6 +1070,11 @@ def _changed_evidence(
         changed.append("ORDER_ADJUSTMENT_SNAPSHOT_CHANGED")
     if current.rule_version != previous.rule_version:
         changed.append("RECONCILIATION_RULE_CHANGED")
+    if (
+        current.full_order_proof_rule_version
+        != getattr(previous, "full_order_proof_rule_version", None)
+    ):
+        changed.append("FULL_ORDER_PROOF_RULE_CHANGED")
     if current.reconciliation_sha256 != previous.reconciliation_sha256:
         changed.append("RECONCILIATION_RESULT_CHANGED")
     return tuple(dict.fromkeys(changed))

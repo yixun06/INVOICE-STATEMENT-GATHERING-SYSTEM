@@ -527,6 +527,7 @@ def _adapt_v2_statement_review(
         "reconciliation_v2": batch,
         "invoice_items": review.invoice_items,
         "invoice_coverage": review.invoice_coverage,
+        "statement_evidence_coverage": review.evidence_coverage,
         "legacy_sku_matches": review.sku_matches,
         "adjustment_reconciliations": tuple(stage.adjustment_reconciliations),
         "shipping_fee_discrepancies": (
@@ -666,28 +667,15 @@ def _adapt_v2_statement_review(
         )
 
     coverage_incomplete = bool(
-        review.invoice_coverage is not None
-        and not review.invoice_coverage.complete
+        review.evidence_coverage is not None
+        and not review.evidence_coverage.complete
     )
     commit_reasons: tuple[str, ...]
     if coverage_incomplete:
-        missing_invoices = len(review.invoice_coverage.missing_invoice_order_ids)
-        missing_items = len(
-            review.invoice_coverage.missing_invoice_item_order_ids
-        )
-        reasons: list[str] = []
-        if missing_invoices:
-            reasons.append(
-                f"{missing_invoices} invoice"
-                f"{'s are' if missing_invoices != 1 else ' is'} still required"
-            )
-        if missing_items:
-            reasons.append(
-                f"{missing_items} order"
-                f"{'s are' if missing_items != 1 else ' is'} missing Invoice items"
-            )
         commit_reasons = (
-            f"{' and '.join(reasons)} before reconciliation can continue.",
+            f"{len(review.evidence_coverage.additional_evidence)} order"
+            f"{'s require' if len(review.evidence_coverage.additional_evidence) != 1 else ' requires'} "
+            "additional evidence before reconciliation can continue.",
         )
     elif review.blockers:
         commit_reasons = review.blockers
@@ -701,7 +689,7 @@ def _adapt_v2_statement_review(
     if source_error is not None:
         batch_status = STATEMENT_SOURCE_ERROR
     elif coverage_incomplete:
-        batch_status = "INVOICE_COVERAGE_INCOMPLETE"
+        batch_status = "ADDITIONAL_EVIDENCE_REQUIRED"
     elif review.commit_ready:
         batch_status = "Ready to Commit"
     elif review.ready:
@@ -746,7 +734,7 @@ def _adapt_v2_statement_review(
         reconciliation=ReconciliationResult(
             available=batch is not None and not coverage_incomplete,
             status=(
-                "Invoices still required"
+                "Additional evidence required"
                 if coverage_incomplete
                 else "Available" if batch is not None else "Not Available"
             ),

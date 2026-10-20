@@ -324,6 +324,240 @@ def test_multiple_identity_prices_resolve_from_exact_variation_without_name_matc
     assert result.matched_by == "sku_unique_exact_variation"
 
 
+def test_full_order_match_only_resolves_only_after_normal_name_variation():
+    master = _master([
+        _row(
+            seller_sku="CANONICAL-SKU",
+            parent_sku="CANONICAL-PARENT",
+            product_name="Current Listing Name",
+            variation_name="One",
+        ) | {"nav_code": "NAV-1", "usoft_product_description": "Canonical EA"},
+        _row(
+            seller_sku="CANONICAL-SKU",
+            parent_sku="CANONICAL-PARENT",
+            product_name="Historical Full Order Name",
+            variation_name="One",
+        )
+        | {
+            "nav_code": "NAV-1",
+            "usoft_product_description": "Canonical EA",
+            "remark": "FULL_ORDER_MATCH_ONLY",
+        },
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="",
+        parent_sku="",
+        product_name="Historical Full Order Name",
+        variation_name="One",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY
+    assert result.matched_sku == "CANONICAL-SKU"
+    assert result.nav_code == "NAV-1"
+
+
+def test_full_order_preserves_earlier_sku_ambiguity_when_all_fallbacks_fail():
+    master = _master([
+        _row(
+            seller_sku="CRANBERRY-SKU",
+            parent_sku="CRANBERRY-PARENT",
+            product_name="Current Cranberry A",
+            variation_name="",
+        ),
+        _row(
+            seller_sku="CRANBERRY-SKU",
+            parent_sku="CRANBERRY-PARENT",
+            product_name="Current Cranberry B",
+            variation_name="",
+        ),
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="CRANBERRY-SKU",
+        parent_sku="CRANBERRY-PARENT",
+        product_name="Historical Cranberry Title",
+        variation_name="",
+    )
+
+    assert result.status is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
+    assert result.source_rows == (1, 2)
+
+
+def test_full_order_name_variation_can_resolve_after_an_ambiguous_sku_lookup():
+    master = _master([
+        _row(
+            seller_sku="AMBIGUOUS-SKU",
+            parent_sku="PARENT-A",
+            product_name="Current Listing A",
+            variation_name="",
+        ),
+        _row(
+            seller_sku="AMBIGUOUS-SKU",
+            parent_sku="PARENT-B",
+            product_name="Current Listing B",
+            variation_name="",
+        ),
+        _row(
+            seller_sku="CANONICAL-SKU",
+            parent_sku="CANONICAL-PARENT",
+            product_name="Historical Full Order Title",
+            variation_name="One",
+        ) | {"nav_code": "NAV-1"},
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="AMBIGUOUS-SKU",
+        parent_sku="",
+        product_name="Historical Full Order Title",
+        variation_name="One",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
+    assert result.matched_sku == "CANONICAL-SKU"
+
+
+def test_full_order_match_only_can_resolve_after_an_ambiguous_sku_lookup():
+    master = _master([
+        _row(
+            seller_sku="AMBIGUOUS-SKU",
+            parent_sku="PARENT-A",
+            product_name="Current Listing A",
+            variation_name="",
+        ),
+        _row(
+            seller_sku="AMBIGUOUS-SKU",
+            parent_sku="PARENT-B",
+            product_name="Current Listing B",
+            variation_name="",
+        ),
+        _row(
+            seller_sku="BRAGG-CANONICAL-SKU",
+            parent_sku="BRAGG-CANONICAL-PARENT",
+            product_name="Historical BRAGG Title",
+            variation_name="One",
+        ) | {"nav_code": "NAV-BRAGG", "remark": "FULL_ORDER_MATCH_ONLY"},
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="AMBIGUOUS-SKU",
+        parent_sku="",
+        product_name="Historical BRAGG Title",
+        variation_name="One",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY
+    assert result.matched_sku == "BRAGG-CANONICAL-SKU"
+
+
+def test_full_order_match_only_rows_are_ignored_by_normal_sku_and_parent_lookups():
+    master = _master([
+        _row(
+            seller_sku="CANONICAL-SKU",
+            parent_sku="CANONICAL-PARENT",
+            product_name="Historical Full Order Name",
+            variation_name="One",
+        )
+        | {"remark": "FULL_ORDER_MATCH_ONLY"},
+    ])
+
+    seller_result = master.lookup(seller_sku="CANONICAL-SKU")
+    parent_result = master.lookup(seller_sku="CANONICAL-PARENT")
+
+    assert seller_result.status is PriceLookupStatus.PRICE_NOT_FOUND
+    assert parent_result.status is PriceLookupStatus.PRICE_NOT_FOUND
+
+
+def test_full_order_match_only_duplicate_sku_does_not_create_normal_sku_ambiguity():
+    master = _master([
+        _row(seller_sku="SKU-1", parent_sku="PARENT-1"),
+        _row(
+            seller_sku="SKU-1",
+            parent_sku="PARENT-1",
+            product_name="Historical Full Order Name",
+        ) | {"remark": "FULL_ORDER_MATCH_ONLY"},
+    ])
+
+    result = master.lookup(seller_sku="SKU-1")
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.matched_product_name == "Product One"
+
+
+def test_conflicting_full_order_match_only_rows_fail_closed():
+    master = _master([
+        _row(
+            seller_sku="SKU-1",
+            parent_sku="PARENT-1",
+            product_name="Historical Full Order Name",
+            variation_name="One",
+            unit_selling_price="12.50",
+        ) | {"nav_code": "NAV-1", "remark": "FULL_ORDER_MATCH_ONLY"},
+        _row(
+            seller_sku="SKU-2",
+            parent_sku="PARENT-2",
+            product_name="Historical Full Order Name",
+            variation_name="One",
+            unit_selling_price="13.50",
+        ) | {"nav_code": "NAV-2", "remark": "FULL_ORDER_MATCH_ONLY"},
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="",
+        parent_sku="",
+        product_name="Historical Full Order Name",
+        variation_name="One",
+    )
+
+    assert result.status is PriceLookupStatus.PRICING_CONFLICT
+    assert "FULL_ORDER_MATCH_ONLY" in result.reason
+
+
+def test_blank_remark_keeps_full_order_normal_name_variation_behavior():
+    result = _master([_row()]).lookup_full_order(
+        seller_sku="",
+        parent_sku="",
+        product_name="Product One",
+        variation_name="Blue",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
+
+
+def test_full_order_match_only_supports_a_verified_mulberry_historical_title():
+    master = _master([
+        _row(
+            seller_sku="9555208108665",
+            parent_sku="9555208108665",
+            product_name="Simply Natural Organic Mulberry Leaf Tea 16x2.5g Malaysia",
+            variation_name="",
+        )
+        | {"nav_code": "5000022", "usoft_product_description": "SN Org Mulberry Leaf Tea EA 16X2.5g"},
+        _row(
+            seller_sku="9555208108665",
+            parent_sku="9555208108665",
+            product_name="Historical Mulberry Leaf Tea Title",
+            variation_name="",
+        )
+        | {
+            "nav_code": "5000022",
+            "usoft_product_description": "SN Org Mulberry Leaf Tea EA 16X2.5g",
+            "remark": "FULL_ORDER_MATCH_ONLY",
+        },
+    ])
+
+    result = master.lookup_full_order(
+        seller_sku="",
+        parent_sku="",
+        product_name="Historical Mulberry Leaf Tea Title",
+        variation_name="",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY
+    assert result.matched_sku == "9555208108665"
+    assert result.nav_code == "5000022"
+
+
 def test_unicode_compatibility_normalization_is_matching_only_and_deterministic():
     result = _master([
         _row(product_name="Organic 牛 Oil", variation_name="250ml", unit_selling_price="17.90"),

@@ -402,6 +402,7 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
     settings = SimpleNamespace(
         create_repository=lambda: "fresh repository",
         create_statement_writer=lambda: "fresh writer",
+        create_full_order_current_repository=lambda: "fresh Full Order repository",
     )
 
     monkeypatch.setattr(data_import, "st", fake)
@@ -427,6 +428,7 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
             "repository": "fresh repository",
             "writer": "fresh writer",
             "product_master": "fresh master",
+            "full_order_repository": "fresh Full Order repository",
         }
         events.append("review rebuilt")
         return refreshed
@@ -439,6 +441,37 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
     assert fake.session_state["weekly_statement_stage"] == "fresh stage"
     assert "weekly_statement_review_stale_reason" not in fake.session_state
     assert "statement_exception_queue_selected" not in fake.session_state
+
+
+def test_statement_review_with_older_full_order_proof_rule_requires_refresh(monkeypatch):
+    fake = _FakeStreamlit()
+    old_review = SimpleNamespace(
+        evidence_version=SimpleNamespace(full_order_proof_rule_version="legacy-rule")
+    )
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(data_import, "_weekly_review", lambda: old_review)
+
+    assert data_import._statement_review_stale() is True
+    assert fake.session_state["weekly_statement_review_stale_reason"] == (
+        "Full Order Statement proof rules changed after this review. "
+        "Refresh validation before continuing."
+    )
+
+
+def test_statement_review_with_current_full_order_proof_rule_remains_current(monkeypatch):
+    fake = _FakeStreamlit()
+    review = SimpleNamespace(
+        evidence_version=SimpleNamespace(
+            full_order_proof_rule_version=(
+                data_import.FULL_ORDER_STATEMENT_PROOF_RULE_VERSION
+            )
+        )
+    )
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(data_import, "_weekly_review", lambda: review)
+
+    assert data_import._statement_review_stale() is False
+    assert "weekly_statement_review_stale_reason" not in fake.session_state
 
 
 def _many_mismatch_statement_app() -> None:
@@ -789,19 +822,24 @@ def _partial_invoice_coverage_app() -> None:
         ValidationResult,
     )
     from src.invoice_app.services.shopee_statement_import import (
-        StatementInvoiceCoverage,
+        StatementEvidenceCoverage,
+        StatementEvidenceRequirement,
     )
     from src.invoice_app.ui import data_import
 
-    coverage = StatementInvoiceCoverage(
+    coverage = StatementEvidenceCoverage(
         statement_order_ids=("ORDER-1", "ORDER-2", "ORDER-3"),
-        invoice_order_ids=("ORDER-1", "ORDER-2"),
-        missing_invoice_order_ids=("ORDER-3",),
-        missing_invoice_item_order_ids=("ORDER-2",),
+        already_verified_order_ids=("ORDER-1",),
+        ready_from_full_order_order_ids=("ORDER-2",),
+        additional_evidence=(
+            StatementEvidenceRequirement(
+                "ORDER-3", "Completed", "Return/refund request detected."
+            ),
+        ),
     )
     result = ImportResult(
         source_type=data_import.SHOPEE_WEEKLY_STATEMENT,
-        batch_status="INVOICE_COVERAGE_INCOMPLETE",
+        batch_status="ADDITIONAL_EVIDENCE_REQUIRED",
         source_summary=SourceSummary(
             title="Statement",
             items=(
@@ -815,18 +853,18 @@ def _partial_invoice_coverage_app() -> None:
         validation=ValidationResult(),
         reconciliation=ReconciliationResult(
             available=False,
-            status="Invoices still required",
+            status="Additional evidence required",
         ),
         commit_readiness=CommitReadiness(
             ready=False,
             status="Not Ready",
-            reasons=("Invoice coverage is incomplete.",),
+            reasons=("1 order requires additional evidence before reconciliation can continue.",),
         ),
         session_state=SessionState(
             applied_to_current_session=True,
             label="Applied to Current Session",
         ),
-        source_specific_details={"invoice_coverage": coverage},
+        source_specific_details={"statement_evidence_coverage": coverage},
     )
     data_import._render_validation_status(result)
     data_import._render_statement_invoice_coverage_details(result)
@@ -840,26 +878,79 @@ def test_partial_invoice_coverage_ui_is_direct_and_preserves_statement_summary()
 
     assert app.exception == []
     assert len(app.error) == 1
-    assert "Invoices still required" in app.error[0].value
+    assert "Additional evidence required" in app.error[0].value
     assert "unresolved issue" not in app.error[0].value
     metrics = {item.label: item.value for item in app.metric}
     assert metrics["Statement Orders"] == "3"
-    assert metrics["Invoices Found"] == "2"
-    assert metrics["Invoices Missing"] == "1"
-    assert metrics["Invoice Items Missing"] == "1"
+    assert metrics["Already Verified"] == "1"
+    assert metrics["Ready from Full Order"] == "1"
+    assert metrics["Need Additional Evidence"] == "1"
     assert metrics["Statement Period"] == "17/08/2026 - 23/08/2026"
     assert metrics["Order Rows"] == "3"
     assert metrics["SKU Rows"] == "5"
     assert metrics["Total Released"] == "RM 123.45"
     assert metrics["Adjustment Total"] == "RM 2.00"
     table = next(
-        frame.value for frame in app.dataframe if "Database status" in frame.value.columns
+        frame.value for frame in app.dataframe if "Order Status" in frame.value.columns
     )
-    assert tuple(table["Order ID"]) == ("ORDER-3", "ORDER-2")
-    assert tuple(table["Database status"]) == (
-        "Invoice not imported",
-        "Invoice items missing",
+    assert tuple(table["Order ID"]) == ("ORDER-3",)
+    assert tuple(table["Order Status"]) == ("Completed",)
+    assert tuple(table["Reason"]) == ("Return/refund request detected.",)
+
+
+def test_statement_forward_gate_uses_additional_evidence_not_legacy_invoice_coverage(
+    monkeypatch,
+):
+    from src.invoice_app.services.shopee_statement_import import (
+        StatementEvidenceCoverage,
+        StatementEvidenceRequirement,
     )
+
+    monkeypatch.setattr(
+        data_import,
+        "statement_stage_review_consistency",
+        lambda _state: SimpleNamespace(coherent=True, state="coherent", reason=None),
+    )
+    monkeypatch.setattr(data_import, "_weekly_review", lambda: SimpleNamespace(commit_ready=True))
+    monkeypatch.setattr(data_import, "_statement_review_stale", lambda: False)
+
+    clean = StatementEvidenceCoverage(
+        statement_order_ids=("ORDER-1",),
+        already_verified_order_ids=(),
+        ready_from_full_order_order_ids=("ORDER-1",),
+        additional_evidence=(),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "_current_import_result",
+        lambda: SimpleNamespace(
+            source_specific_details={"statement_evidence_coverage": clean},
+            commit_readiness=SimpleNamespace(ready=True),
+        ),
+    )
+    assert data_import._statement_forward_gate() == (True, None)
+
+    blocked = StatementEvidenceCoverage(
+        statement_order_ids=("ORDER-1",),
+        already_verified_order_ids=(),
+        ready_from_full_order_order_ids=(),
+        additional_evidence=(
+            StatementEvidenceRequirement(
+                "ORDER-1", "Completed", "Return/refund request detected."
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "_current_import_result",
+        lambda: SimpleNamespace(
+            source_specific_details={"statement_evidence_coverage": blocked},
+            commit_readiness=SimpleNamespace(ready=True),
+        ),
+    )
+    allowed, reason = data_import._statement_forward_gate()
+    assert allowed is False
+    assert reason == "1 order requires additional evidence before reconciliation can continue."
 
 
 def _statement_source_error_app() -> None:

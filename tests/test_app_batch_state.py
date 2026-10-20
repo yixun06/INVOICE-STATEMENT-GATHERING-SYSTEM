@@ -896,6 +896,7 @@ def test_data_import_wizard_selects_weekly_statement_before_upload(tmp_path, mon
     )
     assert source_type.options == [
         "Invoice Import",
+        "Full Order Import",
         "Weekly Statement",
         "Monthly Statement",
     ]

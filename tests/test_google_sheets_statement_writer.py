@@ -41,6 +41,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementBatchAudit,
     StatementCommitBlocked,
     ProtectedInvoiceItemStatementFields,
+    invoice_snapshot_sha256,
     prepare_statement_commit_plan,
     serialize_order_adjustment,
 )
@@ -333,6 +334,71 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     assert _row_values(gateway, INVOICE_ITEMS_TAB)["statement_net_selling_amount"] == "10.00"
     assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 5
     assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 2
+
+
+def test_full_order_canonical_insert_and_statement_commit_share_one_atomic_batch():
+    base = _plan()
+    inserted_order = replace(
+        _invoice_order(),
+        payment_status="RELEASED",
+        payout_completed_date=date(2026, 8, 8),
+        difference=Decimal("0.00"),
+    )
+    inserted_item = replace(
+        _invoice_item(),
+        statement_product_price=Decimal("10.00"),
+        statement_refund_amount=Decimal("0.00"),
+        statement_net_selling_amount=Decimal("10.00"),
+    )
+    plan = replace(
+        base,
+        invoice_order_inserts=(inserted_order,),
+        invoice_item_inserts=(inserted_item,),
+        invoice_snapshot_sha256=invoice_snapshot_sha256(
+            (inserted_order,),
+            (
+                replace(
+                    inserted_item,
+                    statement_product_price=None,
+                    statement_refund_amount=None,
+                    statement_net_selling_amount=None,
+                ),
+            ),
+        ),
+    )
+    gateway = InMemoryStatementGateway()
+    gateway.tabs[INVOICE_ORDERS_TAB] = [list(INVOICE_ORDERS_HEADERS)]
+    gateway.tabs[INVOICE_ITEMS_TAB] = [list(INVOICE_ITEMS_HEADERS)]
+
+    result = _commit(gateway, plan)
+
+    assert result.committed is True
+    assert len(gateway.batch_calls) == 1
+    written_tabs = {
+        value_range["range"].split("!", 1)[0].strip("'")
+        for value_range in gateway.batch_calls[0]
+    }
+    assert INVOICE_ORDERS_TAB in written_tabs
+    assert INVOICE_ITEMS_TAB in written_tabs
+    assert STATEMENT_DATA_TAB in written_tabs
+    assert _row_values(gateway, INVOICE_ORDERS_TAB)["payment_status"] == "RELEASED"
+    assert _row_values(gateway, INVOICE_ITEMS_TAB)["statement_product_price"] == "10.00"
+
+
+def test_full_order_canonical_insert_conflict_blocks_before_any_write():
+    base = _plan()
+    plan = replace(
+        base,
+        invoice_order_inserts=(_invoice_order(),),
+        invoice_item_inserts=(_invoice_item(),),
+        invoice_snapshot_sha256=None,
+    )
+    gateway = InMemoryStatementGateway()
+
+    with pytest.raises(StatementCommitBlocked, match="already exists"):
+        _commit(gateway, plan)
+
+    assert gateway.batch_calls == []
 
 
 def test_statement_commit_appends_supported_adjustment_in_the_same_values_batch():
