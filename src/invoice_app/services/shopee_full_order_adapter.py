@@ -156,14 +156,14 @@ def adapt_shopee_full_order(
                 )
                 continue
             resolved_sku = lookup.matched_sku or lookup.matched_parent_sku or ""
-            unit_price = _full_order_unit_price(parsed.market.key, lookup)
+            unit_price = _full_order_unit_price(lookup)
             if not resolved_sku or not lookup.nav_code or unit_price is None:
                 issues.append(
                     FullOrderValidationIssue(
                         PM_ENRICHMENT_REQUIRED,
                         order_id,
                         row.source_row_number,
-                        _missing_full_order_price_reason(parsed.market.key),
+                        _missing_full_order_price_reason(),
                     )
                 )
                 continue
@@ -234,23 +234,17 @@ def _resolve_product(
     return None, result.reason or "Product Master identity is unresolved."
 
 
-def _full_order_unit_price(
-    market: MarketKey, lookup: ProductPriceLookupResult
-) -> Decimal | None:
-    """Return the approved market-specific PM price after identity resolution."""
+def _full_order_unit_price(lookup: ProductPriceLookupResult) -> Decimal | None:
+    """Return the approved same-row Full Order PM price after identity resolution."""
 
-    if market is MarketKey.SHOPEE_MY:
-        return lookup.unit_price_usolf
-    return lookup.unit_selling_price
+    return lookup.unit_price_usolf
 
 
-def _missing_full_order_price_reason(market: MarketKey) -> str:
-    if market is MarketKey.SHOPEE_MY:
-        return (
-            "Resolved Product Master row lacks Seller SKU, NAV, or valid "
-            "UNIT PRICE USOLF."
-        )
-    return "Resolved Product Master row lacks Seller SKU, NAV, or ERP Unit Price."
+def _missing_full_order_price_reason() -> str:
+    return (
+        "Resolved Product Master row lacks Seller SKU, NAV, or valid "
+        "UNIT PRICE USOLF."
+    )
 
 
 def _order_facts_are_consistent(rows: list[ShopeeFullOrderRow]) -> bool:

@@ -179,6 +179,54 @@ def test_same_parser_supports_sg_blank_skus_by_exact_name_variation():
     assert batch.items[0].unit_price == Decimal("6.50")
 
 
+
+def test_sg_full_order_uses_same_row_usolf_and_rejects_price_sgd_fallback():
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="sg-full-order.xlsx",
+        market=SHOPEE_SG,
+    )
+    matched_master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "PARENT-1",
+                "product_name": "Organic Item",
+                "variation_name": "Red",
+                "unit_selling_price": "6.50",
+                "unit_price_usolf": "7.75",
+                "nav_code": "SG-NAV-1",
+            }
+        ]
+    )
+
+    matched = adapt_shopee_full_order(parsed, product_master=matched_master)
+
+    assert matched.syncable is True
+    assert matched.items[0].resolved_seller_sku == "SKU-1"
+    assert matched.items[0].nav == "SG-NAV-1"
+    assert matched.items[0].unit_price == Decimal("7.75")
+
+    for invalid_usolf in ("", "not-a-number", "0"):
+        invalid_master = ProductPriceMaster.from_rows(
+            [
+                {
+                    "seller_sku": "SKU-1",
+                    "parent_sku": "PARENT-1",
+                    "product_name": "Organic Item",
+                    "variation_name": "Red",
+                    "unit_selling_price": "6.50",
+                    "unit_price_usolf": invalid_usolf,
+                    "nav_code": "SG-NAV-1",
+                }
+            ]
+        )
+
+        invalid = adapt_shopee_full_order(parsed, product_master=invalid_master)
+
+        assert invalid.syncable is False
+        assert invalid.issues[0].code == PM_ENRICHMENT_REQUIRED
+        assert "UNIT PRICE USOLF" in invalid.issues[0].message
 def test_pm_incomplete_resolution_is_distinct_non_money_blocker():
     parsed = parse_shopee_full_order(
         _workbook_bytes([_rows()[0]]),
