@@ -18,11 +18,26 @@ from src.invoice_app.services.product_price_master import (
     PriceLookupStatus,
     ProductPriceLookupResult,
     ProductPriceMaster,
+    VerifiedErpIdentityEquivalence,
 )
+from src.invoice_app.services.market_context import MarketKey
 
 
 PM_ENRICHMENT_REQUIRED = "PM_ENRICHMENT_REQUIRED"
 MALFORMED_ORDER_SNAPSHOT = "MALFORMED_ORDER_SNAPSHOT"
+
+FULL_ORDER_VERIFIED_ERP_IDENTITIES = (
+    VerifiedErpIdentityEquivalence(
+        product_id="929433653",
+        sku="9555208106937",
+        product_name="Simply Natural Organic Lakadong Turmeric Powder 80g India",
+        allowed_variations=("", "09/2026", "09/2027"),
+        nav_code="5000064",
+        usoft_product_description="SN Org Lakadong Turmeric Powder EA 80g",
+        uom="EA",
+        unit_selling_price=Decimal("11.50"),
+    ),
+)
 
 _MATCHED_STATUSES = {
     PriceLookupStatus.MATCHED,
@@ -33,6 +48,7 @@ _MATCHED_STATUSES = {
     PriceLookupStatus.MATCHED_BY_PARENT_SKU_NAME_VARIATION,
     PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
     PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY,
+    PriceLookupStatus.VERIFIED_ERP_IDENTITY_EQUIVALENCE,
 }
 
 
@@ -124,7 +140,11 @@ def adapt_shopee_full_order(
             continue
         mapped_items: list[FullOrderCurrentItem] = []
         for item_index, row in enumerate(source_rows):
-            lookup, reason = _resolve_product(row, product_master)
+            lookup, reason = _resolve_product(
+                row,
+                product_master,
+                market=parsed.market.key,
+            )
             if lookup is None:
                 issues.append(
                     FullOrderValidationIssue(
@@ -136,13 +156,14 @@ def adapt_shopee_full_order(
                 )
                 continue
             resolved_sku = lookup.matched_sku or lookup.matched_parent_sku or ""
-            if not resolved_sku or not lookup.nav_code or lookup.unit_selling_price is None:
+            unit_price = _full_order_unit_price(parsed.market.key, lookup)
+            if not resolved_sku or not lookup.nav_code or unit_price is None:
                 issues.append(
                     FullOrderValidationIssue(
                         PM_ENRICHMENT_REQUIRED,
                         order_id,
                         row.source_row_number,
-                        "Resolved Product Master row lacks Seller SKU, NAV, or ERP Unit Price.",
+                        _missing_full_order_price_reason(parsed.market.key),
                     )
                 )
                 continue
@@ -158,7 +179,7 @@ def adapt_shopee_full_order(
                     product_name=row.product_name,
                     variation=row.variation,
                     quantity=row.quantity,
-                    unit_price=lookup.unit_selling_price,
+                    unit_price=unit_price,
                     product_subtotal=row.product_subtotal,
                     return_refund_status=row.return_refund_status,
                 )
@@ -197,16 +218,39 @@ def adapt_shopee_full_order(
 def _resolve_product(
     row: ShopeeFullOrderRow,
     product_master: ProductPriceMaster,
+    *,
+    market: MarketKey,
 ) -> tuple[ProductPriceLookupResult | None, str]:
     result = product_master.lookup_full_order(
         seller_sku=row.seller_sku,
         parent_sku=row.parent_sku,
         product_name=row.product_name,
         variation_name=row.variation,
+        verified_erp_identities=FULL_ORDER_VERIFIED_ERP_IDENTITIES,
+        parent_family_variation_disambiguation=(market is MarketKey.SHOPEE_MY),
     )
     if result.status in _MATCHED_STATUSES:
         return result, ""
     return None, result.reason or "Product Master identity is unresolved."
+
+
+def _full_order_unit_price(
+    market: MarketKey, lookup: ProductPriceLookupResult
+) -> Decimal | None:
+    """Return the approved market-specific PM price after identity resolution."""
+
+    if market is MarketKey.SHOPEE_MY:
+        return lookup.unit_price_usolf
+    return lookup.unit_selling_price
+
+
+def _missing_full_order_price_reason(market: MarketKey) -> str:
+    if market is MarketKey.SHOPEE_MY:
+        return (
+            "Resolved Product Master row lacks Seller SKU, NAV, or valid "
+            "UNIT PRICE USOLF."
+        )
+    return "Resolved Product Master row lacks Seller SKU, NAV, or ERP Unit Price."
 
 
 def _order_facts_are_consistent(rows: list[ShopeeFullOrderRow]) -> bool:

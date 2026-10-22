@@ -28,6 +28,7 @@ class PriceLookupStatus(str, Enum):
     MATCHED_BY_ALIAS = "matched_by_alias"
     MATCHED_BY_NAME_VARIATION = "matched_by_name_variation"
     MATCHED_BY_FULL_ORDER_MATCH_ONLY = "matched_by_full_order_match_only"
+    VERIFIED_ERP_IDENTITY_EQUIVALENCE = "verified_erp_identity_equivalence"
     PRICING_CONFLICT = "pricing_conflict"
     PRICE_NOT_FOUND = "price_not_found"
 
@@ -53,10 +54,26 @@ class ProductPriceMasterRecord:
     variation_name: str
     unit_selling_price: Decimal
     source_row: int
+    unit_price_usolf: Decimal | None = None
     nav_code: str | None = None
     product_id: str | None = None
     usoft_product_description: str | None = None
+    uom: str | None = None
     remark: str | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedErpIdentityEquivalence:
+    """Explicit Full Order-only Product Master identity equivalence evidence."""
+
+    product_id: str
+    sku: str
+    product_name: str
+    allowed_variations: tuple[str, ...]
+    nav_code: str
+    usoft_product_description: str
+    uom: str
+    unit_selling_price: Decimal
 
 
 @dataclass(frozen=True)
@@ -83,6 +100,7 @@ class ProductPriceLookupResult:
     source_rows: tuple[int, ...]
     reason: str | None = None
     nav_code: str | None = None
+    unit_price_usolf: Decimal | None = None
 
     alias_rule: str | None = None
 
@@ -96,6 +114,8 @@ _REQUIRED_HEADERS = {
 _NAV_HEADER = "nav code"
 _PRODUCT_ID_HEADER = "product id"
 _USOFT_PRODUCT_DESCRIPTION_HEADER = "usoft product description"
+_UNIT_PRICE_USOLF_HEADER = "unit price usolf"
+_UOM_HEADER = "uom"
 _REMARK_HEADER = "remark"
 _FULL_ORDER_MATCH_ONLY_REMARK = "full_order_match_only"
 _STRICT_PRICE = re.compile(
@@ -167,11 +187,15 @@ class ProductPriceMaster:
                         variation_name=_display_text(values["variation_name"]),
                         unit_selling_price=price,
                         source_row=row_number,
+                        unit_price_usolf=_strict_decimal(
+                            values.get("unit_price_usolf")
+                        ),
                         nav_code=_optional_nav(values.get("nav_code")),
                         product_id=_display_text(values.get("product_id")) or None,
                         usoft_product_description=(
                             _display_text(values.get("usoft_product_description")) or None
                         ),
+                        uom=_display_text(values.get("uom")) or None,
                         remark=_display_text(values.get("remark")) or None,
                     )
                 )
@@ -218,11 +242,13 @@ class ProductPriceMaster:
                     variation_name=_display_text(row.get("variation_name")),
                     unit_selling_price=price,
                     source_row=source_row,
+                    unit_price_usolf=_strict_decimal(row.get("unit_price_usolf")),
                     nav_code=_optional_nav(row.get("nav_code")),
                     product_id=_display_text(row.get("product_id")) or None,
                     usoft_product_description=(
                         _display_text(row.get("usoft_product_description")) or None
                     ),
+                    uom=_display_text(row.get("uom")) or None,
                     remark=_display_text(row.get("remark")) or None,
                 )
             )
@@ -298,6 +324,8 @@ class ProductPriceMaster:
         parent_sku: str | None,
         product_name: str | None,
         variation_name: str | None,
+        verified_erp_identities: tuple[VerifiedErpIdentityEquivalence, ...] = (),
+        parent_family_variation_disambiguation: bool = False,
     ) -> ProductPriceLookupResult:
         """Resolve a Shopee Full Order row using its explicit compatibility rows last.
 
@@ -315,6 +343,14 @@ class ProductPriceMaster:
                 variation_name=variation_name,
             )
             if result.status in _NORMAL_MATCHED_STATUSES:
+                if parent_family_variation_disambiguation:
+                    family_result = self._resolve_parent_family_variation(
+                        result=result,
+                        parent_sku=parent_sku,
+                        variation_name=variation_name,
+                    )
+                    if family_result is not None:
+                        return family_result
                 return result
             if (
                 result.status
@@ -326,28 +362,127 @@ class ProductPriceMaster:
         normal_name_result = self._resolve_name_variation(product_name, variation_name)
         if normal_name_result.status in _NORMAL_MATCHED_STATUSES:
             return normal_name_result
+        if normal_name_result.status is PriceLookupStatus.PRICE_NOT_FOUND:
+            compatibility_candidates = _exact_name_variation(
+                self._full_order_match_only_records,
+                product_name,
+                variation_name,
+            )
+            if compatibility_candidates:
+                if _has_one_company_identity(compatibility_candidates):
+                    return self._matched_identity(
+                        compatibility_candidates,
+                        status=PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY,
+                    )
+                return self._conflict(
+                    compatibility_candidates,
+                    "FULL_ORDER_MATCH_ONLY Product Name / Variation matches multiple "
+                    "company product identities.",
+                )
+
+        equivalence_result = self._resolve_verified_erp_identity_equivalence(
+            seller_sku=seller_sku,
+            parent_sku=parent_sku,
+            product_name=product_name,
+            variation_name=variation_name,
+            verified_erp_identities=verified_erp_identities,
+        )
+        if equivalence_result is not None:
+            return equivalence_result
         if normal_name_result.status is not PriceLookupStatus.PRICE_NOT_FOUND:
             return earlier_ambiguous_result or normal_name_result
-
-        compatibility_candidates = _exact_name_variation(
-            self._full_order_match_only_records,
-            product_name,
-            variation_name,
+        return earlier_ambiguous_result or self._not_found(
+            "No normal Product Listing or FULL_ORDER_MATCH_ONLY identity exactly "
+            "matches Product Name / Variation."
         )
-        if not compatibility_candidates:
-            return earlier_ambiguous_result or self._not_found(
-                "No normal Product Listing or FULL_ORDER_MATCH_ONLY identity exactly "
-                "matches Product Name / Variation."
-            )
-        if _has_one_company_identity(compatibility_candidates):
+
+    def _resolve_parent_family_variation(
+        self,
+        *,
+        result: ProductPriceLookupResult,
+        parent_sku: str | None,
+        variation_name: str | None,
+    ) -> ProductPriceLookupResult | None:
+        """Correct a resolved Seller-SKU result only when variation contradicts it.
+
+        Some historical MY Full Order exports carry a Parent SKU which is also a
+        child Seller SKU.  The ordinary Seller-SKU-first path would otherwise
+        return that child before seeing a contradictory exact source Variation.
+        This narrow opt-in branch considers the Parent SKU family only in that
+        contradiction, when the resolved record belongs to that same family.
+        """
+        parent_key = normalize_sku_text(parent_sku)
+        family = self._parent_sku_index.get(parent_key, ())
+        variation_key = _match_text(variation_name)
+        if (
+            not parent_key
+            or not variation_key
+            or variation_key == _match_text(result.matched_variation_name)
+            or normalize_sku_text(result.matched_parent_sku) != parent_key
+            or _has_one_identity(family)
+        ):
+            return None
+        narrowed = _match_variation(family, variation_name)
+        if narrowed and _has_one_identity(narrowed):
             return self._matched_identity(
-                compatibility_candidates,
-                status=PriceLookupStatus.MATCHED_BY_FULL_ORDER_MATCH_ONLY,
+                narrowed,
+                status=PriceLookupStatus.MATCHED,
+                matched_by="parent_family_unique_exact_variation",
+            )
+        if narrowed:
+            return self._conflict(
+                narrowed,
+                "Exact Full Order Variation matches multiple Parent SKU family "
+                "identities.",
             )
         return self._conflict(
-            compatibility_candidates,
-            "FULL_ORDER_MATCH_ONLY Product Name / Variation matches multiple "
-            "company product identities.",
+            family,
+            "Full Order Variation does not exactly identify one Parent SKU family "
+            "identity.",
+        )
+
+    def _resolve_verified_erp_identity_equivalence(
+        self,
+        *,
+        seller_sku: str | None,
+        parent_sku: str | None,
+        product_name: str | None,
+        variation_name: str | None,
+        verified_erp_identities: tuple[VerifiedErpIdentityEquivalence, ...],
+    ) -> ProductPriceLookupResult | None:
+        if not verified_erp_identities:
+            return None
+        candidates = _unique_records(
+            candidate
+            for source_sku in dict.fromkeys((seller_sku, parent_sku))
+            if normalize_sku_text(source_sku)
+            for candidate in self._sku_candidates(normalize_sku_text(source_sku))
+        )
+        equivalences = tuple(
+            equivalence
+            for equivalence in verified_erp_identities
+            if _matches_verified_erp_identity_equivalence(
+                candidates,
+                equivalence,
+                product_name=product_name,
+                variation_name=variation_name,
+            )
+        )
+        if len(equivalences) != 1:
+            return None
+        equivalence = equivalences[0]
+        return ProductPriceLookupResult(
+            status=PriceLookupStatus.VERIFIED_ERP_IDENTITY_EQUIVALENCE,
+            unit_selling_price=equivalence.unit_selling_price,
+            matched_by=PriceLookupStatus.VERIFIED_ERP_IDENTITY_EQUIVALENCE.value,
+            matched_sku=None,
+            matched_parent_sku=equivalence.sku,
+            matched_product_name=None,
+            matched_variation_name=None,
+            source_metadata=self.metadata,
+            source_rows=tuple(sorted(record.source_row for record in candidates)),
+            nav_code=equivalence.nav_code,
+            unit_price_usolf=_resolved_usolf_price(candidates),
         )
 
     def _sku_candidates(
@@ -475,6 +610,7 @@ class ProductPriceMaster:
             source_rows=tuple(sorted(item.source_row for item in records)),
             alias_rule=alias_rule,
             nav_code=record.nav_code,
+            unit_price_usolf=_resolved_usolf_price(records),
         )
 
 
@@ -523,6 +659,7 @@ class ProductPriceMaster:
             source_metadata=self.metadata,
             source_rows=tuple(sorted(item.source_row for item in records)),
             nav_code=record.nav_code,
+            unit_price_usolf=_resolved_usolf_price(records),
         )
 
     def _conflict(
@@ -599,6 +736,10 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
+            if _UNIT_PRICE_USOLF_HEADER in headers:
+                columns["unit_price_usolf"] = headers[_UNIT_PRICE_USOLF_HEADER]
+            if _UOM_HEADER in headers:
+                columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:
                 columns["remark"] = headers[_REMARK_HEADER]
             return row_number, columns
@@ -639,6 +780,50 @@ def _strict_decimal(value: Any) -> Decimal | None:
 
 def _has_one_price(records: tuple[ProductPriceMasterRecord, ...]) -> bool:
     return len({record.unit_selling_price for record in records}) == 1
+
+
+def _resolved_usolf_price(
+    records: tuple[ProductPriceMasterRecord, ...],
+) -> Decimal | None:
+    """Return the single positive USOLF price proved by resolved PM evidence."""
+
+    prices = {record.unit_price_usolf for record in records}
+    if len(prices) != 1:
+        return None
+    price = next(iter(prices))
+    return price if price is not None and price > 0 else None
+
+
+def _matches_verified_erp_identity_equivalence(
+    candidates: tuple[ProductPriceMasterRecord, ...],
+    equivalence: VerifiedErpIdentityEquivalence,
+    *,
+    product_name: str | None,
+    variation_name: str | None,
+) -> bool:
+    if not candidates:
+        return False
+    approved_variations = {_match_text(value) for value in equivalence.allowed_variations}
+    approved_sku = normalize_sku_text(equivalence.sku)
+    return (
+        _match_text(product_name) == _match_text(equivalence.product_name)
+        and _match_text(variation_name) in approved_variations
+        and all(
+        _match_text(record.product_id) == _match_text(equivalence.product_id)
+        and approved_sku in {
+            normalize_sku_text(record.seller_sku),
+            normalize_sku_text(record.parent_sku),
+        }
+        and _match_text(record.product_name) == _match_text(equivalence.product_name)
+        and _match_text(record.variation_name) in approved_variations
+        and _display_text(record.nav_code) == _display_text(equivalence.nav_code)
+        and _match_text(record.usoft_product_description)
+        == _match_text(equivalence.usoft_product_description)
+        and _match_text(record.uom) == _match_text(equivalence.uom)
+        and record.unit_selling_price == equivalence.unit_selling_price
+        for record in candidates
+        )
+    )
 
 
 def _has_disambiguation_input(

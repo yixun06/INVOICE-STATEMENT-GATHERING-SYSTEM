@@ -907,6 +907,29 @@ be a separate NAV matching algorithm. If Product Master resolution fails, Unit
 Price is unresolved/conflicting, or the matched row has missing/blank NAV CODE,
 route the source to Manual Review and block persistence.
 
+### Shopee MY Full Order Current price source — Product Owner decision
+
+This rule applies only to Shopee MY Full Order / All Order ingestion into
+`Shopee_FullOrder_Current_Items`. After the existing deterministic Product
+Master identity resolution succeeds, persist:
+
+```text
+nav        = NAV CODE from that same resolved PM evidence
+unit_price = UNIT PRICE USOLF from that same resolved PM evidence
+```
+
+`UNIT PRICE USOLF` must be a single positive numeric value. Missing, invalid,
+zero, or conflicting USOLF evidence blocks Full Order Current persistence as
+`PM_ENRICHMENT_REQUIRED`; do not fall back to `Price`, source selling price, or
+another PM row. Identity resolution itself is unchanged. Shopee SG remains on
+its existing ERP `Price` rule pending a separate Product Owner decision.
+
+This does not alter canonical `Invoice_Items.unit_price`, Invoice/PDF pricing,
+Statement financial semantics, or Weekly Billing rules. For Consolidated
+Product Summary `Order Created Date`, Current `Original Sales` remains
+persisted `unit_price × quantity`, `Amount` remains source `product_subtotal`,
+and `Discount` remains their difference.
+
 ## STEP 1 — Invoice persistence contract — Confirmed target
 
 `Invoice_Orders` should persist meaningful accepted-Shopee order-level fields:

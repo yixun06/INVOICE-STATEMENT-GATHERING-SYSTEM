@@ -47,6 +47,15 @@ def test_nav_code_is_returned_from_the_same_resolved_product_master_row():
     assert result.nav_code == "NAV-001"
 
 
+def test_canonical_price_lookup_keeps_price_when_usolf_is_present():
+    result = _master([
+        _row(unit_selling_price="12.50") | {"unit_price_usolf": "11.25"}
+    ]).lookup(seller_sku="SKU-1")
+
+    assert result.unit_selling_price == Decimal("12.50")
+    assert result.unit_price_usolf == Decimal("11.25")
+
+
 def test_duplicate_sku_with_same_price_is_conflict_without_identity_evidence():
     result = _master([
         _row(product_name="Product One"),

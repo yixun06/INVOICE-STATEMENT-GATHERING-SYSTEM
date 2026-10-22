@@ -23,6 +23,8 @@ from .product_price_master import (
     _NAV_HEADER,
     _PRODUCT_ID_HEADER,
     _REMARK_HEADER,
+    _UOM_HEADER,
+    _UNIT_PRICE_USOLF_HEADER,
     _USOFT_PRODUCT_DESCRIPTION_HEADER,
     _display_text,
     _strict_decimal,
@@ -484,6 +486,10 @@ def _find_tabular_listing_headers(
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
+            if _UNIT_PRICE_USOLF_HEADER in headers:
+                columns["unit_price_usolf"] = headers[_UNIT_PRICE_USOLF_HEADER]
+            if _UOM_HEADER in headers:
+                columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:
                 columns["remark"] = headers[_REMARK_HEADER]
             return row_number, columns
@@ -525,11 +531,13 @@ def _canonical_records_from_rows(
                 variation_name=_display_text(values["variation_name"]),
                 unit_selling_price=price,
                 source_row=row_number,
+                unit_price_usolf=_strict_decimal(values.get("unit_price_usolf")),
                 nav_code=_display_text(values.get("nav_code")) or None,
                 product_id=_display_text(values.get("product_id")) or None,
                 usoft_product_description=(
                     _display_text(values.get("usoft_product_description")) or None
                 ),
+                uom=_display_text(values.get("uom")) or None,
                 remark=_display_text(values.get("remark")) or None,
             )
         )

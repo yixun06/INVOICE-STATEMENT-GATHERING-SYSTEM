@@ -13,6 +13,12 @@ InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived
 
 ## Current System State
 
+### SHOPEE_MY_FULL_ORDER_USOLF_MIGRATION_CLOSED - FINAL ACCEPTANCE PASS / UNSTAGED
+
+- Product Owner decision is closed: Shopee MY Full Order / All Order persists `Shopee_FullOrder_Current_Items.unit_price` from `UNIT PRICE USOLF` on the same deterministic Product Master row as NAV. For a conflicting MY Seller-SKU / Parent-SKU family, exact normalized source Variation may uniquely disambiguate that same Parent family; no fuzzy match or first-row selection is permitted. Shopee SG remains on its ERP `Price` path. Canonical Invoice/PDF, Statement, Weekly Billing, and schema semantics remain unchanged.
+- Final read-only MY Current audit: 21,378 items; 21,355 deterministic valid-USOLF items; `PRICE_MISMATCH = 0`; `PM_UNRESOLVED = 0`; `PM_AMBIGUOUS = 0`; and the 11 Red Chili family price/identity mismatches are 0. The 23 blank/invalid-USOLF legacy items are Product Owner-approved historical exceptions and remain non-blocking. The 3 historical Cactus rows retain correct RM22.50 / NAV 5004108 values with accepted metadata-only resolved-SKU drift; no Current rewrite occurred.
+- Final end-to-end acceptance: Order Created reporting directly matches every one of 19,977 non-cancelled Current items for Qty, persisted Unit Price, Original Sales, Amount, and Discount; Payout regression retains Statement batch `20261020035550-46d32fdd` at 463 orders / 190 products / Qty 1,007 / RM21,588.80 Original Sales / RM21,037.53 Amount / RM551.27 Discount. Focused Full Order, resolver, Consolidated, Payout/canonical, Statement, and Weekly regression: 278 passed; `py_compile` and `git diff --check` pass; `NEW_REGRESSION = 0`. MY/SG Current, canonical, Statement, Product Master, schema, and snapshot-hash writes: 0. Git stage/commit/push: 0; deployment: **NOT VERIFIED**. Next gate: `SHOPEE_MY_FULL_ORDER_USOLF_MIGRATION_CLOSED`.
+
 ### CONSOLIDATED_PRODUCT_SUMMARY_MIGRATION_CLOSED - VERIFIED / CHECKPOINT AUTHORIZED
 
 - Baseline checkpoint: `7fecdc555967877fe520a9a101480ac3cd70ea6e` (`feat: finalize full order statement workflow`). Full Order integration is successful and closed.

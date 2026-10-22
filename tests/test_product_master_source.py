@@ -84,6 +84,17 @@ def test_google_sheet_optional_remark_is_loaded_by_header_name(tmp_path):
     assert loaded.records[0].remark == "FULL_ORDER_MATCH_ONLY"
 
 
+def test_google_sheet_loads_optional_unit_price_usolf_by_header_name(tmp_path):
+    rows = _sheet_rows()
+    rows[1].append("UNIT PRICE USOLF")
+    rows[2].append("11.25")
+
+    loaded = _google_source(tmp_path, rows).load()
+
+    assert loaded.records[0].unit_selling_price == Decimal("12.50")
+    assert loaded.records[0].unit_price_usolf == Decimal("11.25")
+
+
 def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_path):
     rows = [
         ["SHOPEE PRODUCT LISTING"],

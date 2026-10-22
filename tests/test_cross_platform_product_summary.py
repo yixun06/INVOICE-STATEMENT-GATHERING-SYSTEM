@@ -211,6 +211,35 @@ def test_order_created_date_uses_explicit_current_rows_without_payout_evidence()
     }
 
 
+def test_order_created_summary_uses_persisted_current_price_and_source_subtotal():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        CrossPlatformReportingSnapshot,
+        build_cross_platform_product_summary,
+    )
+
+    snapshot = CrossPlatformReportingSnapshot(
+        (),
+        order_created_items=(
+            _item(
+                order_id="SHP-CURRENT-USOLF", item_index=0, payout_date=None,
+                order_created_date=date(2026, 8, 2), sku="SKU-USOLF",
+                unit_price="7.75", quantity=2, line_subtotal="10.25",
+            ),
+        ),
+    )
+
+    summary = build_cross_platform_product_summary(
+        snapshot, date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 8, 2), to_date=date(2026, 8, 2),
+    )
+
+    row = summary.product_rows[0]
+    assert (row.unit_price, row.original_sales, row.amount, row.discount_amount) == (
+        Decimal("7.75"), Decimal("15.50"), Decimal("10.25"), Decimal("5.25"),
+    )
+
+
 def test_order_created_current_source_excludes_cancelled_and_never_uses_canonical_fallback():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,
