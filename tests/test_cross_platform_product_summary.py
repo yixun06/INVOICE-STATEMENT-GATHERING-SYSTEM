@@ -32,6 +32,49 @@ class _Gateway:
         }
 
 
+def _current_only_tabs(
+    *, status_by_order, order_created_date="2026-10-22", market="shopee_my"
+):
+    return {
+        INVOICE_ORDERS_TAB: [list(INVOICE_ORDERS_HEADERS)],
+        INVOICE_ITEMS_TAB: [list(INVOICE_ITEMS_HEADERS)],
+        SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: [
+            list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
+            *[
+                _sheet_row(
+                    SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
+                    market=market,
+                    order_id=order_id,
+                    order_status=status,
+                    order_created_date=order_created_date,
+                    source_file="full-order.xlsx",
+                    snapshot_hash=(str(index) * 64)[:64],
+                    last_synced_at="2026-10-22T10:00:00+00:00",
+                )
+                for index, (order_id, status) in enumerate(status_by_order.items(), start=1)
+            ],
+        ],
+        SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: [
+            list(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS),
+            *[
+                _sheet_row(
+                    SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
+                    market=market,
+                    order_id=order_id,
+                    item_index="0",
+                    resolved_seller_sku=f"SKU-{index}",
+                    nav=f"NAV-{index}",
+                    product_name=f"Product {index}",
+                    quantity="1",
+                    unit_price="10.00",
+                    product_subtotal="8.00",
+                )
+                for index, order_id in enumerate(status_by_order, start=1)
+            ],
+        ],
+    }
+
+
 def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
     from src.invoice_app.services.cross_platform_product_summary import (
         GoogleSheetsCrossPlatformProductSummaryReader,
@@ -277,7 +320,7 @@ def test_order_created_current_source_excludes_cancelled_and_never_uses_canonica
             list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
             _sheet_row(
                 SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
-                market="shopee_my", order_id="CURRENT-SHIPPING", order_status="Shipping",
+                market="shopee_my", order_id="CURRENT-SHIPPED", order_status="Shipped",
                 order_created_date="2026-08-02", source_file="current.xlsx",
                 snapshot_hash="b" * 64, last_synced_at="2026-10-20T00:00:00+00:00",
             ),
@@ -292,8 +335,8 @@ def test_order_created_current_source_excludes_cancelled_and_never_uses_canonica
             list(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS),
             _sheet_row(
                 SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
-                market="shopee_my", order_id="CURRENT-SHIPPING", item_index="0",
-                resolved_seller_sku="CURRENT", nav="NAV-1", product_name="Current Shipping",
+                market="shopee_my", order_id="CURRENT-SHIPPED", item_index="0",
+                resolved_seller_sku="CURRENT", nav="NAV-1", product_name="Current Shipped",
                 quantity="2", unit_price="10.00", product_subtotal="18.00",
             ),
             _sheet_row(
@@ -319,10 +362,202 @@ def test_order_created_current_source_excludes_cancelled_and_never_uses_canonica
         to_date=date(2026, 8, 8),
     )
 
-    assert [item.order_id for item in created.source_items] == ["CURRENT-SHIPPING"]
+    assert [item.order_id for item in created.source_items] == ["CURRENT-SHIPPED"]
     assert created.product_rows[0].amount == Decimal("18.00")
     assert created.product_rows[0].discount_amount == Decimal("2.00")
     assert [item.order_id for item in payout.source_items] == ["CANONICAL-ONLY"]
+
+
+def test_order_created_current_source_excludes_only_final_po_status_classes():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    snapshot = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(
+            status_by_order={
+                "TO-SHIP-TITLE": "To Ship",
+                "TO-SHIP-SOURCE": "To ship",
+                "CANCELLED": "Cancelled",
+                "SHIPPING": "Shipping",
+                "SHIPPED": "Shipped",
+                "DELIVERED": "Delivered",
+                "RECEIVED": "Order Received",
+                "COMPLETED": "Completed",
+                "RECEIVED-SEMICOLON": "Order Received; refund window until 2026-10-29",
+                "RECEIVED-LIVE": (
+                    "Order Received, but buyer can raise return/refund until 2026-10-29"
+                ),
+                "SINGLE-L-CANCEL": "Canceled",
+                "FUTURE": "Some Future Shopee Status",
+            }
+        )
+    )
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 10, 22),
+        to_date=date(2026, 10, 22),
+    )
+
+    assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED) == (
+        date(2026, 10, 22),
+    )
+    assert {item.order_id for item in summary.source_items} == {
+        "SHIPPING",
+        "SHIPPED",
+        "DELIVERED",
+        "RECEIVED",
+        "COMPLETED",
+        "RECEIVED-SEMICOLON",
+        "RECEIVED-LIVE",
+        "SINGLE-L-CANCEL",
+        "FUTURE",
+    }
+    assert [(row.quantity, row.unit_price, row.original_sales, row.amount, row.discount_amount)
+            for row in summary.product_rows] == [
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+    ]
+
+
+def test_order_received_annotation_remains_selectable_and_visible_by_created_date():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    snapshot = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(
+            order_created_date="2026-10-13",
+            status_by_order={
+                "261013GMN0W5QP": (
+                    "Order Received, but buyer can raise return/refund until 2026-10-29"
+                )
+            },
+        )
+    )
+    options = snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED)
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 10, 13),
+        to_date=date(2026, 10, 13),
+    )
+
+    assert options == (date(2026, 10, 13),)
+    assert [item.order_id for item in summary.source_items] == ["261013GMN0W5QP"]
+    assert summary.source_items[0].order_created_date == date(2026, 10, 13)
+
+
+def test_dispatched_current_statuses_keep_each_order_created_date_selectable():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    october_21 = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(
+            order_created_date="2026-10-21",
+            status_by_order={
+                "26102166D148YS": "Shipping",
+                "2610216AUW12KS": "Delivered",
+                "OCT21-TO-SHIP": "To ship",
+                "OCT21-CANCELLED": "Cancelled",
+            },
+        )
+    )
+    october_22 = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(
+            order_created_date="2026-10-22",
+            status_by_order={
+                "2610228PUG84DX": "Shipping",
+                "OCT22-TO-SHIP": "To ship",
+                "OCT22-CANCELLED": "Cancelled",
+            },
+        )
+    )
+
+    for snapshot, selected_date, expected_order_ids in (
+        (october_21, date(2026, 10, 21), ["26102166D148YS", "2610216AUW12KS"]),
+        (october_22, date(2026, 10, 22), ["2610228PUG84DX"]),
+    ):
+        assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED) == (
+            selected_date,
+        )
+        summary = build_cross_platform_product_summary(
+            snapshot,
+            date_type=CrossPlatformDateType.ORDER_CREATED,
+            from_date=selected_date,
+            to_date=selected_date,
+        )
+        assert [item.order_id for item in summary.source_items] == expected_order_ids
+
+
+def test_order_created_current_status_transition_keeps_original_created_date():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    pending_snapshot = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(status_by_order={"SAME-ORDER": "To Ship"})
+    )
+    shipped_snapshot = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(status_by_order={"SAME-ORDER": "Shipped"})
+    )
+
+    assert pending_snapshot.available_dates(
+        "Shopee MY", CrossPlatformDateType.ORDER_CREATED
+    ) == ()
+    assert build_cross_platform_product_summary(
+        pending_snapshot, date_type=CrossPlatformDateType.ORDER_CREATED
+    ).source_items == ()
+
+    shipped_summary = build_cross_platform_product_summary(
+        shipped_snapshot,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 10, 22),
+        to_date=date(2026, 10, 22),
+    )
+    assert [item.order_id for item in shipped_summary.source_items] == ["SAME-ORDER"]
+    assert shipped_summary.source_items[0].order_created_date == date(2026, 10, 22)
+
+
+def test_order_created_my_status_exclusions_do_not_change_sg_current_behavior():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    snapshot = build_cross_platform_reporting_snapshot(
+        _current_only_tabs(
+            market="shopee_sg",
+            status_by_order={"SG-TO-SHIP": "To Ship", "SG-CANCELLED": "Cancelled"},
+        )
+    )
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        platform="Shopee SG",
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 10, 22),
+        to_date=date(2026, 10, 22),
+    )
+
+    assert [item.order_id for item in summary.source_items] == ["SG-TO-SHIP"]
 
 
 def test_cross_product_summary_excludes_cancelled_parent_by_status_or_layout():
