@@ -42,6 +42,74 @@ This V2.7 handoff is authoritative over conflicting older V2.6, V2.5, V2.4, and
 V2.3 wording. Older sections remain useful only for non-conflicting parser,
 source-safety, Statement, and historical rationale.
 
+## Active Shopee MY + SG Order and Settlement Architecture — Product Owner Confirmed
+
+This is the authoritative active-flow architecture for Shopee MY and Shopee
+SG.  It supersedes every conflicting older requirement that makes an Invoice
+PDF, `Invoice_Orders`, or `Invoice_Items` a prerequisite for Statement
+reconciliation, payout-period Product Summary, export, or readiness.  Older
+Invoice/PDF coverage and Invoice-to-Statement wording remains historical audit
+context only; it must not be used as an active acceptance or blocking rule.
+
+```text
+Full Order Current + market-scoped Product Master
+        -> operational order and product facts
+
+Statement + Full Order Current + market-scoped Product Master
+        -> settlement reconciliation and payout-period product facts
+```
+
+### Source authority and join — Locked
+
+- **Full Order Current** is the operational order/product authority.  It
+  supplies `order_id`, `order_created_date`, product, variation, quantity, and
+  `product_subtotal`.
+- **Product Master** supplies deterministic, market-aware product identity,
+  NAV, and `UNIT PRICE USOLF` from the same resolved market-scoped evidence.
+  MY and SG Product Master sources, rows, prices, and resolution remain
+  strictly isolated; missing or ambiguous local-market evidence fails closed
+  and must never fall back to the other market.
+- **Statement** is the settlement/financial authority.  It supplies `order_id`,
+  `payout_completed_date`, Order Income/release evidence, and the authoritative
+  fee, voucher, shipping, and adjustment financial components.
+- The only active cross-source order join is exact `(market, order_id)`.  No
+  cross-market, name-only, or fallback-to-MY join is allowed.
+
+### Product Summary and reconciliation — Locked
+
+- **Order Created Product Summary** is built from Full Order Current and the
+  same resolved Product Master evidence.
+- **Payout Product Summary** uses Statement to determine payout period and
+  order population, Full Order Current for product/variation/quantity/subtotal,
+  and Product Master for NAV and `UNIT PRICE USOLF`.
+- **Statement reconciliation** is Statement plus Full Order Current.  PDF
+  Invoice coverage is not required.
+- After accepted order-level reconciliation, Statement financial-component rows
+  are authoritative for fee/charge analytics.  Do not invent an allocation or
+  duplicate financial amounts across product components.
+
+### Legacy PDF boundary and explicitly superseded rules — Locked
+
+PDF parsing, `Invoice_Orders`, and `Invoice_Items` remain legacy historical and
+audit evidence.  Preserve their parsers, tables, rows, and provenance; this
+architecture decision does not authorize deletion, migration, or rewrite.
+Their absence must not block the active Shopee MY/SG flow.
+
+The following former active-flow requirements are superseded:
+
+- historical Invoice Found/Missing coverage and uploading missing PDFs before
+  reconciliation;
+- `Missing Invoice Source` as a Statement, payout, export, or readiness
+  blocker;
+- mandatory Invoice-to-Statement reconciliation or mandatory Invoice/PDF
+  product/quantity authority;
+- 100% Invoice-source coverage as a condition for payout-period reporting or
+  export.
+
+Any implementation that still enforces one of those rules must be treated as
+legacy behavior requiring a separately scoped migration to this architecture;
+do not silently retain it as an active business rule.
+
 ## Monetary presentation — Approved
 
 - Business-facing monetary values use the applicable currency symbol, thousands
