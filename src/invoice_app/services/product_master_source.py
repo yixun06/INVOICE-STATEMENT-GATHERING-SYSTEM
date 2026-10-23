@@ -22,6 +22,7 @@ from .product_price_master import (
     _REQUIRED_HEADERS,
     _NAV_HEADER,
     _PRODUCT_ID_HEADER,
+    _RESOLVE_SKU_HEADER,
     _REMARK_HEADER,
     _UOM_HEADER,
     _UNIT_PRICE_USOLF_HEADER,
@@ -492,6 +493,8 @@ def _find_tabular_listing_headers(
                 columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:
                 columns["remark"] = headers[_REMARK_HEADER]
+            if _RESOLVE_SKU_HEADER in headers:
+                columns["resolve_sku"] = headers[_RESOLVE_SKU_HEADER]
             return row_number, columns
         if row_number >= 50:
             break
@@ -539,6 +542,7 @@ def _canonical_records_from_rows(
                 ),
                 uom=_display_text(values.get("uom")) or None,
                 remark=_display_text(values.get("remark")) or None,
+                resolve_sku=_resolve_sku_text(values.get("resolve_sku")),
             )
         )
     return tuple(records), candidate_rows, invalid_prices
@@ -546,3 +550,8 @@ def _canonical_records_from_rows(
 
 def _header_text(value: Any) -> str:
     return normalize_whitespace(str(value or "")).casefold()
+
+
+def _resolve_sku_text(value: Any) -> str | None:
+    text = "" if value is None else str(value)
+    return text if text.strip() else None

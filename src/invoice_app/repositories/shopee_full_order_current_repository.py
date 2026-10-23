@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -339,10 +339,20 @@ def _merged_snapshot(
         else:
             order_position[identity] = len(final_orders)
             final_orders.append(incoming)
+        existing_items = {
+            item.item_index: item
+            for item in final_items
+            if (item.market, item.order_id) == identity
+        }
         final_items = [
             item for item in final_items if (item.market, item.order_id) != identity
         ]
-        final_items.extend(incoming_items.get(identity, ()))
+        final_items.extend(
+            replace(item, resolve_sku=existing_items[item.item_index].resolve_sku)
+            if item.item_index in existing_items
+            else item
+            for item in incoming_items.get(identity, ())
+        )
     item_order = {identity: index for identity, index in order_position.items()}
     final_items.sort(
         key=lambda item: (item_order[(item.market, item.order_id)], item.item_index)
@@ -511,6 +521,7 @@ def _deserialize_item(row: Sequence[Any], row_number: int) -> FullOrderCurrentIt
             unit_price=_decimal(values["unit_price"]),
             product_subtotal=_decimal(values["product_subtotal"]),
             return_refund_status=_text(values["return_refund_status"]),
+            resolve_sku=_raw_text(values["resolve_sku"]),
         )
     except (ValueError, KeyError) as error:
         raise HistoricalInvoiceStorageError(
@@ -523,7 +534,10 @@ def _serialize_order(order: FullOrderCurrentOrder) -> tuple[str, ...]:
 
 
 def _serialize_item(item: FullOrderCurrentItem) -> tuple[str, ...]:
-    return tuple(_serialize(getattr(item, field)) for field in SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS)
+    return tuple(
+        _raw_text(getattr(item, field)) if field == "resolve_sku" else _serialize(getattr(item, field))
+        for field in SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS
+    )
 
 
 def _order_business_values(order: FullOrderCurrentOrder) -> tuple[str, ...]:
@@ -572,3 +586,9 @@ def _required(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _raw_text(value: Any) -> str:
+    """Preserve the approved Listing POS instruction verbatim in Current storage."""
+
+    return "" if value is None else str(value)

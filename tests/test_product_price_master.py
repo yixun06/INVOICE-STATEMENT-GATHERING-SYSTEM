@@ -56,6 +56,34 @@ def test_canonical_price_lookup_keeps_price_when_usolf_is_present():
     assert result.unit_price_usolf == Decimal("11.25")
 
 
+def test_lookup_returns_the_resolved_sku_from_the_same_product_listing_identity():
+    result = _master([_row() | {"resolve_sku": "NAV:5001438-3"}]).lookup(
+        seller_sku="SKU-1"
+    )
+
+    assert result.resolve_sku == "NAV:5001438-3"
+    assert result.resolve_sku_reason is None
+
+
+def test_lookup_preserves_the_full_listing_resolved_sku_value_without_normalizing_it():
+    source_value = "  NAV:5001438-3; MANUAL-A-01  "
+
+    result = _master([_row() | {"resolve_sku": source_value}]).lookup(seller_sku="SKU-1")
+
+    assert result.resolve_sku == source_value
+
+
+def test_conflicting_resolved_sku_candidates_do_not_change_financial_match():
+    result = _master([
+        _row() | {"resolve_sku": "9555208010555"},
+        _row() | {"resolve_sku": "NAV:5001438"},
+    ]).lookup(seller_sku="SKU-1", product_name="Product One", variation_name="Blue")
+
+    assert result.status is PriceLookupStatus.MATCHED
+    assert result.resolve_sku is None
+    assert result.resolve_sku_reason == "Resolved SKU conflicts across matched Listing candidates."
+
+
 def test_duplicate_sku_with_same_price_is_conflict_without_identity_evidence():
     result = _master([
         _row(product_name="Product One"),

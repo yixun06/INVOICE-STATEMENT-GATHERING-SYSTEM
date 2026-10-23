@@ -998,6 +998,32 @@ Product Summary `Order Created Date`, Current `Original Sales` remains
 persisted `unit_price × quantity`, `Amount` remains source `product_subtotal`,
 and `Discount` remains their difference.
 
+### Resolve SKU V1 - Product Owner decision
+
+`Resolved SKU` is an optional Product Listing instruction for physical POS
+handling. MY and SG must read the same header by name, preserve its complete
+source value verbatim when it is nonblank, and must not use it to
+change Product Master identity, NAV, unit price, canonical Invoice facts,
+Statement financial semantics, or report money.
+
+`Shopee_FullOrder_Current_Items` has one additive nullable text field named
+exactly `resolve_sku`. It is distinct from the established financial
+`resolved_seller_sku` field. Existing Current rows retain their stored
+`resolve_sku` across reuploads and later Listing edits, including a stored
+blank; do not automatically backfill historical rows. An exact legacy
+13-column Current item tab may be planned for an additive header upgrade, but
+no live schema migration is implied without separate authorization.
+
+The Compact Barcode PDF may parse the stored value for POS display only. It
+must preserve components, NAV/manual identifiers, hyphens, and separators.
+For a multi-component physical bundle, it may show an operational-only,
+deterministic cent-level allocation of the existing source Original Sales and
+signed Discount across physical POS units, with component totals reconciling
+exactly to the existing source Amount. This never changes the source financial
+table, Product Summary aggregation, stored values, or any financial report.
+Operational ambiguity/warnings remain application-layer facts; no
+POS-resolution-status persistence column is approved in V1.
+
 ## STEP 1 — Invoice persistence contract — Confirmed target
 
 `Invoice_Orders` should persist meaningful accepted-Shopee order-level fields:

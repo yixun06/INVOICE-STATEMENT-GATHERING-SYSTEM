@@ -60,6 +60,7 @@ class ProductPriceMasterRecord:
     usoft_product_description: str | None = None
     uom: str | None = None
     remark: str | None = None
+    resolve_sku: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,8 @@ class ProductPriceLookupResult:
     unit_price_usolf: Decimal | None = None
 
     alias_rule: str | None = None
+    resolve_sku: str | None = None
+    resolve_sku_reason: str | None = None
 
 _REQUIRED_HEADERS = {
     "product_name": "product name",
@@ -117,6 +120,7 @@ _USOFT_PRODUCT_DESCRIPTION_HEADER = "usoft product description"
 _UNIT_PRICE_USOLF_HEADER = "unit price usolf"
 _UOM_HEADER = "uom"
 _REMARK_HEADER = "remark"
+_RESOLVE_SKU_HEADER = "resolved sku"
 _FULL_ORDER_MATCH_ONLY_REMARK = "full_order_match_only"
 _STRICT_PRICE = re.compile(
     r"^(?:RM\s*)?(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)$",
@@ -197,6 +201,7 @@ class ProductPriceMaster:
                         ),
                         uom=_display_text(values.get("uom")) or None,
                         remark=_display_text(values.get("remark")) or None,
+                        resolve_sku=_optional_resolve_sku(values.get("resolve_sku")),
                     )
                 )
 
@@ -250,6 +255,7 @@ class ProductPriceMaster:
                     ),
                     uom=_display_text(row.get("uom")) or None,
                     remark=_display_text(row.get("remark")) or None,
+                    resolve_sku=_optional_resolve_sku(row.get("resolve_sku")),
                 )
             )
         return cls(
@@ -598,6 +604,7 @@ class ProductPriceMaster:
         matched_by: str | None = None,
     ) -> ProductPriceLookupResult:
         record = min(records, key=lambda item: item.source_row)
+        resolve_sku, resolve_sku_reason = _resolved_resolve_sku(records)
         return ProductPriceLookupResult(
             status=status,
             unit_selling_price=record.unit_selling_price,
@@ -611,6 +618,8 @@ class ProductPriceMaster:
             alias_rule=alias_rule,
             nav_code=record.nav_code,
             unit_price_usolf=_resolved_usolf_price(records),
+            resolve_sku=resolve_sku,
+            resolve_sku_reason=resolve_sku_reason,
         )
 
 
@@ -648,6 +657,7 @@ class ProductPriceMaster:
     ) -> ProductPriceLookupResult:
         record = min(records, key=lambda item: item.source_row)
         status = _matched_status(match_scope, disambiguated)
+        resolve_sku, resolve_sku_reason = _resolved_resolve_sku(records)
         return ProductPriceLookupResult(
             status=status,
             unit_selling_price=record.unit_selling_price,
@@ -660,6 +670,8 @@ class ProductPriceMaster:
             source_rows=tuple(sorted(item.source_row for item in records)),
             nav_code=record.nav_code,
             unit_price_usolf=_resolved_usolf_price(records),
+            resolve_sku=resolve_sku,
+            resolve_sku_reason=resolve_sku_reason,
         )
 
     def _conflict(
@@ -742,6 +754,8 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
                 columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:
                 columns["remark"] = headers[_REMARK_HEADER]
+            if _RESOLVE_SKU_HEADER in headers:
+                columns["resolve_sku"] = headers[_RESOLVE_SKU_HEADER]
             return row_number, columns
         if row_number >= 50:
             break
@@ -764,6 +778,26 @@ def _display_text(value: Any) -> str:
 def _optional_nav(value: Any) -> str | None:
     value = _display_text(value)
     return value or None
+
+
+def _optional_resolve_sku(value: Any) -> str | None:
+    """Preserve the Listing POS instruction exactly when it is nonblank."""
+
+    text = "" if value is None else str(value)
+    return text if text.strip() else None
+
+
+def _resolved_resolve_sku(
+    records: tuple[ProductPriceMasterRecord, ...],
+) -> tuple[str | None, str | None]:
+    """Return a mapping only when all resolved Listing candidates agree."""
+
+    values = {record.resolve_sku for record in records}
+    if values == {None}:
+        return None, None
+    if len(values) == 1:
+        return next(iter(values)), None
+    return None, "Resolved SKU conflicts across matched Listing candidates."
 
 
 def _strict_decimal(value: Any) -> Decimal | None:

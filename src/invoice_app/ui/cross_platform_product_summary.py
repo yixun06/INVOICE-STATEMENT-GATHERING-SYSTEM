@@ -22,6 +22,9 @@ from src.invoice_app.services.cross_platform_product_summary import (
 from src.invoice_app.services.cross_platform_product_summary_barcode_table_export import (
     export_cross_platform_product_summary_barcode_table_pdf,
 )
+from src.invoice_app.services.cross_platform_compact_barcode_pdf import (
+    export_cross_platform_compact_barcode_pdf,
+)
 from src.invoice_app.services.uat2_data_settings import (
     configured_uat2_data_settings,
 )
@@ -66,6 +69,12 @@ def _load_cross_platform_reporting_snapshot(
         .create_cross_platform_product_summary_reader()
         .load_snapshot()
     )
+
+
+def clear_cross_platform_reporting_snapshot_cache() -> None:
+    """Expose the one live-summary cache invalidation point for Full Order sync."""
+
+    _load_cross_platform_reporting_snapshot.clear()
 
 
 def render_cross_platform_product_summary(
@@ -162,6 +171,13 @@ def render_cross_platform_product_summary(
         mime="application/pdf",
         icon=":material/picture_as_pdf:",
         type="primary",
+    )
+    st.download_button(
+        "Export Compact Barcode PDF",
+        export_cross_platform_compact_barcode_pdf(summary),
+        file_name="consolidated-product-summary-compact-barcode.pdf",
+        mime="application/pdf",
+        icon=":material/qr_code_2:",
     )
 
 

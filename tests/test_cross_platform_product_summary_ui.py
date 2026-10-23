@@ -428,7 +428,8 @@ cross_ui.render_cross_platform_product_summary(snapshot)
     assert app.dataframe[0].value["SKU Code"].tolist() == ["SKU-2", "SKU-3"]
     assert app.session_state["exported_payout_dates"] == ["2026-08-03", "2026-08-05"]
     assert [element.label for element in app.get("download_button")] == [
-        "Consolidated Product Summary Barcode Table PDF"
+        "Consolidated Product Summary Barcode Table PDF",
+        "Export Compact Barcode PDF",
     ]
 
 

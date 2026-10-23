@@ -96,6 +96,7 @@ class CommittedReportingItem:
     source_group_total: Decimal | None
     order_created_date: date | None = None
     amount: Decimal | None = None
+    resolve_sku: str | None = None
 
 
 @dataclass(frozen=True)
@@ -416,6 +417,7 @@ def _full_order_current_reporting_items(
                 source_group_total=None,
                 order_created_date=order.order_created_date,
                 amount=subtotal,
+                resolve_sku=_text(item.resolve_sku) or None,
             )
         )
     return tuple(eligible)
@@ -608,6 +610,7 @@ def _aggregate_product_rows(
     for key, members in groups.items():
         amount = sum((item.amount or Decimal("0.00") for item in members), Decimal("0.00"))
         quantity = sum(item.quantity for item in members)
+        resolve_sku, resolve_sku_warning = _group_resolve_sku(members)
         unsorted.append(
             ProductSummaryRow(
                 number=0,
@@ -621,6 +624,8 @@ def _aggregate_product_rows(
                 discount_amount=key[2] * quantity - amount,
                 amount=amount,
                 source_item_count=len(members),
+                resolve_sku=resolve_sku,
+                resolve_sku_warning=resolve_sku_warning,
             )
         )
     return tuple(
@@ -637,6 +642,19 @@ def _aggregate_product_rows(
             start=1,
         )
     )
+
+
+def _group_resolve_sku(
+    members: Sequence[CommittedReportingItem],
+) -> tuple[str | None, str | None]:
+    """Never attach one Listing POS mapping to a conflicting summary group."""
+
+    values = {item.resolve_sku for item in members}
+    if values == {None}:
+        return None, None
+    if len(values) == 1:
+        return next(iter(values)), None
+    return None, "Resolve SKU differs across consolidated source items."
 def _tab_rows(
     tabs: Mapping[str, Sequence[Sequence[Any]]],
     tab: str,

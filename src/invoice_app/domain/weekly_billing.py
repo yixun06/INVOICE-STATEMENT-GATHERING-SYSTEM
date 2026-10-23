@@ -70,6 +70,8 @@ class ProductSummaryRow:
     discount_amount: Decimal
     amount: Decimal
     source_item_count: int
+    resolve_sku: str | None = None
+    resolve_sku_warning: str | None = None
 
     @property
     def original_sales(self) -> Decimal:

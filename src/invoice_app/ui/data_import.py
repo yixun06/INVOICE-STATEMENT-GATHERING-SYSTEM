@@ -24,6 +24,9 @@ from .data_import_components import (
     render_summary_items,
     render_workflow_stepper,
 )
+from .cross_platform_product_summary import (
+    clear_cross_platform_reporting_snapshot_cache,
+)
 
 from ..services.batch_service import create_batch_id
 from ..services.market_context import (
@@ -1124,6 +1127,27 @@ def _render_full_order_validation() -> None:
         "Only Order IDs present in this workbook are inserted or replaced. "
         "Current orders absent from the workbook remain untouched."
     )
+    if review.current_batch.items:
+        st.caption(
+            "Resolve SKU is the Listing-maintained POS instruction. Source Seller SKU "
+            "and resolved Seller SKU remain unchanged."
+        )
+        st.dataframe(
+            [
+                {
+                    "Order ID": item.order_id,
+                    "Item": item.item_index + 1,
+                    "Source Seller SKU": item.source_seller_sku,
+                    "Resolved Seller SKU": item.resolved_seller_sku,
+                    "Resolve SKU": item.resolve_sku or "",
+                    "POS mapping": item.resolve_sku_warning or (
+                        "Listing value unavailable" if not item.resolve_sku else "Ready"
+                    ),
+                }
+                for item in review.current_batch.items
+            ],
+            hide_index=True,
+        )
     if review.parsed.dimension_fallback_used:
         st.caption("Malformed worksheet dimensions were recovered from populated cell bounds.")
     if issues:
@@ -3870,6 +3894,7 @@ def _render_full_order_review_and_sync() -> None:
             load_product_master=lambda: load_configured_product_price_master(context)[0],
             repository=settings.create_full_order_current_repository(),
         )
+        clear_cross_platform_reporting_snapshot_cache()
         st.session_state.full_order_sync_result = result
     except (
         ValueError,

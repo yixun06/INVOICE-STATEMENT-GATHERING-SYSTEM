@@ -106,8 +106,18 @@ def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_pa
             "NAV CODE",
             "Price",
             "Price SGD",
+            "Resolved SKU",
         ],
-        ["SG Product", "One", "PARENT-1", "SKU-1", "NAV-1", "99.00", "8.50"],
+        [
+            "SG Product",
+            "One",
+            "PARENT-1",
+            "SKU-1",
+            "NAV-1",
+            "99.00",
+            "8.50",
+            "NAV:5001438-3; MANUAL-SG-A",
+        ],
     ]
     source = _google_source(tmp_path, rows)
     source = GoogleSheetsProductMasterSource(
@@ -121,6 +131,7 @@ def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_pa
     loaded = source.load()
 
     assert loaded.records[0].unit_selling_price == Decimal("8.50")
+    assert loaded.records[0].resolve_sku == "NAV:5001438-3; MANUAL-SG-A"
     assert loaded.metadata.sheet_name == "shopee sg"
 
 

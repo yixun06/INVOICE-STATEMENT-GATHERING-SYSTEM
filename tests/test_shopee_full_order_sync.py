@@ -89,7 +89,7 @@ def _workbook_bytes(rows, *, malformed_dimension=False):
     return target.getvalue()
 
 
-def _master(*, nav="5001"):
+def _master(*, nav="5001", resolve_sku=None):
     return ProductPriceMaster.from_rows(
         [
             {
@@ -100,6 +100,7 @@ def _master(*, nav="5001"):
                 "unit_selling_price": "6.50",
                 "nav_code": nav,
                 "product_id": "PID-1",
+                "resolve_sku": resolve_sku,
             },
             {
                 "seller_sku": "SKU-2",
@@ -342,7 +343,7 @@ class _Gateway:
             ]
 
 
-def _batch(rows=None, *, now=None):
+def _batch(rows=None, *, now=None, product_master=None):
     parsed = parse_shopee_full_order(
         _workbook_bytes(rows or _rows(), malformed_dimension=True),
         source_filename="full-order.xlsx",
@@ -350,7 +351,7 @@ def _batch(rows=None, *, now=None):
     )
     return adapt_shopee_full_order(
         parsed,
-        product_master=_master(),
+        product_master=product_master or _master(),
         now=lambda: now or datetime(2026, 10, 16, tzinfo=timezone.utc),
     )
 
@@ -460,8 +461,37 @@ def test_schema_plan_adds_only_the_two_concrete_current_tabs():
     assert SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS == (
         "market", "order_id", "item_index", "source_parent_sku", "source_seller_sku",
         "resolved_seller_sku", "nav", "product_name", "variation", "quantity",
-        "unit_price", "product_subtotal", "return_refund_status",
+        "unit_price", "product_subtotal", "return_refund_status", "resolve_sku",
     )
+
+
+def test_schema_plan_upgrades_only_the_existing_current_items_header_for_resolve_sku():
+    snapshot = SpreadsheetSchemaSnapshot(
+        tabs={
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: SheetSchema(
+                101, SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS
+            ),
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: SheetSchema(
+                102, SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS[:-1]
+            ),
+        }
+    )
+
+    assert (
+        classify_full_order_schema(snapshot)
+        is FullOrderSchemaState.RESOLVE_SKU_UPGRADE_REQUIRED
+    )
+    requests = build_full_order_schema_requests(snapshot)
+
+    assert requests[0]["insertDimension"]["range"] == {
+        "sheetId": 102,
+        "dimension": "COLUMNS",
+        "startIndex": 13,
+        "endIndex": 14,
+    }
+    assert requests[1]["updateCells"]["rows"][0]["values"][0] == {
+        "userEnteredValue": {"stringValue": "resolve_sku"}
+    }
 
 
 def test_snapshot_hash_excludes_upload_provenance_and_is_order_scoped():

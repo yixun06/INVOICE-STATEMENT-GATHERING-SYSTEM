@@ -102,7 +102,7 @@ SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS = (
 SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS = (
     "market", "order_id", "item_index", "source_parent_sku", "source_seller_sku",
     "resolved_seller_sku", "nav", "product_name", "variation", "quantity",
-    "unit_price", "product_subtotal", "return_refund_status",
+    "unit_price", "product_subtotal", "return_refund_status", "resolve_sku",
 )
 
 
@@ -121,4 +121,4 @@ assert len(MONTHLY_STATEMENT_FINANCIAL_COMPONENT_HEADERS) == 17
 assert len(MONTHLY_STATEMENT_SUMMARY_HEADERS) == 14
 assert len(ORDER_ADJUSTMENTS_HEADERS) == 21
 assert len(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS) == 7
-assert len(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS) == 13
+assert len(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS) == 14

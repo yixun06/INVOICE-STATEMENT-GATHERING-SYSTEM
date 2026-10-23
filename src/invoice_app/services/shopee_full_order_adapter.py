@@ -78,6 +78,8 @@ class FullOrderCurrentItem:
     unit_price: Decimal
     product_subtotal: Decimal
     return_refund_status: str
+    resolve_sku: str = ""
+    resolve_sku_warning: str | None = None
 
     @property
     def original_product_sales(self) -> Decimal:
@@ -182,6 +184,8 @@ def adapt_shopee_full_order(
                     unit_price=unit_price,
                     product_subtotal=row.product_subtotal,
                     return_refund_status=row.return_refund_status,
+                    resolve_sku=lookup.resolve_sku or "",
+                    resolve_sku_warning=lookup.resolve_sku_reason,
                 )
             )
         if len(mapped_items) != len(source_rows):

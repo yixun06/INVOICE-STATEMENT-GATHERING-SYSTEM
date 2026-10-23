@@ -28,6 +28,7 @@ from src.invoice_app.services.uat2_statement_schema_migration import (
 
 class FullOrderSchemaState(str, Enum):
     ELIGIBLE = "ELIGIBLE"
+    RESOLVE_SKU_UPGRADE_REQUIRED = "RESOLVE_SKU_UPGRADE_REQUIRED"
     ALREADY_MIGRATED = "ALREADY_MIGRATED"
 
 
@@ -44,6 +45,15 @@ def classify_full_order_schema(snapshot: SpreadsheetSchemaSnapshot) -> FullOrder
     present = {name: snapshot.tabs.get(name) for name in expected}
     if all(schema is None for schema in present.values()):
         return FullOrderSchemaState.ELIGIBLE
+    legacy_items_headers = SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS[:-1]
+    if (
+        present[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB] is not None
+        and present[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB].headers
+        == SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS
+        and present[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB] is not None
+        and present[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB].headers == legacy_items_headers
+    ):
+        return FullOrderSchemaState.RESOLVE_SKU_UPGRADE_REQUIRED
     if all(
         schema is not None and schema.headers == expected[name]
         for name, schema in present.items()
@@ -57,7 +67,43 @@ def classify_full_order_schema(snapshot: SpreadsheetSchemaSnapshot) -> FullOrder
 def build_full_order_schema_requests(
     snapshot: SpreadsheetSchemaSnapshot,
 ) -> tuple[Mapping[str, Any], ...]:
-    if classify_full_order_schema(snapshot) is not FullOrderSchemaState.ELIGIBLE:
+    state = classify_full_order_schema(snapshot)
+    if state is FullOrderSchemaState.RESOLVE_SKU_UPGRADE_REQUIRED:
+        item_sheet = snapshot.tabs[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB]
+        column_index = len(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS) - 1
+        return (
+            {
+                "insertDimension": {
+                    "range": {
+                        "sheetId": item_sheet.sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": column_index,
+                        "endIndex": column_index + 1,
+                    },
+                    "inheritFromBefore": True,
+                }
+            },
+            {
+                "updateCells": {
+                    "range": {
+                        "sheetId": item_sheet.sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": column_index,
+                        "endColumnIndex": column_index + 1,
+                    },
+                    "rows": [
+                        {
+                            "values": [
+                                {"userEnteredValue": {"stringValue": "resolve_sku"}}
+                            ]
+                        }
+                    ],
+                    "fields": "userEnteredValue",
+                }
+            },
+        )
+    if state is not FullOrderSchemaState.ELIGIBLE:
         raise ValueError("Full Order current schema already exists.")
     used_ids = {schema.sheet_id for schema in snapshot.tabs.values()}
     first_id = max(used_ids, default=0) + 1
