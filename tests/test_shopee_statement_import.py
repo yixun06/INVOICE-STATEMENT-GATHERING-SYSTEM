@@ -937,16 +937,16 @@ def test_statement_evidence_coverage_keeps_clean_current_orders_when_one_marker_
     assert coverage.ready_from_full_order_order_ids == (
         "CURRENT-CLEAN-1",
         "CURRENT-CLEAN-2",
+        "CURRENT-REFUND",
     )
-    assert coverage.additional_evidence[0].order_id == "CURRENT-REFUND"
-    assert coverage.additional_evidence[0].order_status == "Completed"
-    assert coverage.additional_evidence[0].reason == "Return/refund request detected."
+    assert coverage.additional_evidence == ()
     assert [bundle.order.order_id for bundle in review.full_order_canonical_inserts] == [
         "CURRENT-CLEAN-1",
         "CURRENT-CLEAN-2",
+        "CURRENT-REFUND",
     ]
-    assert review.invoice_coverage.missing_invoice_order_ids == ("CURRENT-REFUND",)
-    assert ADDITIONAL_EVIDENCE_REQUIRED in review.persistence_blockers
+    assert review.invoice_coverage.missing_invoice_order_ids == ()
+    assert ADDITIONAL_EVIDENCE_REQUIRED not in review.persistence_blockers
 
 
 def test_statement_evidence_coverage_requires_current_evidence_when_canonical_is_missing(

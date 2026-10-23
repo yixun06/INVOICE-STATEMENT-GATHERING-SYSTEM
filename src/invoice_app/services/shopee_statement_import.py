@@ -895,8 +895,6 @@ def _statement_subset_for_orders(
 
 def _full_order_evidence_reason(blockers: Iterable[str]) -> str:
     text = " ".join(blockers).casefold()
-    if "return/refund marker" in text:
-        return "Return/refund request detected."
     if "cancelled order" in text:
         return "Cancelled order requires existing exception evidence."
     if "snapshot is missing" in text:
@@ -904,7 +902,7 @@ def _full_order_evidence_reason(blockers: Iterable[str]) -> str:
     if "product master identity" in text:
         return "Product Master identity requires additional evidence."
     if "financial bridge" in text:
-        return "Statement financial evidence is incomplete."
+        return "Statement Evidence Review: financial evidence is incomplete or conflicting."
     if "product price proof" in text or "non-zero" in text:
         return "Full Order and Statement product evidence does not match."
     return "Additional evidence is required before reconciliation."

@@ -67,7 +67,7 @@ _FEE_COMPONENTS = (
 # Bump only when the Full Order evidence contract used by Statement review changes.
 # Stored Streamlit reviews then cannot be presented as current evidence after a
 # proof-rule deployment.
-FULL_ORDER_STATEMENT_PROOF_RULE_VERSION = "FULL_ORDER_STATEMENT_PROOF_V2"
+FULL_ORDER_STATEMENT_PROOF_RULE_VERSION = "FULL_ORDER_STATEMENT_PROOF_V3"
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ def prove_full_order_current_against_statement(
     product_master: ProductPriceMaster,
     imported_at: datetime | None = None,
 ) -> FullOrderStatementProof:
-    """Require exact ITEM/GROUP/ORDER cents and the existing Statement bridge."""
+    """Require exact Statement evidence; Current refund requests stay informational."""
 
     imported_at = imported_at or datetime.now(timezone.utc)
     order_map = {(order.market, order.order_id): order for order in snapshot.orders}
@@ -154,44 +154,11 @@ def prove_full_order_current_against_statement(
             if evidence.difference is not None
         ):
             blockers.append(f"{order_id}: non-zero ITEM, GROUP, or ORDER difference remains.")
-        if any(item.return_refund_status for item in current_items):
-            marker_blocker = _marked_refund_proof_blocker(result, current_items)
-            if marker_blocker is not None:
-                blockers.append(f"{order_id}: {marker_blocker}")
     return FullOrderStatementProof(
         tuple(provisional),
         reconciliation,
         tuple(dict.fromkeys(blockers)),
     )
-
-
-def _marked_refund_proof_blocker(result, current_items) -> str | None:
-    """Require explicit ITEM-level Statement refund proof for marked Current rows."""
-
-    refund = result.evidence.refund
-    if refund.statement_amount is None or refund.statement_amount == Decimal("0.00"):
-        return "return/refund marker lacks explicit non-zero Statement refund evidence."
-    if (
-        result.summary.settlement_basis is not SettlementBasis.EXACT
-        or refund.strongest_scope is not IdentityScope.ITEM
-        or not refund.allocation_resolved
-    ):
-        return "return/refund marker refund attribution is not deterministically ITEM-resolved."
-
-    marked_item_indexes = {
-        item.item_index for item in current_items if item.return_refund_status
-    }
-    refund_members = set(refund.statement_members)
-    refunded_item_indexes = {
-        invoice_member.item_index
-        for identity in result.evidence.identities
-        if identity.identity_scope is IdentityScope.ITEM
-        for statement_member, invoice_member in identity.selected_pairs
-        if statement_member in refund_members
-    }
-    if refunded_item_indexes != marked_item_indexes:
-        return "return/refund marker does not match the deterministically refunded Current item(s)."
-    return None
 
 
 def _canonical_bundle(current, current_items, statement_row, imported_at) -> InvoiceBundle:

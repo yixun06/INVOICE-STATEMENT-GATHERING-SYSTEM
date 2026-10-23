@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from io import BytesIO
@@ -575,7 +576,7 @@ def test_full_order_statement_proof_requires_exact_item_and_order_cents():
     assert any("exact Full Order/Statement" in blocker for blocker in failed.blockers)
 
 
-def test_full_order_statement_proof_blocks_return_refund_marker_without_nonzero_statement_refund():
+def test_full_order_statement_proof_allows_return_refund_request_without_statement_refund():
     marked = list(_rows()[0])
     marked[2] = "Return / Refund"
     current = _batch([tuple(marked)])
@@ -586,8 +587,8 @@ def test_full_order_statement_proof_blocks_return_refund_marker_without_nonzero_
         product_master=_master(),
     )
 
-    assert proof.ready is False
-    assert any("return/refund marker" in blocker for blocker in proof.blockers)
+    assert proof.ready is True
+    assert proof.reconciliation is not None
 
 
 def test_full_order_statement_proof_accepts_marked_item_with_exact_refund_attribution():
@@ -674,7 +675,7 @@ def test_full_order_group_uses_member_subtotals_without_pdf_allocation():
     )
 
 
-def test_full_order_statement_proof_blocks_marked_refund_with_ambiguous_item_allocation():
+def test_full_order_statement_proof_allows_marked_refund_with_group_statement_evidence():
     synced_at = datetime(2026, 10, 16, tzinfo=timezone.utc)
     order = FullOrderCurrentOrder(
         market="shopee_my",
@@ -724,8 +725,32 @@ def test_full_order_statement_proof_blocks_marked_refund_with_ambiguous_item_all
         product_master=master,
     )
 
+    assert proof.ready is True
+    assert proof.reconciliation is not None
+    assert proof.reconciliation.orders[0].summary.identity_scope is IdentityScope.GROUP
+
+
+def test_full_order_statement_proof_still_blocks_marked_request_when_statement_bridge_is_incomplete():
+    marked = list(_rows()[0])
+    marked[2] = "Request Approved"
+    current = _batch([tuple(marked)])
+    statement = _statement("10.25")
+    order_row, sku_row = statement.income_rows
+    components = dict(order_row.financial_components)
+    components["Commission Fee (incl. SST)"] = None
+    incomplete = replace(
+        statement,
+        income_rows=(replace(order_row, financial_components=components), sku_row),
+    )
+
+    proof = prove_full_order_current_against_statement(
+        incomplete,
+        FullOrderCurrentSnapshot(current.orders, current.items),
+        product_master=_master(),
+    )
+
     assert proof.ready is False
-    assert any("deterministically ITEM-resolved" in blocker for blocker in proof.blockers)
+    assert proof.blockers == ("ORDER-1: Statement financial bridge is incomplete.",)
 
 
 def _group_statement(*, refund: str = "0.00") -> ParsedShopeeWeeklyStatement:
