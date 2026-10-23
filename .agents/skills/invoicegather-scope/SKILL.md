@@ -46,17 +46,23 @@ source-safety, Statement, and historical rationale.
 
 This is the authoritative active-flow architecture for Shopee MY and Shopee
 SG.  It supersedes every conflicting older requirement that makes an Invoice
-PDF, `Invoice_Orders`, or `Invoice_Items` a prerequisite for Statement
-reconciliation, payout-period Product Summary, export, or readiness.  Older
-Invoice/PDF coverage and Invoice-to-Statement wording remains historical audit
-context only; it must not be used as an active acceptance or blocking rule.
+PDF, `Invoice_Orders`, or `Invoice_Items` a prerequisite for active Statement
+reconciliation or Statement readiness. The approved Payout Product Summary
+target is separate and remains pending migration: its current implementation
+still reads canonical `Invoice_Orders` + `Invoice_Items`. Older Invoice/PDF
+coverage and Invoice-to-Statement wording remains historical audit context for
+the active Statement path only; it must not be used as an active Statement
+acceptance or blocking rule.
 
 ```text
 Full Order Current + market-scoped Product Master
         -> operational order and product facts
 
 Statement + Full Order Current + market-scoped Product Master
-        -> settlement reconciliation and payout-period product facts
+        -> settlement reconciliation
+
+Statement + Full Order Current + market-scoped Product Master
+        -> approved future Payout Product Summary target (migration pending)
 ```
 
 ### Source authority and join — Locked
@@ -79,9 +85,12 @@ Statement + Full Order Current + market-scoped Product Master
 
 - **Order Created Product Summary** is built from Full Order Current and the
   same resolved Product Master evidence.
-- **Payout Product Summary** uses Statement to determine payout period and
-  order population, Full Order Current for product/variation/quantity/subtotal,
-  and Product Master for NAV and `UNIT PRICE USOLF`.
+- **Payout Product Summary target (migration pending):** Statement determines
+  payout period and order population, Full Order Current supplies
+  product/variation/quantity/subtotal, and Product Master supplies NAV and
+  `UNIT PRICE USOLF`. The current Payout Product Summary implementation remains
+  canonical `Invoice_Orders` + `Invoice_Items`; do not describe the target as
+  implemented or use it as the current Payout acceptance contract.
 - **Statement reconciliation** is Statement plus Full Order Current.  PDF
   Invoice coverage is not required.
 - After accepted order-level reconciliation, Statement financial-component rows
@@ -198,13 +207,17 @@ The following rules are locked for future implementation:
   one immutable context. Cross-market reads, reconciliation, commits, and stale
   provider reuse are prohibited.
 - Product Master infrastructure is shared, but MY and SG use different tabs/data
-  scopes. SG uses only the `SHOPEE PRODUCT LISTING` Google spreadsheet's exact
-  `shopee sg` tab and `Price SGD`. The approved SG spreadsheet ID is
+  scopes. SG Full Order uses only the `SHOPEE PRODUCT LISTING` Google
+  spreadsheet's exact `shopee sg` tab. It resolves one deterministic exact
+  normalized Product Name + Variation row; Seller SKU may only disambiguate
+  multiple exact candidates. NAV, `UNIT PRICE USOLF`, and `resolve_sku` must
+  come from that same row. `Price SGD` is not a Full Order fallback, match, or
+  pricing input. The approved SG spreadsheet ID is
   `1tZN0lHSY2omOUycXBss6sim9iVBwAvOe0_DJNIPMwMM`. The existing read-only Google
   credential may be reused as access infrastructure, but the SG workbook, tab,
-  rows, prices, and NAV must never fall back to MY. Missing credentials, an
-  inaccessible/missing tab, missing required headers, or invalid `Price SGD`
-  evidence fails closed.
+  rows, prices, NAV, USOLF, and resolve SKU must never fall back to MY. Missing
+  credentials, an inaccessible/missing tab, required Full Order headers, or
+  invalid same-row evidence fails closed.
 - NAV and Unit Price must come from the same resolved market-specific Product
   Master row. Although both markets share the ERP NAV identity system, SG NAV
   must not be copied from MY data.
@@ -989,8 +1002,10 @@ unit_price = UNIT PRICE USOLF from that same resolved PM evidence
 `UNIT PRICE USOLF` must be a single positive numeric value. Missing, invalid,
 zero, or conflicting USOLF evidence blocks Full Order Current persistence as
 `PM_ENRICHMENT_REQUIRED`; do not fall back to `Price`, source selling price, or
-another PM row. Identity resolution itself is unchanged. Shopee SG remains on
-its existing ERP `Price` rule pending a separate Product Owner decision.
+another PM row. Shopee SG Full Order uses its separate deterministic exact
+normalized Product Name + Variation rule, with Seller SKU only as exact-
+candidate disambiguation; NAV, `UNIT PRICE USOLF`, and `resolve_sku` come from
+the same SG Product Master row. It must never use `Price SGD` or MY fallback.
 
 This does not alter canonical `Invoice_Items.unit_price`, Invoice/PDF pricing,
 Statement financial semantics, or Weekly Billing rules. For Consolidated
@@ -1852,10 +1867,13 @@ billing export requires 100% required Invoice-source coverage.
 
 ## UAT2 interim persistence — Confirmed
 
-For UAT2, Google Sheets is the temporary persistence layer. **Do not introduce
-PostgreSQL, SQLAlchemy, or Alembic in UAT2.** Use a new dedicated InvoiceGather
-UAT2 data spreadsheet; never use the Product Master spreadsheet as this
-database.
+For UAT2, Google Sheets remains the temporary application persistence layer and
+must never be replaced or written by the limited PostgreSQL phase. The limited
+Product Owner-authorized local Docker PostgreSQL + SQLAlchemy one-way migration
+and verification exception is defined in section 14; it is not an application
+repository cutover, dual-write, or production deployment. Use a new dedicated
+InvoiceGather UAT2 data spreadsheet; never use the Product Master spreadsheet
+as this database.
 
 Canonical source-fact tabs are:
 
@@ -2032,11 +2050,14 @@ verification, (8) SKU refund reconciliation, (9) consolidated projection,
 (13) UAT2 polish. Each phase requires focused tests, full regression, diff
 review, sensitive scan, and its own safe commit/push.
 
-UAT2 excludes PostgreSQL; bank reconciliation/receipt confirmation; automatic
-CN accounting; reopening completed transactions; refund-quantity inference;
-fuzzy matching; automatic source overwrite; Lazada/ZENXIN Weekly Billing;
-replacing Product Master authority; major unrelated UI redesign; and broad
-parser rewrites.
+UAT2 excludes PostgreSQL application cutover, production deployment, dual-write,
+or replacement of Google Sheets. The bounded local Docker PostgreSQL +
+SQLAlchemy one-way migration and verification exception in section 14 is
+authorized. UAT2 also excludes bank reconciliation/receipt confirmation;
+automatic CN accounting; reopening completed transactions; refund-quantity
+inference; fuzzy matching; automatic source overwrite; Lazada/ZENXIN Weekly
+Billing; replacing Product Master authority; major unrelated UI redesign; and
+broad destructive migration.
 
 Stop and ask before deciding an unspecified field's source authority, a money
 allocation without explicit evidence, product identity merging, conflict
@@ -2094,8 +2115,10 @@ The current application should gradually become the:
 
 For UAT2, this workspace persists the confirmed historical Invoice and Shopee
 settlement source facts to the dedicated Google Sheets UAT2 data spreadsheet.
-PostgreSQL remains the long-term production direction, not the current UAT2
-persistence target.
+PostgreSQL remains the future production direction, not the current UAT2
+application-persistence target. The separately authorized section 14 local
+one-way migration/verification phase leaves Google Sheets in place and
+read-only as its source.
 
 It is responsible for:
 
@@ -3563,10 +3586,31 @@ The exact formula/classification is not yet locked. Ask before implementing the 
 
 # 14. Long-Term Production Database Direction — Post-UAT2
 
-This section is a long-term direction only. It is superseded for the current
-UAT2 delivery by the authoritative UAT2 Google Sheets interim-persistence
-contract above. Do not begin PostgreSQL work while implementing UAT2 unless the
-user explicitly reopens that scope.
+Google Sheets remains the authoritative read-only source for the current
+limited Product Owner-authorized PostgreSQL phase. The authorized path is:
+
+```text
+Google Sheets (read-only source)
+        -> local Docker PostgreSQL
+        -> SQLAlchemy ORM
+        -> one-way initial migration + verification
+```
+
+Local PostgreSQL writes are authorized only within that one-way initial
+migration and verified local-target scope. The existing `src/invoice_app/pg_orm/`
+and `scripts/sync_sheets_to_postgres.py` are authorized pending PostgreSQL
+workstream artifacts, not unapproved artifacts.
+
+Before any rerun, audit the current ORM and sync implementation. The first
+migration attempt failed because real `order_status` data exceeded `String(64)`;
+preserve source facts and correct the contract rather than truncate data.
+Hard-coded credentials and unconditional/destructive truncate behavior are not
+acceptable final design. Verify the local target before any destructive action.
+
+This limited authorization does **not** authorize application repository
+cutover, production PostgreSQL deployment, dual-write, replacing or removing
+Google Sheets, Google Sheets business writes, destructive reset without a
+verified local target, or hard-coded credentials.
 
 The production database engine direction is now confirmed:
 
@@ -4200,8 +4244,10 @@ Shipment Confirmation proves actual shipment
 # 25. Long-Term Development Roadmap — Post-UAT2 Guidance
 
 For the current delivery, follow the UAT2 implementation order above. This
-roadmap resumes after UAT2 and must not be read as permission to introduce
-PostgreSQL during UAT2.
+roadmap must not be read as permission for PostgreSQL application cutover,
+dual-write, production deployment, or replacement of Google Sheets during
+UAT2. The limited local one-way migration/verification authorization is the
+explicit exception described in section 14.
 
 Use the following sequence by default to reduce refactor/rework cost. A task prompt may intentionally work on an isolated later concern.
 
