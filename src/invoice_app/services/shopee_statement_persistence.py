@@ -144,6 +144,10 @@ class StatementCommitPlan:
     invoice_snapshot_sha256: str | None = None
     invoice_order_inserts: tuple[CanonicalInvoiceOrder, ...] = ()
     invoice_item_inserts: tuple[CanonicalInvoiceItem, ...] = ()
+    # ``FULL_ORDER_CURRENT`` plans are the active MY/SG Statement contract.
+    # The retained default keeps the historical Invoice-centric writer API
+    # available only for archived/audit callers.
+    authority: str = "LEGACY_INVOICE_V2"
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ def prepare_v2_statement_commit_plan(
     reconciliation: StatementReconciliationBatch,
     validation_passed: bool,
     canonical_inserts: Iterable[InvoiceBundle] = (),
+    persisted_platform: str = "Shopee",
 ) -> StatementCommitPlan:
     """Build a fail-closed V2 plan without fabricating GROUP allocation."""
 
@@ -303,10 +308,10 @@ def prepare_v2_statement_commit_plan(
         raise StatementCommitBlocked("V2 product coverage is incomplete or overlapping.")
 
     invoice_orders = tuple(
-        order for order in invoice_orders if order.platform == "Shopee"
+        order for order in invoice_orders if order.platform == persisted_platform
     )
     invoice_items = tuple(
-        item for item in invoice_items if item.platform == "Shopee"
+        item for item in invoice_items if item.platform == persisted_platform
     )
     orders_by_id = {order.order_id: order for order in invoice_orders}
     items_by_key = {
@@ -594,6 +599,68 @@ def prepare_v2_statement_commit_plan(
         invoice_order_inserts=insert_orders,
         invoice_item_inserts=insert_items,
     )
+
+
+def prepare_full_order_statement_commit_plan(
+    statement: ParsedShopeeWeeklyStatement,
+    *,
+    audit: StatementBatchAudit,
+    full_order_orders: Iterable[CanonicalInvoiceOrder],
+    full_order_items: Iterable[CanonicalInvoiceItem],
+    reconciliation: StatementReconciliationBatch,
+    validation_passed: bool,
+    persisted_platform: str = "Shopee",
+) -> StatementCommitPlan:
+    """Build the active Statement-only persistence projection.
+
+    The V2 evaluator remains a pure deterministic comparison engine, but its
+    inputs here are transient projections of Full Order Current.  No persisted
+    Invoice row is read, required, inserted, or enriched by this plan.
+    """
+
+    legacy_plan = prepare_v2_statement_commit_plan(
+        statement,
+        audit=audit,
+        invoice_orders=full_order_orders,
+        invoice_items=full_order_items,
+        reconciliation=reconciliation,
+        validation_passed=validation_passed,
+        persisted_platform=persisted_platform,
+    )
+    return replace(
+        legacy_plan,
+        invoice_order_updates=(),
+        invoice_item_updates=(),
+        protected_invoice_items=(),
+        invoice_snapshot_sha256=None,
+        invoice_order_inserts=(),
+        invoice_item_inserts=(),
+        authority="FULL_ORDER_CURRENT",
+    )
+
+
+def validate_active_statement_state(
+    plan: StatementCommitPlan,
+    state: StatementCommitState,
+) -> tuple[str, ...]:
+    """Fresh pre-commit checks that deliberately exclude Invoice/PDF state."""
+
+    if plan.authority != "FULL_ORDER_CURRENT":
+        return ("ACTIVE_STATEMENT_AUTHORITY_MISMATCH",)
+    references = tuple(
+        reference
+        for reference in state.committed_statements
+        if reference.commit_status == "COMMITTED"
+    )
+    if any(reference.file_hash == plan.statement.file_hash for reference in references):
+        return ("ALREADY_IMPORTED",)
+    if any(
+        reference.statement_period_from == plan.statement.statement_period_from
+        and reference.statement_period_to == plan.statement.statement_period_to
+        for reference in references
+    ):
+        return ("POSSIBLE_REVISION",)
+    return ()
 
 
 def validate_current_statement_state(

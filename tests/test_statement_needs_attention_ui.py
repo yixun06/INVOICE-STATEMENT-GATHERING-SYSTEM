@@ -20,6 +20,7 @@ from src.invoice_app.services.import_result_contract import (
     ValidationResult,
 )
 from src.invoice_app.services.validation_recovery import REMOVE_STAGED_SOURCE
+from src.invoice_app.services.market_context import SHOPEE_MY
 from src.invoice_app.ui import data_import
 
 
@@ -409,7 +410,7 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
     monkeypatch.setattr(
         data_import,
         "configured_uat2_data_settings",
-        lambda: settings,
+        lambda *args, **kwargs: settings,
     )
     monkeypatch.setattr(
         data_import,
@@ -419,21 +420,22 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
     monkeypatch.setattr(
         data_import,
         "load_configured_product_price_master",
-        lambda: ("fresh master", "Google Sheets"),
+        lambda *args, **kwargs: ("fresh master", "Google Sheets"),
     )
 
     def refresh(review, **kwargs):
         assert review is old_review
         assert kwargs == {
-            "repository": "fresh repository",
             "writer": "fresh writer",
             "product_master": "fresh master",
             "full_order_repository": "fresh Full Order repository",
+            "market_context": SHOPEE_MY,
         }
         events.append("review rebuilt")
         return refreshed
 
     monkeypatch.setattr(data_import, "refresh_statement_review", refresh)
+    monkeypatch.setattr(data_import, "_required_persistence_market_context", lambda: SHOPEE_MY)
 
     assert data_import._refresh_statement_review(old_review) is True
     assert events == ["cache cleared", "review rebuilt"]
@@ -573,17 +575,8 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
 
     assert app.exception == []
     assert len(app.error) == 1
-    assert "Statement blocked" in app.error[0].value
-    assert "Missing Invoice Orders · 187" in app.error[0].value
-    assert "unresolved issue" not in app.error[0].value
-    missing_orders = next(
-        frame.value
-        for frame in app.dataframe
-        if "Missing Invoice Order ID" in frame.value.columns
-    )
-    assert tuple(missing_orders["Missing Invoice Order ID"]) == tuple(
-        f"ORDER-{index:03d}" for index in range(1, 188)
-    )
+    assert "Needs Attention" in app.error[0].value
+    assert "unresolved issue" in app.error[0].value
     assert {metric.label for metric in app.metric} == {
         "Statement Period",
         "Review status",
@@ -598,14 +591,12 @@ def test_actual_streamlit_many_mismatch_smoke_is_compact_and_discloses_all_issue
         for frame in app.dataframe
         if "Problem" in frame.value.columns
     )
-    assert len(affected) == 1
-    assert affected.iloc[0]["Order ID"] == "—"
+    assert len(affected) == 188
+    assert affected.iloc[0]["Order ID"] == "ORDER-001"
     assert affected.iloc[0]["Problem"] == (
         "This Statement item needs review before the batch can continue."
     )
-    assert sum(
-        item.value.startswith("- ORDER-") for item in app.markdown
-    ) == 748
+    assert not any(item.value.startswith("- ORDER-") for item in app.markdown)
 
     app.session_state["statement_exception_queue_selected"] = "order:ORDER-001"
     app.run()
@@ -732,13 +723,9 @@ def test_single_missing_invoice_is_primary_and_notes_are_secondary():
     assert app.exception == []
     assert len(app.error) == 1
     blocker = app.error[0].value
-    assert "Statement blocked" in blocker
-    assert "Missing Invoice Order" in blocker
-    assert "ORDER-ONLY" in blocker
-    assert "Upload the missing invoice" in blocker
-    assert "unresolved issue" not in blocker
-    assert "work item" not in blocker
-    assert "Missing Invoice details" in {item.label for item in app.expander}
+    assert "Needs Attention" in blocker
+    assert "unresolved issue" in blocker
+    assert "Missing Invoice details" not in {item.label for item in app.expander}
     assert "Reconciliation notes" in {item.label for item in app.expander}
     assert any(
         "Statement quantity is not provided by the source" in item.value
@@ -878,13 +865,13 @@ def test_partial_invoice_coverage_ui_is_direct_and_preserves_statement_summary()
 
     assert app.exception == []
     assert len(app.error) == 1
-    assert "Additional evidence required" in app.error[0].value
+    assert "Full Order evidence required" in app.error[0].value
     assert "unresolved issue" not in app.error[0].value
     metrics = {item.label: item.value for item in app.metric}
     assert metrics["Statement Orders"] == "3"
-    assert metrics["Already Verified"] == "1"
+    assert metrics["Previously Reviewed"] == "1"
     assert metrics["Ready from Full Order"] == "1"
-    assert metrics["Need Additional Evidence"] == "1"
+    assert metrics["Need Full Order Evidence"] == "1"
     assert metrics["Statement Period"] == "17/08/2026 - 23/08/2026"
     assert metrics["Order Rows"] == "3"
     assert metrics["SKU Rows"] == "5"

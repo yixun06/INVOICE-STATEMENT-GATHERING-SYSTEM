@@ -115,6 +115,7 @@ def stage_shopee_weekly_statement(
     source_filename: str | None = None,
     existing_orders: Iterable[Mapping[str, Any]] = (),
     existing_statements: Iterable[StatementReference | Mapping[str, Any]] = (),
+    evaluate_legacy_order_reconciliation: bool = True,
 ) -> StagedShopeeWeeklyStatement:
     try:
         statement = parse_shopee_weekly_statement(
@@ -146,6 +147,7 @@ def stage_shopee_weekly_statement(
         statement,
         existing_orders=existing_orders,
         existing_statements=existing_statements,
+        evaluate_legacy_order_reconciliation=evaluate_legacy_order_reconciliation,
     )
 
 
@@ -154,6 +156,7 @@ def stage_parsed_shopee_weekly_statement(
     *,
     existing_orders: Iterable[Mapping[str, Any]] = (),
     existing_statements: Iterable[StatementReference | Mapping[str, Any]] = (),
+    evaluate_legacy_order_reconciliation: bool = True,
 ) -> StagedShopeeWeeklyStatement:
     orders = tuple(existing_orders)
     references = tuple(existing_statements)
@@ -190,7 +193,7 @@ def stage_parsed_shopee_weekly_statement(
 
     order_reconciliations: tuple[OrderReconciliation, ...] = ()
     adjustment_reconciliations: tuple[AdjustmentReconciliation, ...] = ()
-    if not validation_issues:
+    if not validation_issues and evaluate_legacy_order_reconciliation:
         order_reconciliations = reconcile_statement_orders(statement, orders)
         adjustment_reconciliations = reconcile_statement_adjustments(statement, orders)
         unmatched = [item.order_id for item in order_reconciliations if item.status == "Unmatched Order"]

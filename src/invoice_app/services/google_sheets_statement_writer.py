@@ -42,6 +42,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitState,
     StatementWriteIntegrityError,
     StatementWriteNotApplied,
+    validate_active_statement_state,
     serialize_order_adjustment,
     validate_current_statement_state,
     write_statement_plan_if_current,
@@ -142,6 +143,22 @@ class _WriterSnapshot:
     commit_state: StatementCommitState
 
 
+@dataclass(frozen=True)
+class _ActiveStatementSnapshot:
+    """The active Statement persistence snapshot, intentionally Invoice-free."""
+
+    sheet_ids: Mapping[str, int]
+    statement_rows: tuple[_StatementTarget, ...]
+    statement_append_row_index: int
+    financial_component_rows: tuple[_FinancialComponentTarget, ...]
+    financial_component_append_row_index: int
+    summary_rows: tuple[_StatementSummaryTarget, ...]
+    summary_append_row_index: int
+    order_adjustment_rows: tuple[_OrderAdjustmentTarget, ...]
+    order_adjustment_append_row_index: int
+    commit_state: StatementCommitState
+
+
 class GoogleSheetsStatementWriter:
     """Resolve exact persisted rows for one locked market and commit them together."""
 
@@ -164,8 +181,15 @@ class GoogleSheetsStatementWriter:
         """Freshly read all authoritative tabs for guarded preflight."""
         return self._read_snapshot().commit_state
 
+    def reload_active_commit_state(self) -> StatementCommitState:
+        """Read only Statement-owned persistence for the active MY/SG flow."""
+        return self._read_active_snapshot().commit_state
+
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Build one complete batch and verify the deterministic final state."""
+        if plan.authority == "FULL_ORDER_CURRENT":
+            self._write_active_statement_batch(plan)
+            return
         _validate_plan_market_identity(plan, self._persisted_platform)
         before = self._read_snapshot()
         reasons = validate_current_statement_state(
@@ -193,6 +217,35 @@ class GoogleSheetsStatementWriter:
         if verification is not StatementWriteVerification.ALL_APPLIED:
             raise StatementWriteIntegrityError(
                 "Google Sheets acknowledged the write but exact Statement and Invoice enrichment readback did not verify; manual recovery is required."
+            )
+
+    def _write_active_statement_batch(self, plan: StatementCommitPlan) -> None:
+        """Persist Statement facts without reading or changing Invoice tables."""
+
+        _validate_plan_market_identity(plan, self._persisted_platform)
+        before = self._read_active_snapshot()
+        reasons = validate_active_statement_state(plan, before.commit_state)
+        if reasons:
+            raise StatementCommitBlocked(
+                "Fresh Statement writer preflight failed: " + ", ".join(reasons)
+            )
+        data = self._build_active_value_ranges(plan, before)
+        try:
+            self._gateway.batch_update_values(self._spreadsheet_id, data)
+        except Exception as write_error:
+            verification = self._verify_active_after_write(plan, before)
+            if verification is StatementWriteVerification.ALL_APPLIED:
+                return
+            if verification is StatementWriteVerification.NONE_APPLIED:
+                raise StatementWriteNotApplied(
+                    "The Google Sheets write was not applied; a fresh commit attempt is required."
+                ) from write_error
+            raise StatementWriteIntegrityError(
+                "The Google Sheets write outcome is mixed or unverifiable; manual recovery is required and automatic retry is forbidden."
+            ) from write_error
+        if self._verify_active_after_write(plan, before) is not StatementWriteVerification.ALL_APPLIED:
+            raise StatementWriteIntegrityError(
+                "Google Sheets acknowledged the write but exact Statement readback did not verify; manual recovery is required."
             )
 
     def enrich_order_adjustment_pdf_evidence(
@@ -230,6 +283,86 @@ class GoogleSheetsStatementWriter:
             raise StatementWriteIntegrityError(
                 "Order Adjustment PDF evidence readback did not verify."
             )
+
+    def _read_active_snapshot(self) -> _ActiveStatementSnapshot:
+        """Load only the Statement-owned tabs needed by the active contract."""
+
+        try:
+            required_tabs = (
+                STATEMENT_DATA_TAB,
+                STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                STATEMENT_SUMMARY_TAB,
+                ORDER_ADJUSTMENTS_TAB,
+            )
+            sheet_ids = self._gateway.read_sheet_ids(self._spreadsheet_id, required_tabs)
+            tabs = self._gateway.read_tabs(self._spreadsheet_id, required_tabs)
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "Active Statement authoritative snapshot read failed."
+            ) from error
+
+        statement_rows = tuple(
+            _StatementTarget(row_index, values)
+            for row_index, values in _rows_with_positions(
+                tabs, STATEMENT_DATA_TAB, STATEMENT_DATA_HEADERS
+            )
+        )
+        financial_component_rows = tuple(
+            _FinancialComponentTarget(row_index, values)
+            for row_index, values in _rows_with_positions(
+                tabs,
+                STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+            )
+        )
+        summary_rows = tuple(
+            _StatementSummaryTarget(row_index, values)
+            for row_index, values in _rows_with_positions(
+                tabs, STATEMENT_SUMMARY_TAB, STATEMENT_SUMMARY_HEADERS
+            )
+        )
+        order_adjustment_rows = tuple(
+            _OrderAdjustmentTarget(row_index, values)
+            for row_index, values in _rows_with_positions(
+                tabs, ORDER_ADJUSTMENTS_TAB, ORDER_ADJUSTMENTS_HEADERS
+            )
+        )
+        adjustments = tuple(
+            _deserialize_order_adjustment(values, row_index + 1)
+            for row_index, values in (
+                (target.row_index, target.values) for target in order_adjustment_rows
+            )
+        )
+        fingerprints = tuple(event.adjustment_event_fingerprint for event in adjustments)
+        if len(set(fingerprints)) != len(fingerprints):
+            raise StatementCommitBlocked(
+                "Order_Adjustments contains duplicate event fingerprints."
+            )
+        return _ActiveStatementSnapshot(
+            sheet_ids=sheet_ids,
+            statement_rows=statement_rows,
+            statement_append_row_index=_append_row_index(tabs[STATEMENT_DATA_TAB]),
+            financial_component_rows=financial_component_rows,
+            financial_component_append_row_index=_append_row_index(
+                tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]
+            ),
+            summary_rows=summary_rows,
+            summary_append_row_index=_append_row_index(tabs[STATEMENT_SUMMARY_TAB]),
+            order_adjustment_rows=order_adjustment_rows,
+            order_adjustment_append_row_index=_append_row_index(tabs[ORDER_ADJUSTMENTS_TAB]),
+            commit_state=StatementCommitState(
+                orders={},
+                items=(),
+                committed_statements=_committed_statement_references(statement_rows),
+                order_adjustments=tuple(
+                    event
+                    for event in adjustments
+                    if event.platform == self._persisted_platform
+                ),
+            ),
+        )
 
     def _read_snapshot(self) -> _WriterSnapshot:
         try:
@@ -449,6 +582,46 @@ class GoogleSheetsStatementWriter:
         _validate_group_protection(plan, snapshot, seen_items, self._persisted_platform)
         return tuple(data)
 
+    def _build_active_value_ranges(
+        self, plan: StatementCommitPlan, snapshot: _ActiveStatementSnapshot
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Build the append-only active Statement write without Invoice ranges."""
+
+        _validate_incoming_statement_identities(plan, snapshot)
+        _validate_incoming_financial_component_identities(plan, snapshot)
+        _validate_incoming_summary_identities(plan, snapshot)
+        new_adjustment_rows = _new_order_adjustment_rows(plan, snapshot)
+        data: list[Mapping[str, Any]] = [
+            _value_range(
+                STATEMENT_DATA_TAB,
+                snapshot.statement_append_row_index,
+                0,
+                plan.rows,
+            ),
+            _value_range(
+                STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                snapshot.financial_component_append_row_index,
+                0,
+                plan.financial_component_rows,
+            ),
+            _value_range(
+                STATEMENT_SUMMARY_TAB,
+                snapshot.summary_append_row_index,
+                0,
+                plan.summary_rows,
+            ),
+        ]
+        if new_adjustment_rows:
+            data.append(
+                _value_range(
+                    ORDER_ADJUSTMENTS_TAB,
+                    snapshot.order_adjustment_append_row_index,
+                    0,
+                    new_adjustment_rows,
+                )
+            )
+        return tuple(data)
+
     def _verify_after_write(
         self, plan: StatementCommitPlan, before: _WriterSnapshot
     ) -> StatementWriteVerification:
@@ -457,6 +630,15 @@ class GoogleSheetsStatementWriter:
         except Exception:
             return StatementWriteVerification.MIXED
         return _classify_write_result(plan, before, after, self._persisted_platform)
+
+    def _verify_active_after_write(
+        self, plan: StatementCommitPlan, before: _ActiveStatementSnapshot
+    ) -> StatementWriteVerification:
+        try:
+            after = self._read_active_snapshot()
+        except Exception:
+            return StatementWriteVerification.MIXED
+        return _classify_active_write_result(plan, before, after)
 
 
 def write_google_statement_plan_if_current(
@@ -1287,6 +1469,63 @@ def _classify_write_result(
     ):
         return StatementWriteVerification.NONE_APPLIED
     return StatementWriteVerification.MIXED
+
+
+def _classify_active_write_result(
+    plan: StatementCommitPlan,
+    before: _ActiveStatementSnapshot,
+    after: _ActiveStatementSnapshot,
+) -> StatementWriteVerification:
+    """Verify only append-only Statement-owned effects of an active plan."""
+
+    expected_rows = Counter(plan.rows)
+    after_rows = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.statement_rows
+    )
+    expected_components = Counter(plan.financial_component_rows)
+    after_components = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.financial_component_rows
+    )
+    expected_summary = Counter(plan.summary_rows)
+    after_summary = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.summary_rows
+    )
+    expected_adjustments = Counter(_new_order_adjustment_rows(plan, before))
+    after_adjustments = Counter(
+        tuple(_cell_string(value) for value in target.values)
+        for target in after.order_adjustment_rows
+    )
+    all_applied = (
+        bool(expected_rows)
+        and all(after_rows[row] == count for row, count in expected_rows.items())
+        and bool(expected_components)
+        and all(
+            after_components[row] == count
+            for row, count in expected_components.items()
+        )
+        and bool(expected_summary)
+        and all(after_summary[row] == count for row, count in expected_summary.items())
+        and all(
+            after_adjustments[row] == count
+            for row, count in expected_adjustments.items()
+        )
+    )
+    if all_applied:
+        return StatementWriteVerification.ALL_APPLIED
+    none_applied = (
+        all(after_rows[row] == 0 for row in expected_rows)
+        and all(after_components[row] == 0 for row in expected_components)
+        and all(after_summary[row] == 0 for row in expected_summary)
+        and all(after_adjustments[row] == 0 for row in expected_adjustments)
+    )
+    return (
+        StatementWriteVerification.NONE_APPLIED
+        if none_applied
+        else StatementWriteVerification.MIXED
+    )
 
 
 def _protected_items_unchanged(

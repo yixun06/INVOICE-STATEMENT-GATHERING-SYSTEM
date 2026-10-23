@@ -119,6 +119,7 @@ def evaluate_statement_reconciliation(
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
     canonical_adjustments: Iterable[CanonicalOrderAdjustment] = (),
     tolerance: Decimal = MONEY_TOLERANCE,
+    persisted_platform: str = "Shopee",
 ) -> StatementReconciliationBatch:
     """Evaluate one parsed Statement against persisted Invoice-derived facts.
 
@@ -127,8 +128,8 @@ def evaluate_statement_reconciliation(
     """
 
     orders = tuple(invoice_orders)
-    items = tuple(item for item in invoice_items if item.platform == "Shopee")
-    order_map = _unique_orders(orders)
+    items = tuple(item for item in invoice_items if item.platform == persisted_platform)
+    order_map = _unique_orders(orders, persisted_platform=persisted_platform)
     items_by_order: dict[str, list[CanonicalInvoiceItem]] = defaultdict(list)
     for item in items:
         items_by_order[item.order_id].append(item)
@@ -208,7 +209,7 @@ def evaluate_statement_reconciliation(
             OrderReconciliationResult(
                 summary=summary,
                 evidence=ReconciliationEvidence(
-                    platform=order.platform if order is not None else "Shopee",
+                platform=order.platform if order is not None else persisted_platform,
                     order_id=order_id,
                     invoice_source_hash=order.source_hash if order is not None else None,
                     statement_file_hash=statement.file_hash,
@@ -242,13 +243,15 @@ def evaluate_statement_reconciliation(
 
 def _unique_orders(
     orders: Sequence[CanonicalInvoiceOrder],
+    *,
+    persisted_platform: str = "Shopee",
 ) -> dict[str, CanonicalInvoiceOrder]:
     result: dict[str, CanonicalInvoiceOrder] = {}
     for order in orders:
-        if order.platform != "Shopee":
+        if order.platform != persisted_platform:
             continue
         if order.order_id in result:
-            raise ValueError(f"Duplicate Shopee Invoice order: {order.order_id}")
+            raise ValueError(f"Duplicate {persisted_platform} order: {order.order_id}")
         result[order.order_id] = order
     return result
 

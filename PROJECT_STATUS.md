@@ -13,6 +13,14 @@ InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived
 
 ## Current System State
 
+### SHOPEE_STATEMENT_FULL_ORDER_ARCHITECTURE_MIGRATION_CLOSED - PERSISTENCE VERIFIED / TESTED / CHECKPOINT AUTHORIZED
+
+- Active Shopee MY and SG Statement readiness is now Full Order Current + market-scoped Product Master + Statement only, joined by exact `(market, order_id)`. Validate, Review, ready-to-commit, currency check, and the fresh locked pre-commit rebuild use the same review builder; the pre-commit writer reads and writes only Statement-owned tabs.
+- `Invoice_Orders`, `Invoice_Items`, PDF coverage, legacy Invoice price/quantity/refund evidence, and Invoice-to-Statement coverage no longer affect the active Statement workflow. The legacy V2 persistence/writer route remains preserved for archive/audit callers only. Full Order-derived transient compatibility objects are not persisted to Invoice tables.
+- Fail-closed controls remain: missing Full Order, unresolved PM identity/NAV/USOLF, malformed or conflicting Statement financial evidence, non-zero merchandise/financial mismatch, duplicate Statement facts, stale evidence, and market mismatch. MY/SG platform filtering is explicit; SG cannot fall back to MY Current data.
+- Read-only replay: MY 2026-10-05 to 2026-10-11 and 2026-09-14 to 2026-09-20 are correctly `ALREADY_IMPORTED` (463 and 543 order rows). MY 2026-07-20 to 2026-07-26 has 439 Statement orders, 439/439 Full Order coverage, 439 exact settlements, 0 unexplained settlements, 6 refund SKU rows, 3 adjustments, and is Ready with `ACTIVE LEGACY INVOICE DEPENDENCIES = 0`. SG settings resolve to `Shopee SG` and the isolated writer destination; no business write was made.
+- Regression: 181 focused Statement/Full Order/writer/persistence/UI tests pass; changed modules pass `py_compile`; `NEW_REGRESSION = 0`. The Product Owner confirms two separate real MY weekly Statement smoke commits completed through this active flow, including writer/readback; persistence is therefore **VERIFIED**. UAT2, Statement, Full Order, Product Master, Invoice/PDF, and schema business writes by this checkpoint task: 0. Git checkpoint/push: authorized.
+
 ### SHOPEE_MY_FULL_ORDER_USOLF_MIGRATION_CLOSED - FINAL ACCEPTANCE PASS / UNSTAGED
 
 - Product Owner decision is closed: Shopee MY Full Order / All Order persists `Shopee_FullOrder_Current_Items.unit_price` from `UNIT PRICE USOLF` on the same deterministic Product Master row as NAV. For a conflicting MY Seller-SKU / Parent-SKU family, exact normalized source Variation may uniquely disambiguate that same Parent family; no fuzzy match or first-row selection is permitted. Shopee SG remains on its ERP `Price` path. Canonical Invoice/PDF, Statement, Weekly Billing, and schema semantics remain unchanged.

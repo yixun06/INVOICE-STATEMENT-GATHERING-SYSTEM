@@ -336,6 +336,42 @@ def test_one_google_batch_contains_statement_order_and_eligible_item_updates():
     assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 2
 
 
+def test_active_full_order_plan_never_reads_or_writes_legacy_invoice_tabs():
+    gateway = InMemoryStatementGateway()
+    requested_tabs: list[tuple[str, ...]] = []
+    original_read_tabs = gateway.read_tabs
+
+    def guarded_read_tabs(spreadsheet_id, tabs):
+        requested_tabs.append(tuple(tabs))
+        assert INVOICE_ORDERS_TAB not in tabs
+        assert INVOICE_ITEMS_TAB not in tabs
+        return original_read_tabs(spreadsheet_id, tabs)
+
+    gateway.read_tabs = guarded_read_tabs
+    plan = replace(
+        _plan(),
+        authority="FULL_ORDER_CURRENT",
+        invoice_order_updates=(),
+        invoice_item_updates=(),
+        protected_invoice_items=(),
+        invoice_snapshot_sha256=None,
+        invoice_order_inserts=(),
+        invoice_item_inserts=(),
+    )
+    writer = GoogleSheetsStatementWriter(spreadsheet_id="synthetic-sheet", gateway=gateway)
+
+    writer.write_statement_batch(plan)
+
+    assert requested_tabs
+    written_tabs = {
+        value_range["range"].split("!", 1)[0].strip("'")
+        for value_range in gateway.batch_calls[0]
+    }
+    assert INVOICE_ORDERS_TAB not in written_tabs
+    assert INVOICE_ITEMS_TAB not in written_tabs
+    assert STATEMENT_DATA_TAB in written_tabs
+
+
 def test_full_order_canonical_insert_and_statement_commit_share_one_atomic_batch():
     base = _plan()
     inserted_order = replace(

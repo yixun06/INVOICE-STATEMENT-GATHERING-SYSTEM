@@ -492,6 +492,17 @@ def _active_invoice_market_context() -> MarketContext:
     return platform.market_context if platform and platform.market_context else SHOPEE_MY
 
 
+def _required_persistence_market_context() -> MarketContext:
+    """Return the UI-bound market or block a market-capable persistence path."""
+
+    platform = active_data_import_platform(st.session_state)
+    if platform is None or platform.market_context is None:
+        raise MarketConfigurationUnavailable(
+            "MISSING_MARKET_CONTEXT: choose a market before accessing persistence."
+        )
+    return platform.market_context
+
+
 def _active_invoice_currency() -> str:
     return _active_invoice_market_context().currency_code
 
@@ -901,23 +912,31 @@ def _render_weekly_statement_upload() -> None:
         st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
         begin_workflow_activity(st.session_state, "Validating")
         try:
-            settings = configured_uat2_data_settings()
-            master, _label = load_configured_product_price_master()
+            context = _required_persistence_market_context()
+            settings = configured_uat2_data_settings(
+                context, require_explicit_context=True
+            )
+            master, _label = load_configured_product_price_master(context)
             review = review_statement_upload(
                 uploaded_file,
                 source_filename=uploaded_file.name,
                 batch_id=st.session_state.batch_id,
                 uploaded_by=str(st.session_state.get("authenticated_username") or "Admin"),
-                repository=settings.create_repository(),
                 writer=settings.create_statement_writer(),
                 product_master=master,
                 full_order_repository=settings.create_full_order_current_repository(),
+                market_context=context,
             )
             st.session_state.weekly_statement_review = review
             st.session_state.weekly_statement_stage = review.stage
             st.session_state.pop("weekly_statement_review_stale_reason", None)
             st.session_state.pop("weekly_statement_upload_selected", None)
-        except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+        except (
+            HistoricalInvoiceStorageError,
+            MarketConfigurationUnavailable,
+            ProductMasterSourceError,
+            StatementCommitBlocked,
+        ) as error:
             st.error(f"Statement validation is unavailable: {error}")
         finally:
             end_workflow_activity(st.session_state)
@@ -1246,8 +1265,6 @@ def _render_validation_status(result: ImportResult) -> None:
     if result.source_type == SHOPEE_WEEKLY_STATEMENT:
         if _render_statement_invoice_coverage_status(result):
             return
-        if _render_missing_invoice_status(result):
-            return
         affected_orders, issue_count = _statement_blocker_counts(result)
         message = (
             f"{affected_orders} affected order{'s' if affected_orders != 1 else ''}; "
@@ -1451,6 +1468,7 @@ def _render_statement_source_error(result: ImportResult) -> bool:
 
 
 def _statement_invoice_coverage(result: ImportResult) -> Any | None:
+    """Return active Full Order Current coverage (legacy function name only)."""
     coverage = result.source_specific_details.get("statement_evidence_coverage")
     if coverage is None or coverage.complete:
         return None
@@ -1462,24 +1480,24 @@ def _render_statement_invoice_coverage_status(result: ImportResult) -> bool:
     if coverage is None:
         return False
     render_authoritative_status(
-        title="Additional evidence required",
+        title="Full Order evidence required",
         message=(
             f"{len(coverage.additional_evidence)} order"
             f"{'s require' if len(coverage.additional_evidence) != 1 else ' requires'} "
-            "additional evidence before reconciliation can continue."
+            "Full Order evidence before reconciliation can continue."
         ),
         state="blocked",
     )
     with st.container(horizontal=True, gap="small"):
         st.metric("Statement Orders", len(coverage.statement_order_ids), border=True)
-        st.metric("Already Verified", len(coverage.already_verified_order_ids), border=True)
+        st.metric("Previously Reviewed", len(coverage.already_verified_order_ids), border=True)
         st.metric(
             "Ready from Full Order",
             len(coverage.ready_from_full_order_order_ids),
             border=True,
         )
         st.metric(
-            "Need Additional Evidence", len(coverage.additional_evidence), border=True
+            "Need Full Order Evidence", len(coverage.additional_evidence), border=True
         )
     return True
 
@@ -1496,7 +1514,7 @@ def _render_statement_invoice_coverage_details(result: ImportResult) -> None:
         }
         for item in coverage.additional_evidence
     ]
-    st.subheader("Additional evidence required")
+    st.subheader("Full Order evidence required")
     st.dataframe(
         rows,
         hide_index=True,
@@ -4061,13 +4079,19 @@ def _reconcile_historical_invoice_staging() -> tuple[Any, ...]:
             )
             entries = classify_staging(
                 candidates,
-                configured_uat2_data_settings().create_repository(),
+                configured_uat2_data_settings(
+                    context, require_explicit_context=True
+                ).create_repository(),
             )
             st.session_state.uat2_historical_commit_entries = entries
             st.session_state.uat2_historical_commit_refresh_required = False
             st.session_state.uat2_historical_commit_signature = signature
             st.session_state.pop("historical_validation_blocker", None)
-        except (HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
+        except (
+            HistoricalInvoiceStorageError,
+            MarketConfigurationUnavailable,
+            ProductMasterSourceError,
+        ) as error:
             st.session_state.historical_validation_blocker = {
                 "order_id": getattr(error, "affected_order_id", None),
                 "technical_message": str(error),
@@ -4459,15 +4483,18 @@ def _render_statement_commit(ready: bool) -> None:
             st.rerun()
     if not commit_clicked:
         return
-    settings = configured_uat2_data_settings()
     try:
-        master, _label = load_configured_product_price_master()
+        context = _required_persistence_market_context()
+        settings = configured_uat2_data_settings(
+            context, require_explicit_context=True
+        )
+        master, _label = load_configured_product_price_master(context)
         currency = check_statement_review_currency(
             review,
-            repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
             product_master=master,
             full_order_repository=settings.create_full_order_current_repository(),
+            market_context=context,
         )
         if not currency.is_current:
             st.warning(
@@ -4480,10 +4507,10 @@ def _render_statement_commit(ready: bool) -> None:
             return
         attempt = commit_statement_review(
             review,
-            repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
-            load_product_master=lambda: load_configured_product_price_master()[0],
+            load_product_master=lambda: load_configured_product_price_master(context)[0],
             full_order_repository=settings.create_full_order_current_repository(),
+            market_context=context,
         )
     except ApplicationCommitInProgress as error:
         st.warning(str(error))
@@ -4491,7 +4518,12 @@ def _render_statement_commit(ready: bool) -> None:
     except StatementWriteIntegrityError as error:
         st.error(f"Statement write requires manual integrity recovery: {error}")
         return
-    except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+    except (
+        HistoricalInvoiceStorageError,
+        MarketConfigurationUnavailable,
+        ProductMasterSourceError,
+        StatementCommitBlocked,
+    ) as error:
         st.error(f"Statement commit failed before a safe write could be confirmed: {error}")
         return
     if attempt.committed:
@@ -4508,17 +4540,25 @@ def _render_statement_commit(ready: bool) -> None:
 
 def _refresh_statement_review(review: StatementImportReview) -> bool:
     try:
-        settings = configured_uat2_data_settings()
+        context = _required_persistence_market_context()
+        settings = configured_uat2_data_settings(
+            context, require_explicit_context=True
+        )
         clear_product_master_source_cache()
-        master, _label = load_configured_product_price_master()
+        master, _label = load_configured_product_price_master(context)
         refreshed = refresh_statement_review(
             review,
-            repository=settings.create_repository(),
             writer=settings.create_statement_writer(),
             product_master=master,
             full_order_repository=settings.create_full_order_current_repository(),
+            market_context=context,
         )
-    except (HistoricalInvoiceStorageError, ProductMasterSourceError, StatementCommitBlocked) as error:
+    except (
+        HistoricalInvoiceStorageError,
+        MarketConfigurationUnavailable,
+        ProductMasterSourceError,
+        StatementCommitBlocked,
+    ) as error:
         st.error(f"Statement validation refresh failed: {error}")
         return False
     replace_statement_review_after_refresh(st.session_state, refreshed)
@@ -4555,7 +4595,7 @@ def _render_stale_statement_refresh(key: str) -> bool:
     )
     st.caption(
         "The previous blocker list is hidden because it no longer represents "
-        "the current Invoice and Product Master evidence."
+        "the current Full Order, Statement, and Product Master evidence."
     )
     _render_statement_refresh_action(_weekly_review(), key=key)
     _render_statement_exit_button(key=f"{key}_exit")

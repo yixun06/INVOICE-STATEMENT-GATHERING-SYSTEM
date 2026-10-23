@@ -29,7 +29,7 @@ from src.invoice_app.repositories.shopee_full_order_current_repository import (
     FullOrderCurrentSnapshot,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
-from src.invoice_app.services.market_context import resolve_market_context
+from src.invoice_app.services.market_context import MarketContext, SHOPEE_MY, resolve_market_context
 from src.invoice_app.services.shopee_statement_item_matching import (
     product_family_resolver_from_price_master,
 )
@@ -87,23 +87,26 @@ def prove_full_order_current_against_statement(
     *,
     product_master: ProductPriceMaster,
     imported_at: datetime | None = None,
+    market_context: MarketContext = SHOPEE_MY,
 ) -> FullOrderStatementProof:
-    """Require exact Statement evidence; Current refund requests stay informational."""
+    """Prove one market-bound Statement from Full Order Current evidence only."""
 
     imported_at = imported_at or datetime.now(timezone.utc)
-    order_map = {(order.market, order.order_id): order for order in snapshot.orders}
+    market = resolve_market_context(market_context)
+    order_map = {
+        (order.market, order.order_id): order
+        for order in snapshot.orders
+        if order.market == market.key.value
+    }
     item_map = snapshot.items_by_identity()
     provisional: list[InvoiceBundle] = []
     blockers: list[str] = []
     statement_orders = _unique_statement_orders(statement.order_rows)
     for order_id, statement_row in statement_orders.items():
-        current = next((order for (market, candidate), order in order_map.items() if candidate == order_id and resolve_market_context(market).persisted_platform == "Shopee"), None)
+        current = order_map.get((market.key.value, order_id))
         current_items = item_map.get((current.market, order_id), ()) if current else ()
         if current is None or not current_items:
             blockers.append(f"{order_id}: Full Order current snapshot is missing.")
-            continue
-        if current.order_status.casefold() in {"cancelled", "canceled"}:
-            blockers.append(f"{order_id}: cancelled order remains on the PDF exception path.")
             continue
         if any(
             statement_row.financial_components.get(name) is None
@@ -126,21 +129,14 @@ def prove_full_order_current_against_statement(
         items,
         product_families=product_family_resolver_from_price_master(product_master),
         tolerance=Decimal("0.00"),
+        persisted_platform=market.persisted_platform,
     )
     blockers.extend(reconciliation.statement_validation_issues)
     if not reconciliation.coverage.valid:
         blockers.append("Statement and Full Order product populations are not fully accounted for.")
     for result in reconciliation.orders:
         order_id = result.evidence.order_id
-        current = next(
-            (
-                order
-                for (market, candidate), order in order_map.items()
-                if candidate == order_id
-                and resolve_market_context(market).persisted_platform == "Shopee"
-            ),
-            None,
-        )
+        current = order_map.get((market.key.value, order_id))
         current_items = item_map.get((current.market, order_id), ()) if current else ()
         if result.summary.identity_scope is IdentityScope.UNRESOLVED:
             blockers.append(f"{order_id}: Product Master identity is unresolved.")

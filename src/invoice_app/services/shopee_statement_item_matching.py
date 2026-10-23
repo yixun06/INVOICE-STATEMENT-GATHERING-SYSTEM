@@ -138,6 +138,7 @@ def match_statement_sku_rows(
     *,
     product_families: ProductFamilyResolver,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
+    persisted_platform: str = "Shopee",
 ) -> StatementItemMatchBatch:
     """Match all SKU rows and block the batch when any row is unresolved.
 
@@ -146,7 +147,7 @@ def match_statement_sku_rows(
 
     items_by_order: dict[str, list[CanonicalInvoiceItem]] = defaultdict(list)
     for item in invoice_items:
-        if item.platform == "Shopee":
+        if item.platform == persisted_platform:
             items_by_order[item.order_id].append(item)
 
     repairs = tuple(verified_artifact_repairs)

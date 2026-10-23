@@ -443,7 +443,7 @@ def _adapt_v2_statement_review(
     *,
     batch_id: str | None,
 ) -> ImportResult:
-    """Project the single authoritative V2 review without legacy matcher claims."""
+    """Project the single authoritative Full Order + Statement review."""
 
     stage = review.stage
     statement = stage.statement
@@ -500,7 +500,7 @@ def _adapt_v2_statement_review(
                 reason=reason,
                 affected_item=source,
                 suggested_action=(
-                    "Review the exact Statement, persisted Invoice, and Product "
+                    "Review the exact Statement, Full Order Current, and Product "
                     "Master source evidence; no force match is available."
                 ),
                 recovery_actions=recovery_actions,
@@ -525,6 +525,9 @@ def _adapt_v2_statement_review(
         "statement": statement,
         "review": review,
         "reconciliation_v2": batch,
+        "full_order_items": review.invoice_items,
+        "full_order_coverage": review.evidence_coverage,
+        # Compatibility aliases for archived presentation consumers only.
         "invoice_items": review.invoice_items,
         "invoice_coverage": review.invoice_coverage,
         "statement_evidence_coverage": review.evidence_coverage,
@@ -681,8 +684,8 @@ def _adapt_v2_statement_review(
         commit_reasons = review.blockers
     elif not review.commit_ready:
         commit_reasons = (
-            "V2 review is complete, but formal V2 Statement persistence is not "
-            "available in this phase.",
+            "Full Order + Statement review is complete, but its persistence "
+            "projection is unavailable.",
         )
     else:
         commit_reasons = ()
