@@ -9,9 +9,44 @@
 - Remote deployment: no later checkpoint is recorded as **REMOTE DEPLOYMENT VERIFIED**.
 - Worktree: Platform Selector Refinement V1 feature checkpoint `996817ec30de5895c093fdaa3c91fc08f74bf695` (`feat: refine platform selection and routing`) and documentation checkpoint `b64f7a3a23e1ecd266a3dd8600a3f3e4919494a6` (`docs: record platform selector checkpoint`) are **IMPLEMENTED / TESTED / REVIEWED / COMMITTED / PUSHED**. Local, upstream, and remote were verified equal after the normal push; no deployment verification is recorded.
 
-InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived data is the operational Zenxin DB; source PDFs/XLSX remain provenance evidence.
+InvoiceGather is a reconciliation-and-evidence system. Full Order Current and
+committed Statement are the active operational authorities; legacy Invoice/PDF
+data remains read-only comparison/audit evidence.
 
 ## Current System State
+
+### SHOPEE_MY_SG_ANY_PERIOD_STATEMENT_MODEL - IMPLEMENTED / TESTED
+
+- **Shopee MY now uses the same native any-period Statement workflow as Shopee
+  SG.** Both markets parse their own source contract, preserve actual source
+  period start/end (including irregular and cross-month periods), validate
+  exact market-scoped Full Order Current order existence, and commit only the
+  immutable Statement-owned `Statement_Data`,
+  `Statement_Financial_Components`, `Statement_Summary`, and
+  `Order_Adjustments` artifacts.
+- The active MY/SG gate is `FULL_ORDER_CURRENT_ORDER_EXISTENCE` with semantic
+  overlap evidence dedupe: exact repeated source facts return
+  `ALREADY_IMPORTED`; overlapping unrelated orders remain eligible; a changed
+  payout/release fact is `SETTLEMENT_EVIDENCE_CONFLICT` and fails closed. No
+  weekly/monthly calendar boundary, Invoice/PDF coverage, Product Master
+  evidence, SKU allocation, or legacy financial-layout classification is an
+  active Statement gate.
+- A shared read-only financial projection now joins Full Order Current and
+  committed Statement facts by normalized `(market, order_id)`. It exposes
+  created date, payout date, released amount, Statement Product Price, native
+  signed components with batch/file/source-row provenance, and explicit
+  missing, unmatched, duplicate, or conflicting evidence states. Components
+  remain at their native ORDER/SKU/ADJUSTMENT granularity; no item allocation
+  or Invoice/PDF fallback is inferred.
+- **Invoice PDFs, `Invoice_Orders`, `Invoice_Items`, and PDF-derived fields are
+  permanently deprecated as business-data runtime sources.** They may remain
+  read-only historical comparison/audit data until separately retired. Weekly
+  Billing, Monthly Billing, and the still-legacy financial/product report
+  modules are outside this migration and must not be treated as migration
+  blockers or active-source fallbacks.
+- No Google Sheets write, schema migration, deployment, stage, commit, or push
+  occurred in this integration task. Next independent scope: migrate a report
+  surface to the shared Full Order + committed Statement read contract.
 
 ### SHOPEE_MY_CLOSING_PHASE_1 - MY-01 IMPLEMENTED / TESTED / PUSHED; MY-02 AUDITED
 
@@ -23,10 +58,10 @@ InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived
   multiply reporting orders or amounts; duplicate equal payout rows collapse to
   one date and conflicting payout dates fail closed. A missing Statement match
   remains unknown/unreleased with no Invoice/PDF date fallback.
-- Current Payout Product Summary financial/product calculation remains canonical
-  `Invoice_Orders` + `Invoice_Items`; the broader Statement + Full Order Current
-  + Product Master migration remains pending. Live Analysis financial-layout and
-  amount calculations likewise remain unchanged in this phase.
+- The retained Payout Product Summary and Live Analysis financial-layout code
+  still contains legacy Invoice/PDF reads. It is historical compatibility code,
+  not an approved active-source fallback; migration to Full Order + committed
+  Statement remains an independent follow-up task.
 - **MY-02 audit:** the active 808-order warning is caused by
   `shopee_full_order_reconciliation.py` producing the legacy compatibility
   layout `FULL_ORDER_STATEMENT_PROVED`; Live Analysis deliberately recognizes

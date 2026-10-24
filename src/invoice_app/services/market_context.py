@@ -56,7 +56,12 @@ SHOPEE_MY = MarketContext(
     statement_commit_available=True,
     weekly_billing_available=True,
     statement_source_contract="shopee_my",
-    statement_order_existence_gate=False,
+    # MY and SG share the active native-period Statement contract.  Full Order
+    # Current proves only the exact market/order identity; Statement retains
+    # its own immutable settlement facts without PDF, Invoice, Product Master,
+    # or item-allocation gates.
+    statement_order_existence_gate=True,
+    statement_semantic_overlap_dedupe=True,
 )
 
 SHOPEE_SG = MarketContext(

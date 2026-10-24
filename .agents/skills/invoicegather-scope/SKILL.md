@@ -80,6 +80,14 @@ Statement + Full Order Current + market-scoped Product Master
   fee, voucher, shipping, and adjustment financial components.
 - The only active cross-source order join is exact `(market, order_id)`.  No
   cross-market, name-only, or fallback-to-MY join is allowed.
+- **MY and SG use the same native any-period Statement model.** A valid native
+  Statement retains its actual source `period_start` / `period_end`, including
+  irregular or cross-month periods. The active gate is exact market-scoped Full
+  Order Current order existence plus Statement-internal controls, immutable
+  batch/file provenance, semantic overlap dedupe/conflict protection, atomic
+  write/readback, and currency isolation. It must not require weekly/monthly
+  calendar boundaries, Invoice/PDF coverage, Product Master evidence, SKU/item
+  allocation, or legacy financial-layout classification.
 
 ### Product Summary and reconciliation — Locked
 
@@ -99,10 +107,13 @@ Statement + Full Order Current + market-scoped Product Master
 
 ### Legacy PDF boundary and explicitly superseded rules — Locked
 
-PDF parsing, `Invoice_Orders`, and `Invoice_Items` remain legacy historical and
-audit evidence.  Preserve their parsers, tables, rows, and provenance; this
-architecture decision does not authorize deletion, migration, or rewrite.
-Their absence must not block the active Shopee MY/SG flow.
+PDF parsing, `Invoice_Orders`, and `Invoice_Items` are permanently deprecated
+as business-data runtime sources. Preserve their parsers, tables, rows, and
+provenance only for read-only historical comparison/audit; this decision does
+not authorize deletion, migration, or rewrite. They must never be an active
+runtime source, fallback, eligibility gate, or substitute for missing Full
+Order/Statement financial evidence. Their absence must not block the active
+Shopee MY/SG flow.
 
 The following former active-flow requirements are superseded:
 

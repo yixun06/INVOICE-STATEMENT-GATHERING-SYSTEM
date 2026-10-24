@@ -41,10 +41,14 @@ def test_market_registry_preserves_my_identity_and_reserves_sg_identity():
     assert SHOPEE_MY.persisted_platform == "Shopee"
     assert SHOPEE_MY.currency_code == "MYR"
     assert SHOPEE_MY.currency_display == "RM"
+    assert SHOPEE_MY.statement_order_existence_gate is True
+    assert SHOPEE_MY.statement_semantic_overlap_dedupe is True
     assert SHOPEE_SG.display_name == "Shopee SG"
     assert SHOPEE_SG.persisted_platform == "Shopee SG"
     assert SHOPEE_SG.currency_code == "SGD"
     assert SHOPEE_SG.currency_display == "SGD"
+    assert SHOPEE_SG.statement_order_existence_gate is True
+    assert SHOPEE_SG.statement_semantic_overlap_dedupe is True
     assert SHOPEE_MY.cross_platform_eligible is True
     assert SHOPEE_SG.cross_platform_eligible is True
     assert BILLING_PLATFORM_OPTIONS == ("Shopee MY", "Shopee SG", "Lazada", "TikTok")

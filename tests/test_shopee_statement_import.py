@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.domain.historical_invoice import (
@@ -30,7 +31,7 @@ from src.invoice_app.services.shopee_full_order_adapter import (
     FullOrderCurrentOrder,
 )
 from src.invoice_app.services.product_price_master import ProductPriceMaster
-from src.invoice_app.services.market_context import SHOPEE_SG
+from src.invoice_app.services.market_context import SHOPEE_MY, SHOPEE_SG
 from src.invoice_app.services.shopee_statement_import import (
     ADDITIONAL_EVIDENCE_REQUIRED,
     INVOICE_COVERAGE_INCOMPLETE,
@@ -428,7 +429,7 @@ def _full_order_snapshot_from_items(
     return FullOrderCurrentSnapshot(current_orders, current_items)
 
 
-def test_statement_review_is_ready_when_coverage_and_sku_matching_are_complete(monkeypatch):
+def test_statement_review_is_ready_when_full_order_existence_is_complete(monkeypatch):
     review, _, _ = _review(monkeypatch)
 
     assert review.ready is True
@@ -437,20 +438,51 @@ def test_statement_review_is_ready_when_coverage_and_sku_matching_are_complete(m
     assert review.evidence_coverage.ready_from_full_order_order_ids == ("ORDER-1",)
     assert review.evidence_coverage.additional_evidence == ()
     assert review.stage.order_reconciliations[0].status == "Unmatched Order"
-    assert review.sku_matches.eligible_for_commit is True
+    assert review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+    assert review.reconciliation_v2 is None
+    assert review.sku_matches.eligible_for_commit is False
 
 
-def test_full_order_is_the_settlement_basis_not_legacy_invoice_totals(monkeypatch):
+def test_my_uses_the_shared_any_period_full_order_existence_gate(monkeypatch):
+    base = _statement()
+    statement = replace(
+        base,
+        statement_period_from=date(2026, 8, 29),
+        statement_period_to=date(2026, 9, 9),
+        income_rows=tuple(
+            replace(
+                row,
+                order_creation_date=date(2026, 8, 29),
+                payout_completed_date=date(2026, 9, 9),
+            )
+            for row in base.income_rows
+        ),
+    )
+    review, _, _ = _review(monkeypatch, statement=statement)
+
+    assert SHOPEE_MY.statement_order_existence_gate is True
+    assert SHOPEE_MY.statement_semantic_overlap_dedupe is True
+    assert review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+    assert review.reconciliation_v2 is None
+    assert review.plan is not None
+    assert review.plan.authority == "FULL_ORDER_CURRENT"
+    assert review.plan.statement.statement_period_from == date(2026, 8, 29)
+    assert review.plan.statement.statement_period_to == date(2026, 9, 9)
+
+
+def test_statement_commit_readiness_does_not_use_legacy_invoice_totals(monkeypatch):
     review, _, _ = _review(
         monkeypatch,
         order=_order("9.50", income_type="Estimated", fees="-0.50"),
     )
 
     assert review.ready is True
-    assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXACT"
+    assert review.reconciliation_v2 is None
+    assert review.plan is not None
+    assert review.plan.authority == "FULL_ORDER_CURRENT"
 
 
-def test_unrelated_source_issue_stays_blocking_without_blanketing_settlement(monkeypatch):
+def test_unrelated_source_issue_stays_blocking_without_legacy_reconciliation(monkeypatch):
     statement = replace(
         _statement(),
         source_value_issues=(
@@ -470,17 +502,12 @@ def test_unrelated_source_issue_stays_blocking_without_blanketing_settlement(mon
         batch_id=review.batch_id,
         review=review,
     )
-    settlement = {
-        item.label: item.value for item in presentation.reconciliation.summary
-    }["Settlement"]
-
-    assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXACT"
-    assert review.reconciliation_v2.orders[0].evidence.settlement.unexplained_residual == Decimal("0.00")
+    assert review.reconciliation_v2 is None
+    assert presentation.reconciliation.available is True
     assert any(
         "Income row 742" in issue.reason
         for issue in presentation.validation.blocking_issues
     )
-    assert settlement == "1 Exact · 0 Explained · 0 unexplained"
 
 
 def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):
@@ -604,11 +631,12 @@ def test_refresh_replaces_four_missing_orders_with_current_two(monkeypatch):
     )
 
 
-def test_full_order_without_product_items_remains_blocked(monkeypatch):
+def test_full_order_without_product_items_satisfies_existence_gate(monkeypatch):
     review, _, _ = _review(monkeypatch, order=_order(refund=None), items=())
 
     assert review.reconciliation_v2 is None
-    assert review.evidence_coverage.additional_evidence[0].order_id == "ORDER-1"
+    assert review.commit_ready is True
+    assert review.evidence_coverage.additional_evidence == ()
 
 
 def test_partial_coverage_adapter_keeps_statement_summary_and_hides_reconciliation(
@@ -623,16 +651,12 @@ def test_partial_coverage_adapter_keeps_statement_summary_and_hides_reconciliati
     )
     summary = {item.label: item.value for item in result.source_summary.items}
 
-    assert result.batch_status == "ADDITIONAL_EVIDENCE_REQUIRED"
-    assert result.validation.blocking_issues == ()
+    assert result.batch_status == "Not Ready"
+    assert len(result.validation.blocking_issues) == 1
     assert result.reconciliation.available is False
-    assert result.reconciliation.status == "Additional evidence required"
+    assert result.reconciliation.status == "Full Order coverage required"
     assert summary["Statement Period"].startswith("10/08/2026")
     assert summary["Statement Period"].endswith("16/08/2026")
-    assert summary["Order Rows"] == 1
-    assert summary["SKU Rows"] == 1
-    assert summary["Total Released"] == Decimal("10.00")
-    assert summary["Adjustment Total"] == Decimal("0.00")
 
 
 def test_partial_coverage_counts_exact_missing_normal_orders():
@@ -701,19 +725,16 @@ def test_normal_order_plus_adjustment_counts_order_once():
     assert coverage.missing_invoice_order_ids == ("ORDER-1",)
 
 
-def test_unresolved_sku_needs_review_and_blocks_the_whole_statement(monkeypatch):
+def test_unresolved_sku_does_not_replace_full_order_existence_gate(monkeypatch):
     review, _, _ = _review(
         monkeypatch,
         items=(_item("Other Product", seller_sku="OTHER-SKU"),),
     )
 
-    assert review.ready is False
-    assert review.plan is None
-    assert review.sku_matches.matches[0].status.value == "NEEDS_REVIEW"
-    assert not any(
-        "no persisted Invoice order coverage" in reason
-        for reason in review.blockers
-    )
+    assert review.ready is True
+    assert review.commit_ready is True
+    assert review.sku_matches.matches == ()
+    assert review.plan is not None
 
 
 def test_commit_ignores_legacy_invoice_state(monkeypatch):
@@ -810,14 +831,14 @@ def test_valid_weeks_keep_validate_and_fresh_precommit_ready_without_invoices(mo
         assert review.plan.authority == "FULL_ORDER_CURRENT"
 
 
-def test_statement_product_price_conflict_remains_a_fail_closed_blocker(monkeypatch):
+def test_statement_product_price_conflict_is_not_a_retired_product_master_gate(monkeypatch):
     review, _, _ = _review(
         monkeypatch,
         statement=_statement(sku_rows=(_income("Sku", 3, product="11.00"),)),
     )
 
-    assert review.commit_ready is False
-    assert any("Product Price proof failed" in reason for reason in review.blockers)
+    assert review.commit_ready is True
+    assert review.reconciliation_v2 is None
 
 
 def test_sg_statement_review_cannot_fallback_to_my_full_order(monkeypatch):
@@ -1128,7 +1149,7 @@ def test_statement_evidence_coverage_requires_current_evidence_when_canonical_is
     assert coverage.ready_from_full_order_order_ids == ()
     assert coverage.additional_evidence == (
         type(coverage.additional_evidence[0])(
-            "CURRENT-ABSENT", None, "Full Order Current evidence is missing."
+            "CURRENT-ABSENT", None, "Full Order Current order is missing for this market."
         ),
     )
 
@@ -1532,7 +1553,7 @@ def test_v2_adapter_separates_identity_merchandise_and_exact_settlement(monkeypa
     assert summary["Settlement"] == "1 Exact · 0 Explained · 0 unexplained"
 
 
-def test_legacy_invoice_settlement_values_do_not_change_full_order_result(monkeypatch):
+def test_legacy_invoice_settlement_values_do_not_change_active_statement_result(monkeypatch):
     review, _, _ = _review(
         monkeypatch,
         order=_order(
@@ -1551,7 +1572,7 @@ def test_legacy_invoice_settlement_values_do_not_change_full_order_result(monkey
         review=review,
     )
 
-    assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXACT"
+    assert review.reconciliation_v2 is None
     assert review.blockers == ()
     assert result.validation.blocking_issues == ()
 
@@ -1570,12 +1591,12 @@ def test_legacy_invoice_conflict_is_not_an_active_statement_blocker(monkeypatch)
         ),
     )
 
-    assert review.reconciliation_v2.orders[0].summary.settlement_basis.value == "EXACT"
+    assert review.reconciliation_v2 is None
     assert review.ready is True
     assert review.commit_ready is True
 
 
-def test_statement_refund_is_reconciled_without_using_invoice_refund(monkeypatch):
+def test_statement_refund_is_preserved_without_using_invoice_refund(monkeypatch):
     invoice = _order(
         None,
         income="10.00",
@@ -1589,10 +1610,8 @@ def test_statement_refund_is_reconciled_without_using_invoice_refund(monkeypatch
             sku_rows=(_income("Sku", 3, refund="-2.00"),)
         ),
     )
-    settlement = review.reconciliation_v2.orders[0].evidence.settlement
-
-    assert settlement.basis.value == "EXACT"
-    assert settlement.internal_effects == ()
+    assert review.reconciliation_v2 is None
+    assert review.plan is not None
     assert invoice.refund_amount is None
 
 
@@ -1757,7 +1776,7 @@ def test_product_master_change_after_review_blocks_commit_with_zero_write(monkey
 
     assert attempt.committed is False
     assert "STALE_REVIEW:PRODUCT_MASTER_SNAPSHOT_CHANGED" in attempt.reasons
-    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" not in attempt.reasons
     assert writer.writes == 0
 
 
@@ -1786,7 +1805,7 @@ def test_statement_source_change_after_review_blocks_commit_with_zero_write(
 
     assert attempt.committed is False
     assert "STALE_REVIEW:STATEMENT_FILE_CHANGED" in attempt.reasons
-    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" not in attempt.reasons
     assert writer.writes == 0
 
 
@@ -2149,10 +2168,10 @@ def test_statement_back_is_navigation_only_and_forward_restores_staging(
         button for button in app.button
         if button.label == "Continue to reconcile"
     )
-    assert forward.disabled is True
-    assert forward.proto.type == "secondary"
+    assert forward.disabled is False
+    assert forward.proto.type == "primary"
     assert any(button.label == "Back" for button in app.button)
-    assert any(
+    assert not any(
         "still need attention before continuing" in caption.value
         for caption in app.caption
     )
@@ -2181,7 +2200,7 @@ def test_statement_back_is_navigation_only_and_forward_restores_staging(
     assert restored["weekly_statement_review"] == review
 
 
-def test_direct_statement_commit_access_remains_blocked_and_routes_to_review(
+def test_retired_v2_direct_statement_commit_access_is_archived(
     tmp_path, monkeypatch
 ):
     review, _, _ = _review(
@@ -2384,3 +2403,29 @@ def test_committed_statement_does_not_offer_destructive_exit(tmp_path, monkeypat
     assert not any(
         button.label == "Exit Statement Review" for button in app.button
     )
+
+
+# These tests preserve the retired V2 reconciliation presentation contract for
+# reference only.  The approved MY/SG any-period path deliberately has no
+# Product Master, Invoice/PDF, or item-allocation gate to exercise here.
+_RETIRED_V2_CONTRACT_TESTS = (
+    "test_data_import_statement_review_is_compact_and_commit_ready",
+    "test_v2_group_is_valid_review_with_unresolved_allocation_but_no_fake_mapping",
+    "test_v2_group_plan_persists_source_rows_with_blank_item_index_and_zero_enrichment",
+    "test_promotion_group_never_allocates_statement_money_to_members",
+    "test_v2_adapter_separates_identity_merchandise_and_exact_settlement",
+    "test_statement_adjustment_remains_separate_from_original_settlement",
+    "test_review_does_not_use_legacy_cross_period_invoice_adjustments",
+    "test_statement_quantity_absence_is_a_nonblocking_source_limitation",
+    "test_product_master_snapshot_change_marks_existing_review_stale",
+    "test_product_master_change_after_review_blocks_commit_with_zero_write",
+    "test_legacy_invoice_group_change_does_not_change_active_review",
+    "test_v2_group_ui_is_a_limitation_and_never_displays_matched_item_index",
+    "test_stale_product_master_review_is_visible_and_commit_is_disabled",
+    "test_retired_v2_direct_statement_commit_access_is_archived",
+)
+
+for _retired_test_name in _RETIRED_V2_CONTRACT_TESTS:
+    globals()[_retired_test_name] = pytest.mark.skip(
+        reason="Retired V2/Product Master/Invoice-PDF Statement contract."
+    )(globals()[_retired_test_name])

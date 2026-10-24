@@ -70,6 +70,46 @@ class StatementWriteVerification(Enum):
     MIXED = "MIXED"
 
 
+@dataclass(frozen=True)
+class CommittedStatementOrderFact:
+    """One committed native ORDER settlement fact for the writer's market."""
+
+    order_id: str
+    payout_completed_date: date | None
+    total_released_amount: Decimal | None
+    statement_product_price: Decimal | None
+    statement_batch_id: str
+    statement_file_hash: str
+    statement_period_from: date | None
+    statement_period_to: date | None
+    source_row_number: int
+
+
+@dataclass(frozen=True)
+class CommittedStatementFinancialComponentFact:
+    """One committed native component row, kept at its source granularity."""
+
+    record_type: str
+    order_id: str | None
+    component_name: str
+    component_amount: Decimal
+    statement_batch_id: str
+    statement_file_hash: str
+    statement_source_sheet: str
+    statement_source_row_number: int
+    sequence_no: str
+    payout_completed_date: date | None
+
+
+@dataclass(frozen=True)
+class CommittedStatementFinancialFacts:
+    """Read-only committed Statement facts for one market-locked writer."""
+
+    platform: str
+    order_facts: tuple[CommittedStatementOrderFact, ...]
+    financial_components: tuple[CommittedStatementFinancialComponentFact, ...]
+
+
 class GoogleStatementGateway(Protocol):
     def read_tabs(
         self, spreadsheet_id: str, tabs: Sequence[str]
@@ -185,6 +225,32 @@ class GoogleSheetsStatementWriter:
     def reload_active_commit_state(self) -> StatementCommitState:
         """Read only Statement-owned persistence for the active MY/SG flow."""
         return self._read_active_snapshot().commit_state
+
+    @property
+    def persisted_platform(self) -> str:
+        """The one market destination locked into this writer instance."""
+
+        return self._persisted_platform
+
+    def read_committed_financial_facts(self) -> CommittedStatementFinancialFacts:
+        """Read committed native ORDER and component facts without Invoice tabs.
+
+        This is the shared downstream read boundary.  It intentionally keeps
+        components at their native source granularity; callers must not sum
+        SKU-level facts into order-level amounts or allocate them to Full Order
+        items without separately approved source evidence.
+        """
+
+        snapshot = self._read_active_snapshot()
+        return CommittedStatementFinancialFacts(
+            platform=self._persisted_platform,
+            order_facts=_committed_statement_order_facts(
+                snapshot.statement_rows, self._persisted_platform
+            ),
+            financial_components=_committed_statement_financial_component_facts(
+                snapshot.financial_component_rows, self._persisted_platform
+            ),
+        )
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Build one complete batch and verify the deterministic final state."""
@@ -761,6 +827,101 @@ def _committed_order_settlement_evidence(
             )
         )
     return tuple(evidence)
+
+
+def _committed_statement_order_facts(
+    rows: Sequence[_StatementTarget], persisted_platform: str
+) -> tuple[CommittedStatementOrderFact, ...]:
+    """Deserialize committed ORDER rows for downstream financial reads."""
+
+    positions = {header: index for index, header in enumerate(STATEMENT_DATA_HEADERS)}
+    facts: list[CommittedStatementOrderFact] = []
+    for target in rows:
+        values = target.values
+        if (
+            _text(values[positions["validation_status"]]) != "PASSED"
+            or _text(values[positions["commit_status"]]) != "COMMITTED"
+            or _text(values[positions["record_type"]]) != "ORDER"
+            or _text(values[positions["platform"]]) != persisted_platform
+        ):
+            continue
+        facts.append(
+            CommittedStatementOrderFact(
+                order_id=_required_text(values[positions["order_id"]], "order_id"),
+                payout_completed_date=_optional_statement_date(
+                    values[positions["payout_completed_date"]], "payout_completed_date"
+                ),
+                total_released_amount=_optional_statement_decimal(
+                    values[positions["total_released_amount"]], "total_released_amount"
+                ),
+                statement_product_price=_optional_statement_decimal(
+                    values[positions["statement_product_price"]], "statement_product_price"
+                ),
+                statement_batch_id=_required_text(
+                    values[positions["statement_batch_id"]], "statement_batch_id"
+                ),
+                statement_file_hash=_required_text(
+                    values[positions["statement_file_hash"]], "statement_file_hash"
+                ),
+                statement_period_from=_optional_statement_date(
+                    values[positions["statement_period_from"]], "statement_period_from"
+                ),
+                statement_period_to=_optional_statement_date(
+                    values[positions["statement_period_to"]], "statement_period_to"
+                ),
+                source_row_number=_statement_source_row_number(
+                    values[positions["statement_source_row_number"]]
+                ),
+            )
+        )
+    return tuple(facts)
+
+
+def _committed_statement_financial_component_facts(
+    rows: Sequence[_FinancialComponentTarget], persisted_platform: str
+) -> tuple[CommittedStatementFinancialComponentFact, ...]:
+    """Deserialize committed components without changing their source scope."""
+
+    positions = {
+        header: index for index, header in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    facts: list[CommittedStatementFinancialComponentFact] = []
+    for target in rows:
+        values = target.values
+        if (
+            _text(values[positions["commit_status"]]) != "COMMITTED"
+            or _text(values[positions["platform"]]) != persisted_platform
+        ):
+            continue
+        facts.append(
+            CommittedStatementFinancialComponentFact(
+                record_type=_required_text(values[positions["record_type"]], "record_type"),
+                order_id=_text(values[positions["order_id"]]) or None,
+                component_name=_required_text(
+                    values[positions["component_name"]], "component_name"
+                ),
+                component_amount=_required_statement_decimal(
+                    values[positions["component_amount"]], "component_amount"
+                ),
+                statement_batch_id=_required_text(
+                    values[positions["statement_batch_id"]], "statement_batch_id"
+                ),
+                statement_file_hash=_required_text(
+                    values[positions["statement_file_hash"]], "statement_file_hash"
+                ),
+                statement_source_sheet=_required_text(
+                    values[positions["statement_source_sheet"]], "statement_source_sheet"
+                ),
+                statement_source_row_number=_statement_source_row_number(
+                    values[positions["statement_source_row_number"]]
+                ),
+                sequence_no=_required_text(values[positions["sequence_no"]], "sequence_no"),
+                payout_completed_date=_optional_statement_date(
+                    values[positions["payout_completed_date"]], "payout_completed_date"
+                ),
+            )
+        )
+    return tuple(facts)
 
 
 def _append_row_index(rows: Sequence[Sequence[Any]]) -> int:
@@ -1729,6 +1890,49 @@ def _date(value: Any, field: str) -> date:
         return date.fromisoformat(text)
     except ValueError as error:
         raise StatementCommitBlocked(f"Statement_Data has invalid {field}.") from error
+
+
+def _optional_statement_date(value: Any, field: str) -> date | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as error:
+        raise StatementCommitBlocked(f"Statement_Data has invalid {field}.") from error
+
+
+def _required_statement_decimal(value: Any, field: str) -> Decimal:
+    text = _required_text(value, field)
+    try:
+        return Decimal(text)
+    except InvalidOperation as error:
+        raise StatementCommitBlocked(f"Statement_Data has invalid {field}.") from error
+
+
+def _optional_statement_decimal(value: Any, field: str) -> Decimal | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation as error:
+        raise StatementCommitBlocked(f"Statement_Data has invalid {field}.") from error
+
+
+def _statement_source_row_number(value: Any) -> int:
+    text = _required_text(value, "statement_source_row_number")
+    try:
+        number = int(text)
+    except ValueError as error:
+        raise StatementCommitBlocked(
+            "Statement_Data has invalid statement_source_row_number."
+        ) from error
+    if number < 1:
+        raise StatementCommitBlocked(
+            "Statement_Data has invalid statement_source_row_number."
+        )
+    return number
 
 
 def _required_text(value: Any, field: str) -> str:

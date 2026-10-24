@@ -303,6 +303,28 @@ def _commit(gateway, plan, *, lock=None):
     )
 
 
+def test_committed_financial_read_returns_only_native_statement_facts():
+    gateway = InMemoryStatementGateway()
+    writer = GoogleSheetsStatementWriter(spreadsheet_id="synthetic-sheet", gateway=gateway)
+
+    writer.write_statement_batch(_plan())
+    facts = writer.read_committed_financial_facts()
+
+    assert facts.platform == "Shopee"
+    assert len(facts.order_facts) == 1
+    order = facts.order_facts[0]
+    assert order.order_id == "ORDER-1"
+    assert order.payout_completed_date == date(2026, 8, 8)
+    assert order.total_released_amount == Decimal("10.00")
+    assert order.statement_product_price == Decimal("10.00")
+    assert {component.record_type for component in facts.financial_components} == {
+        "ORDER", "SKU"
+    }
+    assert {component.component_name for component in facts.financial_components} == {
+        "Product Price", "Refund Amount"
+    }
+
+
 def _row_values(gateway, tab, row=1):
     headers = INVOICE_ORDERS_HEADERS if tab == INVOICE_ORDERS_TAB else INVOICE_ITEMS_HEADERS
     values = gateway.tabs[tab][row]
