@@ -159,7 +159,11 @@ def adapt_shopee_full_order(
                 continue
             resolved_sku = lookup.matched_sku or lookup.matched_parent_sku or ""
             unit_price = _full_order_unit_price(lookup)
-            if not resolved_sku or not lookup.nav_code or unit_price is None:
+            if (
+                (parsed.market.key is not MarketKey.SHOPEE_SG and not resolved_sku)
+                or not lookup.nav_code
+                or unit_price is None
+            ):
                 issues.append(
                     FullOrderValidationIssue(
                         PM_ENRICHMENT_REQUIRED,
@@ -225,6 +229,17 @@ def _resolve_product(
     *,
     market: MarketKey,
 ) -> tuple[ProductPriceLookupResult | None, str]:
+    if market is MarketKey.SHOPEE_SG:
+        result = product_master.lookup_sg_full_order(
+            seller_sku=row.seller_sku,
+            product_name=row.product_name,
+            variation_name=row.variation,
+        )
+        if result.status in _MATCHED_STATUSES and len(result.source_rows) == 1:
+            return result, ""
+        if result.status in _MATCHED_STATUSES:
+            return None, "Shopee SG Product Master resolution must identify exactly one Listing row."
+        return None, result.reason or "Shopee SG Product Master identity is unresolved."
     result = product_master.lookup_full_order(
         seller_sku=row.seller_sku,
         parent_sku=row.parent_sku,

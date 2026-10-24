@@ -88,6 +88,7 @@ from ..services.workflow_navigation import (
 from ..services.data_import_state import (
     INVOICE_UPLOAD_ATTEMPT_KEY as _INVOICE_UPLOAD_ATTEMPT_KEY,
     INVOICE_UPLOAD_UNRESOLVED as _UNRESOLVED_INVOICE_UPLOAD_ATTEMPTS,
+    begin_next_full_order_upload,
     clear_statement_upload_attempt,
     invoice_upload_downstream_eligibility,
     mark_statement_review_stale_after_invoice_commit,
@@ -111,7 +112,10 @@ from ..services.shopee_statement_persistence import (
 )
 from ..services.shopee_full_order_import import (
     ShopeeFullOrderImportReview,
+    ShopeeFullOrderMarketMismatch,
     commit_shopee_full_order_review,
+    refresh_shopee_full_order_review,
+    inspect_shopee_full_order_upload,
     review_shopee_full_order_upload,
 )
 from ..services.shopee_full_order_reconciliation import (
@@ -261,6 +265,7 @@ _WORKFLOW_KEYS = (
     "monthly_statement_commit_result",
     "monthly_statement_uploader_version",
     "full_order_review",
+    "full_order_market_mismatch",
     "full_order_sync_result",
     "full_order_uploader_version",
     "uat2_historical_commit_entries",
@@ -648,6 +653,14 @@ def _normalize_step_for_source(state: MutableMapping[str, Any]) -> int:
         max(requested_step, 1),
         _max_internal_step_for_source(state.get("import_source_type")),
     )
+    if (
+        state.get("import_source_type") == SHOPEE_FULL_ORDER_LIST
+        and step >= 3
+        and not isinstance(state.get("full_order_review"), ShopeeFullOrderImportReview)
+    ):
+        # A presentation step alone is never proof that a Full Order upload was
+        # validated.  Return to Upload rather than showing a stale completion.
+        step = 2
     state["data_import_step"] = step
     return step
 
@@ -790,7 +803,14 @@ def _render_upload_step(
 def _render_full_order_upload(platform: DataImportPlatform) -> None:
     st.subheader("Upload Shopee Full Order List")
     st.caption("Upload one native Shopee Full Order List workbook (.xlsx).")
+    refresh_notice = st.session_state.pop("full_order_pm_refresh_notice", None)
+    if refresh_notice:
+        st.success(refresh_notice, icon=":material/check_circle:")
     review = _full_order_review()
+    mismatch = _full_order_market_mismatch()
+    if mismatch is not None:
+        _render_full_order_market_mismatch(platform, mismatch)
+        return
     if review is not None:
         st.info(
             f"Validated Full Order source: {review.parsed.source_filename}.",
@@ -806,16 +826,49 @@ def _render_full_order_upload(platform: DataImportPlatform) -> None:
                 _set_step(3)
                 st.rerun()
             if st.button(
+                "Refresh PM & Revalidate",
+                icon=":material/refresh:",
+                key="full_order_refresh_pm",
+            ):
+                begin_workflow_activity(st.session_state, "Revalidating")
+                try:
+                    context = review.parsed.market
+                    clear_product_master_source_cache()
+                    settings = configured_uat2_data_settings(
+                        context, require_explicit_context=True
+                    )
+                    master, source_label = load_configured_product_price_master(context)
+                    refreshed = refresh_shopee_full_order_review(
+                        review,
+                        product_master=master,
+                        repository=settings.create_full_order_current_repository(),
+                    )
+                except (
+                    ValueError,
+                    HistoricalInvoiceStorageError,
+                    MarketConfigurationUnavailable,
+                    ProductMasterSourceError,
+                ) as error:
+                    st.error(
+                        f"Full Order Product Master refresh failed: {error}. "
+                        "The previous validation was kept.",
+                        icon=":material/error:",
+                    )
+                else:
+                    st.session_state.full_order_review = refreshed
+                    st.session_state.pop("full_order_sync_result", None)
+                    st.session_state.full_order_pm_refresh_notice = (
+                        f"Revalidated Full Order source from {source_label}."
+                    )
+                    st.rerun()
+                finally:
+                    end_workflow_activity(st.session_state)
+            if st.button(
                 "Clear staged source",
                 icon=":material/close:",
                 key="full_order_clear_staged",
             ):
-                st.session_state.pop("full_order_review", None)
-                st.session_state.pop("full_order_sync_result", None)
-                st.session_state.full_order_uploader_version = int(
-                    st.session_state.get("full_order_uploader_version", 0)
-                ) + 1
-                st.session_state.pop("batch_id", None)
+                begin_next_full_order_upload(st.session_state)
                 st.rerun()
         return
     version = int(st.session_state.get("full_order_uploader_version", 0))
@@ -847,21 +900,20 @@ def _render_full_order_upload(platform: DataImportPlatform) -> None:
             return
         begin_workflow_activity(st.session_state, "Validating")
         try:
-            settings = configured_uat2_data_settings(platform.market_context)
-            master, _source_label = load_configured_product_price_master(
-                platform.market_context
-            )
-            review = review_shopee_full_order_upload(
-                uploaded_file,
-                source_filename=uploaded_file.name,
-                market=platform.market_context,
-                product_master=master,
-                repository=settings.create_full_order_current_repository(),
+            review = _review_full_order_source(
+                uploaded_file, uploaded_file.name, platform.market_context
             )
             st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
             st.session_state.full_order_review = review
             st.session_state.pop("full_order_sync_result", None)
-        except (ValueError, HistoricalInvoiceStorageError, ProductMasterSourceError) as error:
+        except ShopeeFullOrderMarketMismatch as error:
+            st.session_state["full_order_market_mismatch"] = error
+        except (
+            ValueError,
+            HistoricalInvoiceStorageError,
+            MarketConfigurationUnavailable,
+            ProductMasterSourceError,
+        ) as error:
             st.error(f"Full Order validation is unavailable: {error}")
         finally:
             end_workflow_activity(st.session_state)
@@ -870,6 +922,100 @@ def _render_full_order_upload(platform: DataImportPlatform) -> None:
             st.rerun()
     if st.button("Back", icon=":material/arrow_back:", key="full_order_upload_back"):
         _set_step(1)
+        st.rerun()
+
+
+def _review_full_order_source(
+    source: Any, source_filename: str, context: MarketContext
+) -> ShopeeFullOrderImportReview:
+    """Validate one source against only its explicitly selected market resources."""
+
+    source_bytes, parsed = inspect_shopee_full_order_upload(
+        source, source_filename=source_filename
+    )
+    if parsed.market != context:
+        raise ShopeeFullOrderMarketMismatch(
+            source_bytes=source_bytes, parsed=parsed, current_market=context
+        )
+    settings = configured_uat2_data_settings(context, require_explicit_context=True)
+    master, _source_label = load_configured_product_price_master(context)
+    return review_shopee_full_order_upload(
+        source,
+        source_filename=source_filename,
+        market=context,
+        product_master=master,
+        repository=settings.create_full_order_current_repository(),
+    )
+
+
+def _full_order_market_mismatch() -> ShopeeFullOrderMarketMismatch | None:
+    mismatch = st.session_state.get("full_order_market_mismatch")
+    return mismatch if isinstance(mismatch, ShopeeFullOrderMarketMismatch) else None
+
+
+def _render_full_order_market_mismatch(
+    platform: DataImportPlatform, mismatch: ShopeeFullOrderMarketMismatch
+) -> None:
+    """Require an explicit market switch before the staged bytes can be reviewed."""
+
+    detected = mismatch.parsed.market
+    st.error(
+        "MARKET_MISMATCH: current market "
+        f"{platform.display_name}; detected source {detected.display_name}."
+    )
+    target = next(
+        (
+            candidate
+            for candidate in DATA_IMPORT_PLATFORMS
+            if candidate.market_context == detected
+        ),
+        None,
+    )
+    if target is None:
+        st.error("Detected Full Order market is not available in Data Import.")
+        return
+    with st.container(horizontal=True):
+        switch_clicked = st.button(
+            f"Switch to {target.display_name} and continue",
+            type="primary",
+            key="full_order_market_mismatch_switch",
+        )
+        cancel_clicked = st.button(
+            "Cancel", key="full_order_market_mismatch_cancel"
+        )
+    if cancel_clicked:
+        st.session_state.pop("full_order_market_mismatch", None)
+        st.session_state.full_order_uploader_version = int(
+            st.session_state.get("full_order_uploader_version", 0)
+        ) + 1
+        st.rerun()
+    if not switch_clicked:
+        return
+    begin_workflow_activity(st.session_state, "Validating")
+    try:
+        review = _review_full_order_source(
+            mismatch.source_bytes,
+            mismatch.parsed.source_filename,
+            detected,
+        )
+        # There is no active batch before this point, so binding the source-owned
+        # target cannot reinterpret an existing MY/SG batch.
+        bind_active_import_platform(st.session_state, target)
+        st.session_state.batch_id = create_batch_id()
+        st.session_state.full_order_review = review
+        st.session_state.pop("full_order_market_mismatch", None)
+        st.session_state.pop("full_order_sync_result", None)
+    except (
+        ValueError,
+        HistoricalInvoiceStorageError,
+        MarketConfigurationUnavailable,
+        ProductMasterSourceError,
+    ) as error:
+        st.error(f"Full Order validation is unavailable: {error}")
+    finally:
+        end_workflow_activity(st.session_state)
+    if _full_order_review() is not None:
+        _set_step(3)
         st.rerun()
 
 
@@ -3839,11 +3985,6 @@ def _render_review_and_commit_step() -> None:
 
 
 def _render_full_order_review_and_sync() -> None:
-    review = _full_order_review()
-    if review is None or not review.ready:
-        st.warning("Full Order validation is not ready to sync.")
-        _render_back_button(3, key="full_order_commit_missing_back")
-        return
     completed = st.session_state.get("full_order_sync_result")
     if completed is not None:
         st.success("Full Order current sync complete.", icon=":material/check_circle:")
@@ -3854,6 +3995,19 @@ def _render_full_order_review_and_sync() -> None:
         st.caption(
             "Canonical Invoice history was not overwritten. Re-uploading the same source creates no duplicates."
         )
+        if st.button(
+            "Upload another Full Order",
+            type="primary",
+            icon=":material/upload_file:",
+            key="full_order_upload_another",
+        ):
+            begin_next_full_order_upload(st.session_state)
+            st.rerun()
+        return
+    review = _full_order_review()
+    if review is None or not review.ready:
+        st.warning("Full Order validation is not ready to sync.")
+        _render_back_button(3, key="full_order_commit_missing_back")
         return
     preview = review.sync_preview
     assert preview is not None
@@ -3885,10 +4039,10 @@ def _render_full_order_review_and_sync() -> None:
         st.rerun()
     if not sync_clicked:
         return
-    context = _active_invoice_market_context()
+    context = _required_persistence_market_context()
     begin_workflow_activity(st.session_state, "Processing")
     try:
-        settings = configured_uat2_data_settings(context)
+        settings = configured_uat2_data_settings(context, require_explicit_context=True)
         result = commit_shopee_full_order_review(
             review,
             load_product_master=lambda: load_configured_product_price_master(context)[0],

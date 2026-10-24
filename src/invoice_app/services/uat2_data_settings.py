@@ -142,19 +142,34 @@ class UAT2DataSettings:
             return self.google_service_account
         if self.google_credentials_path is not None:
             if not self.google_credentials_path.is_file():
-                raise HistoricalInvoiceStorageError("UAT2 Google Sheets credentials file is unavailable.")
+                raise HistoricalInvoiceStorageError(
+                    f"{resolve_market_context(self.market_context).display_name} "
+                    "Google Sheets credentials file is unavailable."
+                )
             return self.google_credentials_path
+        context = resolve_market_context(self.market_context)
+        credential_name = (
+            "INV_SHOPEE_SG_UAT2_GOOGLE_CREDENTIALS_PATH"
+            if context.key is MarketKey.SHOPEE_SG
+            else "INV_UAT2_GOOGLE_CREDENTIALS_PATH"
+        )
         raise HistoricalInvoiceStorageError(
-            "UAT2 Google Sheets credentials are missing; configure "
-            "INV_UAT2_GOOGLE_CREDENTIALS_PATH or uat2_data.google_service_account."
+            f"{context.display_name} Google Sheets credentials are missing; configure "
+            f"{credential_name} or the matching market uat2_data.google_service_account."
         )
 
 
 def configured_uat2_data_settings(
     context: MarketContext | MarketKey | str | None = None,
+    *,
+    require_explicit_context: bool = False,
 ) -> UAT2DataSettings:
     """Resolve one market's persistence settings without cross-market fallback."""
 
+    if context is None and require_explicit_context:
+        raise MarketConfigurationUnavailable(
+            "MISSING_MARKET_CONTEXT: persistence requires an explicit market context."
+        )
     resolved = resolve_market_context(context)
     if resolved.key is MarketKey.SHOPEE_MY:
         values = {

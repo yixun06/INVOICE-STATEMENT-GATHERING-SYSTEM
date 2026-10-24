@@ -14,7 +14,11 @@ from src.invoice_app.repositories.shopee_full_order_current_repository import (
     FullOrderSyncResult,
     ShopeeFullOrderCurrentRepository,
 )
-from src.invoice_app.services.market_context import MarketContext, MarketKey
+from src.invoice_app.services.market_context import (
+    MarketContext,
+    MarketKey,
+    resolve_market_context,
+)
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_full_order_adapter import (
     FullOrderCurrentBatch,
@@ -34,6 +38,40 @@ class ShopeeFullOrderImportReview:
         return self.current_batch.syncable and self.sync_preview is not None
 
 
+class ShopeeFullOrderMarketMismatch(ValueError):
+    """A valid Full Order source belongs to a different explicit market."""
+
+    def __init__(
+        self,
+        *,
+        source_bytes: bytes,
+        parsed: ParsedShopeeFullOrder,
+        current_market: MarketContext,
+    ) -> None:
+        self.source_bytes = source_bytes
+        self.parsed = parsed
+        self.current_market = current_market
+        super().__init__(
+            "MARKET_MISMATCH: current market "
+            f"{current_market.display_name}; detected source "
+            f"{parsed.market.display_name}."
+        )
+
+
+def inspect_shopee_full_order_upload(
+    source: str | Path | bytes | bytearray | BinaryIO,
+    *,
+    source_filename: str,
+) -> tuple[bytes, ParsedShopeeFullOrder]:
+    """Read source-owned market facts before any market-specific dependency."""
+
+    source_bytes = _source_bytes(source)
+    return source_bytes, parse_shopee_full_order(
+        source_bytes,
+        source_filename=source_filename,
+    )
+
+
 def review_shopee_full_order_upload(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
@@ -42,15 +80,36 @@ def review_shopee_full_order_upload(
     product_master: ProductPriceMaster,
     repository: ShopeeFullOrderCurrentRepository,
 ) -> ShopeeFullOrderImportReview:
-    source_bytes = _source_bytes(source)
-    parsed = parse_shopee_full_order(
-        source_bytes,
-        source_filename=source_filename,
-        market=market,
+    expected_market = resolve_market_context(market)
+    source_bytes, parsed = inspect_shopee_full_order_upload(
+        source, source_filename=source_filename
     )
+    if parsed.market != expected_market:
+        raise ShopeeFullOrderMarketMismatch(
+            source_bytes=source_bytes,
+            parsed=parsed,
+            current_market=expected_market,
+        )
     batch = adapt_shopee_full_order(parsed, product_master=product_master)
     preview = repository.classify(batch) if batch.syncable else None
     return ShopeeFullOrderImportReview(source_bytes, parsed, batch, preview)
+
+
+def refresh_shopee_full_order_review(
+    review: ShopeeFullOrderImportReview,
+    *,
+    product_master: ProductPriceMaster,
+    repository: ShopeeFullOrderCurrentRepository,
+) -> ShopeeFullOrderImportReview:
+    """Revalidate one retained Full Order source without any Current-data write."""
+
+    return review_shopee_full_order_upload(
+        review.source_bytes,
+        source_filename=review.parsed.source_filename,
+        market=review.parsed.market,
+        product_master=product_master,
+        repository=repository,
+    )
 
 
 def commit_shopee_full_order_review(

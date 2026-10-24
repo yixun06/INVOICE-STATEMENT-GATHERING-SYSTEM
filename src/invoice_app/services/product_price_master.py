@@ -118,6 +118,10 @@ _NAV_HEADER = "nav code"
 _PRODUCT_ID_HEADER = "product id"
 _USOFT_PRODUCT_DESCRIPTION_HEADER = "usoft product description"
 _UNIT_PRICE_USOLF_HEADER = "unit price usolf"
+_UNIT_PRICE_USOLF_HEADERS = (
+    _UNIT_PRICE_USOLF_HEADER,
+    "unit price based usolf",
+)
 _UOM_HEADER = "uom"
 _REMARK_HEADER = "remark"
 _RESOLVE_SKU_HEADER = "resolved sku"
@@ -400,6 +404,67 @@ class ProductPriceMaster:
         return earlier_ambiguous_result or self._not_found(
             "No normal Product Listing or FULL_ORDER_MATCH_ONLY identity exactly "
             "matches Product Name / Variation."
+        )
+
+    def lookup_sg_full_order(
+        self,
+        *,
+        seller_sku: str | None,
+        product_name: str | None,
+        variation_name: str | None,
+    ) -> ProductPriceLookupResult:
+        """Resolve one SG Listing row from exact name/variation evidence.
+
+        The SG Full Order contract makes normalized Product Name plus Variation
+        the primary identity.  A source Seller SKU can only reduce an already
+        exact name/variation candidate set; it cannot create a match or select
+        a duplicate Listing row.  This path deliberately excludes Parent SKU,
+        price, aliases, and first-row selection.  It includes
+        ``FULL_ORDER_MATCH_ONLY`` rows because those are explicit SG Full Order
+        Listing identities, not a fallback to another market or a heuristic.
+        """
+
+        if not _match_text(product_name):
+            return self._not_found(
+                "Shopee SG Product Name is unavailable for exact Product Name / Variation matching."
+            )
+        candidates = _exact_name_variation(
+            self.records,
+            product_name,
+            variation_name,
+        )
+        if len(candidates) == 1:
+            return self._matched_identity(
+                candidates,
+                status=PriceLookupStatus.MATCHED_BY_NAME_VARIATION,
+                matched_by="sg_exact_name_variation",
+            )
+        if not candidates:
+            return self._not_found(
+                "No Shopee SG Product Listing row exactly matches Product Name / Variation."
+            )
+
+        source_sku = normalize_sku_text(seller_sku)
+        sku_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if source_sku and normalize_sku_text(candidate.seller_sku) == source_sku
+        )
+        if len(sku_candidates) == 1:
+            return self._matched_identity(
+                sku_candidates,
+                status=PriceLookupStatus.MATCHED_BY_SKU_NAME_VARIATION,
+                matched_by="sg_exact_name_variation_sku_disambiguation",
+            )
+        if len(sku_candidates) > 1:
+            return self._conflict(
+                sku_candidates,
+                "Exact Shopee SG Product Name / Variation and Seller SKU still match multiple Listing rows.",
+            )
+        return self._conflict(
+            candidates,
+            "Exact Shopee SG Product Name / Variation matches multiple Listing rows; "
+            "Seller SKU does not deterministically disambiguate one row.",
         )
 
     def _resolve_parent_family_variation(
@@ -748,8 +813,12 @@ def _find_listing_headers(worksheet: Any) -> tuple[int, dict[str, int]]:
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
-            if _UNIT_PRICE_USOLF_HEADER in headers:
-                columns["unit_price_usolf"] = headers[_UNIT_PRICE_USOLF_HEADER]
+            usolf_header = next(
+                (header for header in _UNIT_PRICE_USOLF_HEADERS if header in headers),
+                None,
+            )
+            if usolf_header:
+                columns["unit_price_usolf"] = headers[usolf_header]
             if _UOM_HEADER in headers:
                 columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:

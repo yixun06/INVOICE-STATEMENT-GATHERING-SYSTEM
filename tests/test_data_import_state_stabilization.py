@@ -15,6 +15,7 @@ from src.invoice_app.domain.historical_invoice import (
     InvoiceBundle,
 )
 from src.invoice_app.services.data_import_state import (
+    begin_next_full_order_upload,
     clear_statement_upload_attempt,
     has_unfinished_session_work,
     invoice_upload_downstream_eligibility,
@@ -261,6 +262,34 @@ def test_stale_processing_activity_blocks_then_safe_reset_preserves_staging():
     assert state["uploader_version"] == 5
     assert state["orders"] is orders
     assert state["batch_id"] == "old-ready-batch"
+
+
+def test_begin_next_full_order_upload_discards_only_the_prior_full_order_context():
+    july_review = object()
+    state = {
+        "import_source_type": "Shopee Full Order List",
+        "active_import_platform": "shopee_sg",
+        "active_import_market": "shopee_sg",
+        "data_import_step": 5,
+        "batch_id": "july-batch",
+        "full_order_review": july_review,
+        "full_order_market_mismatch": object(),
+        "full_order_sync_result": object(),
+        "full_order_pm_refresh_notice": "July refreshed",
+        "full_order_uploader_version": 4,
+        "full_order_uploader_4": object(),
+        "workflow_activity": "Processing",
+    }
+
+    begin_next_full_order_upload(state)
+
+    assert state == {
+        "import_source_type": "Shopee Full Order List",
+        "active_import_platform": "shopee_sg",
+        "active_import_market": "shopee_sg",
+        "data_import_step": 2,
+        "full_order_uploader_version": 5,
+    }
 
 
 @pytest.mark.parametrize("attempt", ("failed", "interrupted"))

@@ -76,6 +76,9 @@ def test_unconfigured_sg_persistence_never_falls_back_to_my(monkeypatch, tmp_pat
     from src.invoice_app.services import uat2_data_settings
 
     monkeypatch.setattr(uat2_data_settings, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(
+        uat2_data_settings, "_configured_market_uat2_secret_mapping", lambda _context: {}
+    )
     monkeypatch.setenv("INV_UAT2_DATA_SPREADSHEET_ID", "my-only-sheet")
     for name in (
         "INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID",
@@ -86,6 +89,33 @@ def test_unconfigured_sg_persistence_never_falls_back_to_my(monkeypatch, tmp_pat
 
     with pytest.raises(MarketConfigurationUnavailable, match="Shopee SG persistence is unavailable"):
         configured_uat2_data_settings(SHOPEE_SG)
+
+
+def test_persistence_settings_require_an_explicit_context_when_requested():
+    with pytest.raises(MarketConfigurationUnavailable, match="MISSING_MARKET_CONTEXT"):
+        configured_uat2_data_settings(require_explicit_context=True)
+
+
+def test_configured_persistence_settings_route_my_and_sg_to_distinct_destinations(
+    monkeypatch, tmp_path
+):
+    from src.invoice_app.services import uat2_data_settings
+
+    monkeypatch.setattr(uat2_data_settings, "SECRETS_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(uat2_data_settings, "_configured_uat2_secret_mapping", lambda: {})
+    monkeypatch.setattr(
+        uat2_data_settings, "_configured_market_uat2_secret_mapping", lambda _context: {}
+    )
+    monkeypatch.setenv("INV_UAT2_DATA_SPREADSHEET_ID", "my-destination")
+    monkeypatch.setenv("INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID", "sg-destination")
+
+    my = configured_uat2_data_settings(SHOPEE_MY, require_explicit_context=True)
+    sg = configured_uat2_data_settings(SHOPEE_SG, require_explicit_context=True)
+
+    assert my.google_spreadsheet_id == "my-destination"
+    assert sg.google_spreadsheet_id == "sg-destination"
+    assert my.market_context is SHOPEE_MY
+    assert sg.market_context is SHOPEE_SG
 
 
 @pytest.mark.parametrize("context", (LAZADA, TIKTOK))

@@ -37,8 +37,9 @@ REQUIRED_HEADERS = (
     "Variation Name",
     "Quantity",
     "Product Subtotal",
+    "Country",
 )
-OPTIONAL_HEADERS = ("Return / Refund Status", "Country")
+OPTIONAL_HEADERS = ("Return / Refund Status", "Currency")
 _HEADER_SPACE = re.compile(r"\s+")
 
 
@@ -58,6 +59,8 @@ class ShopeeFullOrderRow:
     quantity: int
     product_subtotal: Decimal
     return_refund_status: str
+    country: str
+    currency: str
     source_row_number: int
 
 
@@ -77,16 +80,13 @@ class ParsedShopeeFullOrder:
 def parse_shopee_full_order(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
-    market: MarketContext | MarketKey | str,
+    market: MarketContext | MarketKey | str | None = None,
     source_filename: str | None = None,
 ) -> ParsedShopeeFullOrder:
     """Parse only the source facts required by Full Order Sync V1."""
 
-    context = resolve_market_context(market)
-    if context.key not in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
-        raise ShopeeFullOrderParseError(
-            f"{context.display_name} is not supported by Shopee Full Order Sync."
-        )
+    # ``market`` is retained only for call compatibility. Country in the workbook
+    # is the source authority and must never be overridden by the UI selection.
     workbook_bytes, filename = _read_source(source, source_filename)
     source_hash = sha256(workbook_bytes).hexdigest()
     if Path(filename).suffix.casefold() != ".xlsx":
@@ -121,6 +121,8 @@ def parse_shopee_full_order(
         workbook.close()
     if not parsed:
         raise ShopeeFullOrderParseError("Shopee Full Order workbook contains no order rows.")
+    context = _detect_source_market(parsed)
+    _validate_currency_evidence(parsed, context)
     return ParsedShopeeFullOrder(
         market=context,
         source_filename=filename,
@@ -205,6 +207,8 @@ def _parse_row(
         quantity=_required_quantity(value("Quantity"), row_number),
         product_subtotal=_required_money(value("Product Subtotal"), row_number),
         return_refund_status=_text(value("Return / Refund Status")),
+        country=_required_text(value("Country"), row_number, "Country").upper(),
+        currency=_text(value("Currency")).upper(),
         source_row_number=row_number,
     )
 
@@ -278,6 +282,39 @@ def _required_text(value: Any, row_number: int, field: str) -> str:
             f"orders row {row_number} has blank {field}."
         )
     return text
+
+
+def _detect_source_market(rows: tuple[ShopeeFullOrderRow, ...]) -> MarketContext:
+    countries = {row.country for row in rows}
+    supported = {"MY": MarketKey.SHOPEE_MY, "SG": MarketKey.SHOPEE_SG}
+    unknown = sorted(countries - set(supported))
+    if unknown:
+        raise ShopeeFullOrderParseError(
+            "UNSUPPORTED_MARKET_FULL_ORDER_COUNTRY: " + ", ".join(unknown)
+        )
+    if len(countries) != 1:
+        raise ShopeeFullOrderParseError(
+            "MIXED_MARKET_FULL_ORDER_SOURCE: Country contains "
+            + ", ".join(sorted(countries))
+        )
+    return resolve_market_context(supported[next(iter(countries))])
+
+
+def _validate_currency_evidence(
+    rows: tuple[ShopeeFullOrderRow, ...], context: MarketContext
+) -> None:
+    currencies = {row.currency for row in rows if row.currency}
+    if not currencies:
+        return
+    accepted = {
+        MarketKey.SHOPEE_MY: {"MYR", "RM"},
+        MarketKey.SHOPEE_SG: {"SGD", "S$", "SINGAPORE DOLLAR"},
+    }[context.key]
+    if not currencies <= accepted:
+        raise ShopeeFullOrderParseError(
+            "FULL_ORDER_CURRENCY_MARKET_MISMATCH: Country "
+            f"{context.key.value} cannot use Currency {', '.join(sorted(currencies))}."
+        )
 
 
 def _normalize_header(value: Any) -> str:

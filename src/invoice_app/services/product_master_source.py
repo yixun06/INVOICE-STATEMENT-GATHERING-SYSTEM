@@ -25,7 +25,7 @@ from .product_price_master import (
     _RESOLVE_SKU_HEADER,
     _REMARK_HEADER,
     _UOM_HEADER,
-    _UNIT_PRICE_USOLF_HEADER,
+    _UNIT_PRICE_USOLF_HEADERS,
     _USOFT_PRODUCT_DESCRIPTION_HEADER,
     _display_text,
     _strict_decimal,
@@ -95,6 +95,7 @@ class GoogleSheetsProductMasterSource:
     values_fetcher: GoogleSheetValuesFetcher | None = None
     unit_price_headers: tuple[str, ...] = ("price",)
     reject_invalid_prices: bool = False
+    allow_blank_sku_identity: bool = False
 
     def load(self) -> ProductMasterSourceLoad:
         rows = tuple(tuple(row) for row in self._fetch_values())
@@ -105,6 +106,7 @@ class GoogleSheetsProductMasterSource:
             rows,
             header_row=header_row,
             columns=columns,
+            allow_blank_sku_identity=self.allow_blank_sku_identity,
         )
         if self.reject_invalid_prices and invalid_prices:
             raise ProductMasterSourceError(
@@ -386,8 +388,16 @@ def _load_configured_product_price_master(
     if sg_context and isinstance(source, GoogleSheetsProductMasterSource):
         source = replace(
             source,
-            unit_price_headers=("price sgd",),
-            reject_invalid_prices=True,
+            # SG Full Order enrichment is defined by the Listing's USOLF price,
+            # never by Price SGD.  The same named source column supplies the
+            # legacy lookup field only to retain the shared immutable record
+            # shape; the adapter persists unit_price_usolf explicitly.
+            unit_price_headers=_UNIT_PRICE_USOLF_HEADERS,
+            reject_invalid_prices=False,
+            # SG Full Order resolves explicit Name + Variation identities.  A
+            # Listing may legitimately omit both SKU columns; uniqueness and
+            # required enrichment fields are still enforced downstream.
+            allow_blank_sku_identity=True,
         )
     loaded = source.load()
     if not hasattr(loaded, "records") or not hasattr(loaded, "metadata"):
@@ -487,8 +497,12 @@ def _find_tabular_listing_headers(
                 columns["usoft_product_description"] = headers[
                     _USOFT_PRODUCT_DESCRIPTION_HEADER
                 ]
-            if _UNIT_PRICE_USOLF_HEADER in headers:
-                columns["unit_price_usolf"] = headers[_UNIT_PRICE_USOLF_HEADER]
+            usolf_header = next(
+                (header for header in _UNIT_PRICE_USOLF_HEADERS if header in headers),
+                None,
+            )
+            if usolf_header:
+                columns["unit_price_usolf"] = headers[usolf_header]
             if _UOM_HEADER in headers:
                 columns["uom"] = headers[_UOM_HEADER]
             if _REMARK_HEADER in headers:
@@ -508,6 +522,7 @@ def _canonical_records_from_rows(
     *,
     header_row: int,
     columns: dict[str, int],
+    allow_blank_sku_identity: bool = False,
 ) -> tuple[tuple[ProductPriceMasterRecord, ...], int, int]:
     records: list[ProductPriceMasterRecord] = []
     candidate_rows = 0
@@ -519,7 +534,7 @@ def _canonical_records_from_rows(
         }
         seller_sku = normalize_sku_text(values["seller_sku"])
         parent_sku = normalize_sku_text(values["parent_sku"])
-        if not seller_sku and not parent_sku:
+        if not seller_sku and not parent_sku and not allow_blank_sku_identity:
             continue
         candidate_rows += 1
         price = _strict_decimal(values["unit_selling_price"])

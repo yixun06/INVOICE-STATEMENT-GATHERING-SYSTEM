@@ -135,6 +135,37 @@ def clear_statement_upload_attempt(state: MutableMapping[str, Any]) -> None:
     end_workflow_activity(state)
 
 
+def begin_next_full_order_upload(state: MutableMapping[str, Any]) -> None:
+    """Atomically discard only the completed/staged Full Order upload context.
+
+    The selected market and Full Order source mode remain bound, so the next
+    native workbook is validated in the same market without retaining a prior
+    review, sync result, batch identifier, or uploader widget value.
+    """
+
+    next_version = int(state.get("full_order_uploader_version", 0)) + 1
+    for key in (
+        "full_order_review",
+        "full_order_market_mismatch",
+        "full_order_sync_result",
+        "full_order_pm_refresh_notice",
+        "batch_id",
+    ):
+        state.pop(key, None)
+    widget_keys = tuple(
+        key
+        for key in state
+        if isinstance(key, str)
+        and key.startswith("full_order_uploader_")
+        and key != "full_order_uploader_version"
+    )
+    for key in widget_keys:
+        state.pop(key, None)
+    state["full_order_uploader_version"] = next_version
+    state["data_import_step"] = 2
+    end_workflow_activity(state)
+
+
 def mark_statement_review_stale_after_invoice_commit(
     state: MutableMapping[str, Any],
 ) -> bool:

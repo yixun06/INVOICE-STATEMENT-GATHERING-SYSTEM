@@ -7,8 +7,12 @@ from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook
+import pytest
 
-from src.invoice_app.parsers.shopee_full_order_parser import parse_shopee_full_order
+from src.invoice_app.parsers.shopee_full_order_parser import (
+    ShopeeFullOrderParseError,
+    parse_shopee_full_order,
+)
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
@@ -27,6 +31,12 @@ from src.invoice_app.services.shopee_full_order_adapter import (
     full_order_snapshot_hash,
 )
 from src.invoice_app.services.market_context import SHOPEE_MY, SHOPEE_SG
+from src.invoice_app.services.shopee_full_order_import import (
+    ShopeeFullOrderMarketMismatch,
+    commit_shopee_full_order_review,
+    refresh_shopee_full_order_review,
+    review_shopee_full_order_upload,
+)
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.domain.statement_reconciliation_v2 import IdentityScope
 from src.invoice_app.services.shopee_full_order_reconciliation import (
@@ -60,14 +70,15 @@ HEADERS = (
     "Variation Name",
     "Quantity",
     "Product Subtotal",
+    "Country",
 )
 
 
-def _workbook_bytes(rows, *, malformed_dimension=False):
+def _workbook_bytes(rows, *, malformed_dimension=False, headers=HEADERS):
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "orders"
-    worksheet.append(HEADERS)
+    worksheet.append(headers)
     for row in rows:
         worksheet.append(row)
     stream = BytesIO()
@@ -98,6 +109,7 @@ def _master(*, nav="5001", resolve_sku=None):
                 "product_name": "Organic Item",
                 "variation_name": "Red",
                 "unit_selling_price": "6.50",
+                "unit_price_usolf": "6.50",
                 "nav_code": nav,
                 "product_id": "PID-1",
                 "resolve_sku": resolve_sku,
@@ -108,6 +120,7 @@ def _master(*, nav="5001", resolve_sku=None):
                 "product_name": "Second Item",
                 "variation_name": "",
                 "unit_selling_price": "4.00",
+                "unit_price_usolf": "4.00",
                 "nav_code": "5002",
                 "product_id": "PID-2",
             },
@@ -128,6 +141,7 @@ def _rows():
             "Red",
             2,
             "10.25",
+            "MY",
         ),
         (
             "ORDER-1",
@@ -140,6 +154,7 @@ def _rows():
             "",
             1,
             "4.00",
+            "MY",
         ),
     ]
 
@@ -163,6 +178,7 @@ def test_same_parser_supports_sg_blank_skus_by_exact_name_variation():
     row = list(_rows()[0])
     row[4] = ""
     row[6] = ""
+    row[-1] = "SG"
     parsed = parse_shopee_full_order(
         _workbook_bytes([row]),
         source_filename="sg-full-order.xlsx",
@@ -181,14 +197,96 @@ def test_same_parser_supports_sg_blank_skus_by_exact_name_variation():
     assert batch.items[0].unit_price == Decimal("6.50")
 
 
-
-def test_sg_full_order_uses_same_row_usolf_and_rejects_price_sgd_fallback():
+def test_sg_unique_blank_listing_sku_persists_as_blank_and_reads_back():
+    row = list(_rows()[0])
+    row[4] = ""
+    row[6] = ""
+    row[-1] = "SG"
     parsed = parse_shopee_full_order(
-        _workbook_bytes([_rows()[0]]),
-        source_filename="sg-full-order.xlsx",
-        market=SHOPEE_SG,
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
     )
-    matched_master = ProductPriceMaster.from_rows(
+    base_master = _master(resolve_sku="2000842")
+    blank_listing_record = replace(
+        base_master.records[0], seller_sku="", parent_sku="", nav_code="2000842",
+        unit_price_usolf=Decimal("9.90"), resolve_sku="2000842",
+    )
+    master = ProductPriceMaster((blank_listing_record,), base_master.metadata)
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="sg-current", gateway=_Gateway())
+    repository.sync(batch)
+
+    assert batch.syncable is True
+    assert batch.items[0].resolved_seller_sku == ""
+    assert batch.items[0].nav == "2000842"
+    assert batch.items[0].unit_price == Decimal("9.90")
+    assert batch.items[0].resolve_sku == "2000842"
+    assert repository.read_snapshot().items[0].resolved_seller_sku == ""
+
+
+def test_full_order_refresh_revalidates_retained_source_with_new_product_master():
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=_Gateway())
+    stale = review_shopee_full_order_upload(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="full-order.xlsx",
+        market=SHOPEE_MY,
+        product_master=ProductPriceMaster.from_rows([]),
+        repository=repository,
+    )
+
+    refreshed = refresh_shopee_full_order_review(
+        stale,
+        product_master=_master(),
+        repository=repository,
+    )
+
+    assert parsed.source_hash == refreshed.parsed.source_hash
+    assert stale.ready is False
+    assert refreshed.ready is True
+
+
+def test_full_order_refresh_failure_does_not_mutate_the_previous_review():
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=_Gateway())
+    review = review_shopee_full_order_upload(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="full-order.xlsx",
+        market=SHOPEE_MY,
+        product_master=_master(),
+        repository=repository,
+    )
+
+    with pytest.raises(ValueError, match="Unreadable or corrupt"):
+        refresh_shopee_full_order_review(
+            replace(review, source_bytes=b"not-an-xlsx"),
+            product_master=_master(),
+            repository=repository,
+        )
+
+    assert review.ready is True
+
+
+def test_full_order_keeps_native_seller_sku_and_exposes_listing_resolve_sku():
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    batch = adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="NAV:5001438-3"))
+
+    item = batch.items[0]
+    assert item.source_seller_sku == "SKU-1"
+    assert item.resolved_seller_sku == "SKU-1"
+    assert item.resolve_sku == "NAV:5001438-3"
+
+
+def test_sg_full_order_persists_same_row_usolf_price_not_price_sgd():
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
         [
             {
                 "seller_sku": "SKU-1",
@@ -197,38 +295,193 @@ def test_sg_full_order_uses_same_row_usolf_and_rejects_price_sgd_fallback():
                 "variation_name": "Red",
                 "unit_selling_price": "6.50",
                 "unit_price_usolf": "7.75",
-                "nav_code": "SG-NAV-1",
+                "nav_code": "5001",
             }
         ]
     )
 
-    matched = adapt_shopee_full_order(parsed, product_master=matched_master)
+    batch = adapt_shopee_full_order(parsed, product_master=master)
 
-    assert matched.syncable is True
-    assert matched.items[0].resolved_seller_sku == "SKU-1"
-    assert matched.items[0].nav == "SG-NAV-1"
-    assert matched.items[0].unit_price == Decimal("7.75")
+    assert batch.syncable is True
+    assert batch.items[0].resolved_seller_sku == "SKU-1"
+    assert batch.items[0].nav == "5001"
+    assert batch.items[0].unit_price == Decimal("7.75")
 
-    for invalid_usolf in ("", "not-a-number", "0"):
-        invalid_master = ProductPriceMaster.from_rows(
-            [
-                {
-                    "seller_sku": "SKU-1",
-                    "parent_sku": "PARENT-1",
-                    "product_name": "Organic Item",
-                    "variation_name": "Red",
-                    "unit_selling_price": "6.50",
-                    "unit_price_usolf": invalid_usolf,
-                    "nav_code": "SG-NAV-1",
-                }
-            ]
+
+def test_sg_full_order_uses_name_variation_before_seller_sku():
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
+                "product_name": "Wrong name", "variation_name": "Red",
+                "unit_selling_price": "6.50", "unit_price_usolf": "6.50", "nav_code": "WRONG",
+            },
+            {
+                "seller_sku": "SKU-2", "parent_sku": "PARENT-2",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "7.25", "unit_price_usolf": "7.75", "nav_code": "RIGHT",
+                "resolve_sku": "SG-RESOLVED",
+            },
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is True
+    assert batch.items[0].resolved_seller_sku == "SKU-2"
+    assert batch.items[0].nav == "RIGHT"
+    assert batch.items[0].unit_price == Decimal("7.75")
+    assert batch.items[0].resolve_sku == "SG-RESOLVED"
+
+
+def test_sg_full_order_uses_seller_sku_only_to_disambiguate_exact_name_variation_rows():
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "6.50", "unit_price_usolf": "7.75", "nav_code": "RIGHT",
+            },
+            {
+                "seller_sku": "SKU-ALT", "parent_sku": "PARENT-ALT",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "6.50", "unit_price_usolf": "8.50", "nav_code": "OTHER",
+            },
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is True
+    assert batch.items[0].resolved_seller_sku == "SKU-1"
+    assert batch.items[0].nav == "RIGHT"
+
+
+def test_sg_full_order_never_selects_duplicate_exact_listing_rows():
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    record = {
+        "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
+        "product_name": "Organic Item", "variation_name": "Red",
+        "unit_selling_price": "6.50", "unit_price_usolf": "7.75", "nav_code": "5001",
+    }
+
+    batch = adapt_shopee_full_order(
+        parsed, product_master=ProductPriceMaster.from_rows([record, record])
+    )
+
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "multiple Listing rows" in batch.issues[0].message
+
+
+def test_source_country_is_market_authority_not_requested_context():
+    sg_row = list(_rows()[0])
+    sg_row[-1] = "SG"
+
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([sg_row]), source_filename="sg-full-order.xlsx", market=SHOPEE_MY
+    )
+
+    assert parsed.market is SHOPEE_SG
+
+
+@pytest.mark.parametrize(
+    ("source_country", "current_market", "detected_market"),
+    (("SG", SHOPEE_MY, SHOPEE_SG), ("MY", SHOPEE_SG, SHOPEE_MY)),
+)
+def test_market_mismatch_blocks_before_current_write_and_confirmed_switch_is_idempotent(
+    source_country, current_market, detected_market
+):
+    source_row = list(_rows()[0])
+    source_row[-1] = source_country
+    source = _workbook_bytes([source_row])
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="sg-current", gateway=gateway)
+
+    with pytest.raises(ShopeeFullOrderMarketMismatch) as error:
+        review_shopee_full_order_upload(
+            source,
+            source_filename="market-mismatch.xlsx",
+            market=current_market,
+            product_master=_master(),
+            repository=repository,
         )
 
-        invalid = adapt_shopee_full_order(parsed, product_master=invalid_master)
+    assert error.value.current_market is current_market
+    assert error.value.parsed.market is detected_market
+    assert gateway.write_count == 0
 
-        assert invalid.syncable is False
-        assert invalid.issues[0].code == PM_ENRICHMENT_REQUIRED
-        assert "UNIT PRICE USOLF" in invalid.issues[0].message
+    review = review_shopee_full_order_upload(
+        error.value.source_bytes,
+        source_filename=error.value.parsed.source_filename,
+        market=detected_market,
+        product_master=_master(),
+        repository=repository,
+    )
+    first = commit_shopee_full_order_review(
+        review, load_product_master=_master, repository=repository
+    )
+    second = commit_shopee_full_order_review(
+        review, load_product_master=_master, repository=repository
+    )
+
+    assert first.new_count == 1
+    assert second.unchanged_count == 1
+    assert gateway.write_count == 1
+
+
+@pytest.mark.parametrize(
+    ("country", "error_code"),
+    (("", "blank Country"), ("XX", "UNSUPPORTED_MARKET_FULL_ORDER_COUNTRY")),
+)
+def test_missing_or_unsupported_country_blocks_full_order_source(country, error_code):
+    row = list(_rows()[0])
+    row[-1] = country
+
+    with pytest.raises(ShopeeFullOrderParseError, match=error_code):
+        parse_shopee_full_order(
+            _workbook_bytes([row]), source_filename="invalid-country.xlsx", market=SHOPEE_MY
+        )
+
+
+def test_mixed_my_and_sg_country_blocks_one_full_order_workbook():
+    sg_row = list(_rows()[0])
+    sg_row[-1] = "SG"
+
+    with pytest.raises(ShopeeFullOrderParseError, match="MIXED_MARKET_FULL_ORDER_SOURCE"):
+        parse_shopee_full_order(
+            _workbook_bytes([_rows()[0], sg_row]),
+            source_filename="mixed.xlsx",
+            market=SHOPEE_MY,
+        )
+
+
+def test_missing_country_header_blocks_full_order_source():
+    headers = tuple(header for header in HEADERS if header != "Country")
+    row = tuple(_rows()[0][index] for index, header in enumerate(HEADERS) if header != "Country")
+
+    with pytest.raises(ShopeeFullOrderParseError, match="Country"):
+        parse_shopee_full_order(
+            _workbook_bytes([row], headers=headers),
+            source_filename="missing-country-column.xlsx",
+            market=SHOPEE_MY,
+        )
+
+
 def test_pm_incomplete_resolution_is_distinct_non_money_blocker():
     parsed = parse_shopee_full_order(
         _workbook_bytes([_rows()[0]]),
@@ -260,6 +513,7 @@ def test_exact_seller_sku_precedes_a_different_exact_parent_product_row():
                 "product_name": "Child Item",
                 "variation_name": "Red",
                 "unit_selling_price": "6.50",
+                "unit_price_usolf": "6.50",
                 "nav_code": "NAV-CHILD",
                 "product_id": "PID-CHILD",
             },
@@ -269,6 +523,7 @@ def test_exact_seller_sku_precedes_a_different_exact_parent_product_row():
                 "product_name": "Parent Product",
                 "variation_name": "",
                 "unit_selling_price": "23.90",
+                "unit_price_usolf": "23.90",
                 "nav_code": "NAV-PARENT",
                 "product_id": "PID-PARENT",
             },
@@ -281,6 +536,120 @@ def test_exact_seller_sku_precedes_a_different_exact_parent_product_row():
     assert batch.items[0].resolved_seller_sku == "CHILD-SKU"
     assert batch.items[0].nav == "NAV-CHILD"
     assert batch.items[0].unit_price == Decimal("6.50")
+
+
+def test_my_full_order_persists_usolf_price_not_pm_price_and_preserves_subtotal():
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="full-order.xlsx",
+        market=SHOPEE_MY,
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "PARENT-1",
+                "product_name": "Organic Item",
+                "variation_name": "Red",
+                "unit_selling_price": "6.50",
+                "unit_price_usolf": "7.75",
+                "nav_code": "5001",
+            }
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is True
+    assert batch.items[0].nav == "5001"
+    assert batch.items[0].unit_price == Decimal("7.75")
+    assert batch.items[0].product_subtotal == Decimal("10.25")
+
+
+@pytest.mark.parametrize("usolf_price", ("", "not-a-number", "0"))
+def test_my_full_order_blocks_when_matched_pm_usolf_is_missing_or_invalid(usolf_price):
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="full-order.xlsx",
+        market=SHOPEE_MY,
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "PARENT-1",
+                "product_name": "Organic Item",
+                "variation_name": "Red",
+                "unit_selling_price": "6.50",
+                "unit_price_usolf": usolf_price,
+                "nav_code": "5001",
+            }
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "UNIT PRICE USOLF" in batch.issues[0].message
+
+
+@pytest.mark.parametrize("usolf_price", ("", "not-a-number", "0"))
+def test_sg_full_order_blocks_when_matched_pm_usolf_is_missing_or_invalid(usolf_price):
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1",
+                "parent_sku": "PARENT-1",
+                "product_name": "Organic Item",
+                "variation_name": "Red",
+                "unit_selling_price": "6.50",
+                "unit_price_usolf": usolf_price,
+                "nav_code": "5001",
+            }
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "UNIT PRICE USOLF" in batch.issues[0].message
+
+
+def test_my_full_order_blocks_when_resolved_identity_has_ambiguous_usolf():
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]),
+        source_filename="full-order.xlsx",
+        market=SHOPEE_MY,
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "6.50", "unit_price_usolf": "7.75",
+                "nav_code": "5001",
+            },
+            {
+                "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "6.50", "unit_price_usolf": "8.00",
+                "nav_code": "5001",
+            },
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "UNIT PRICE USOLF" in batch.issues[0].message
 
 
 class _Gateway:
@@ -387,6 +756,146 @@ def test_sync_is_idempotent_replaces_all_items_and_keeps_absent_orders():
     assert len(order_1_items) == 1
     assert order_1_items[0].product_subtotal == Decimal("9.50")
     assert any(item.order_id == "ORDER-2" for item in snapshot.items)
+
+
+def test_same_workbook_reimport_is_updated_when_my_usolf_price_changes():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    old_master = ProductPriceMaster.from_rows(
+        [_master().records[0].__dict__ | {"unit_price_usolf": Decimal("6.50")}]
+    )
+    revised_master = ProductPriceMaster.from_rows(
+        [_master().records[0].__dict__ | {"unit_price_usolf": Decimal("7.75")}]
+    )
+
+    repository.sync(adapt_shopee_full_order(parsed, product_master=old_master))
+    result = repository.sync(adapt_shopee_full_order(parsed, product_master=revised_master))
+
+    assert result.updated_count == 1
+    assert repository.read_snapshot().items[0].unit_price == Decimal("7.75")
+
+
+def test_reupload_preserves_stored_resolve_sku_when_listing_value_changes():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+
+    repository.sync(
+        adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="9555208010555-2"))
+    )
+    result = repository.sync(
+        adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="NAV:5001438"))
+    )
+
+    assert result.unchanged_count == 1
+    assert repository.read_snapshot().items[0].resolve_sku == "9555208010555-2"
+
+
+def test_reupload_preserves_a_stored_blank_resolve_sku_without_backfilling_it():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+
+    repository.sync(adapt_shopee_full_order(parsed, product_master=_master()))
+    result = repository.sync(
+        adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="NAV:5001438-3"))
+    )
+
+    assert result.unchanged_count == 1
+    assert repository.read_snapshot().items[0].resolve_sku == ""
+
+
+def test_updated_reupload_preserves_raw_existing_resolve_sku_when_listing_is_unavailable():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    original = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    stored_value = " 9555208010555-2;\nNAV:5001438-3; MANUAL-A-01 "
+    repository.sync(
+        adapt_shopee_full_order(original, product_master=_master(resolve_sku=stored_value))
+    )
+
+    changed = list(_rows()[0])
+    changed[9] = "9.50"
+    updated = parse_shopee_full_order(
+        _workbook_bytes([tuple(changed)]),
+        source_filename="full-order-revised.xlsx",
+        market=SHOPEE_MY,
+    )
+    result = repository.sync(adapt_shopee_full_order(updated, product_master=_master()))
+
+    item = repository.read_snapshot().items[0]
+    assert result.updated_count == 1
+    assert item.resolve_sku == stored_value
+    assert item.resolved_seller_sku == "SKU-1"
+    assert item.product_subtotal == Decimal("9.50")
+
+
+def test_updated_reupload_preserves_a_stored_blank_resolve_sku_without_backfilling_it():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    original = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    repository.sync(adapt_shopee_full_order(original, product_master=_master()))
+
+    changed = list(_rows()[0])
+    changed[9] = "9.50"
+    updated = parse_shopee_full_order(
+        _workbook_bytes([tuple(changed)]),
+        source_filename="full-order-revised.xlsx",
+        market=SHOPEE_MY,
+    )
+    result = repository.sync(
+        adapt_shopee_full_order(updated, product_master=_master(resolve_sku="NAV:5001438-3"))
+    )
+
+    assert result.updated_count == 1
+    assert repository.read_snapshot().items[0].resolve_sku == ""
+
+
+def test_updated_reupload_preserves_existing_resolve_sku_when_listing_candidates_conflict():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
+    original = parse_shopee_full_order(
+        _workbook_bytes([_rows()[0]]), source_filename="full-order.xlsx", market=SHOPEE_MY
+    )
+    repository.sync(
+        adapt_shopee_full_order(
+            original, product_master=_master(resolve_sku="9555208010555-2")
+        )
+    )
+
+    changed = list(_rows()[0])
+    changed[9] = "9.50"
+    conflicting_master = ProductPriceMaster.from_rows(
+        [
+            _master().records[0].__dict__ | {"resolve_sku": "9555208010555-2"},
+            _master().records[0].__dict__ | {"resolve_sku": "NAV:5001438-3"},
+        ]
+    )
+    updated = parse_shopee_full_order(
+        _workbook_bytes([tuple(changed)]),
+        source_filename="full-order-revised.xlsx",
+        market=SHOPEE_MY,
+    )
+    batch = adapt_shopee_full_order(updated, product_master=conflicting_master)
+    result = repository.sync(batch)
+
+    assert batch.items[0].resolve_sku == ""
+    assert batch.items[0].resolve_sku_warning == (
+        "Resolved SKU conflicts across matched Listing candidates."
+    )
+    assert result.updated_count == 1
+    assert repository.read_snapshot().items[0].resolve_sku == "9555208010555-2"
 
 
 def test_missing_only_sync_appends_absent_orders_without_rewriting_existing_current_facts():

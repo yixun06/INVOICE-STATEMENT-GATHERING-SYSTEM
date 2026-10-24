@@ -15,6 +15,7 @@ from src.invoice_app.services.product_master_source import (
 )
 from src.invoice_app.services import product_master_source
 from src.invoice_app.services.product_master_source import GOOGLE_SHEETS_READONLY_SCOPE
+from src.invoice_app.services.market_context import SHOPEE_SG
 from src.invoice_app.services.product_price_master import PriceLookupStatus
 
 
@@ -95,6 +96,27 @@ def test_google_sheet_loads_optional_unit_price_usolf_by_header_name(tmp_path):
     assert loaded.records[0].unit_price_usolf == Decimal("11.25")
 
 
+def test_google_sheet_loads_unit_price_based_usolf_header_alias(tmp_path):
+    rows = _sheet_rows()
+    rows[1].append("UNIT PRICE BASED USOLF")
+    rows[2].append("11.25")
+
+    loaded = _google_source(tmp_path, rows).load()
+
+    assert loaded.records[0].unit_price_usolf == Decimal("11.25")
+
+
+def test_google_sheet_loads_resolved_sku_by_header_name_without_changing_native_sku(tmp_path):
+    rows = _sheet_rows()
+    rows[1].append("Resolved SKU")
+    rows[2].append("9555208010555-2; NAV:5001438")
+
+    loaded = _google_source(tmp_path, rows).load()
+
+    assert loaded.records[0].seller_sku == "00123"
+    assert loaded.records[0].resolve_sku == "9555208010555-2; NAV:5001438"
+
+
 def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_path):
     rows = [
         ["SHOPEE PRODUCT LISTING"],
@@ -133,6 +155,93 @@ def test_sg_google_sheet_uses_price_sgd_without_accepting_my_price_column(tmp_pa
     assert loaded.records[0].unit_selling_price == Decimal("8.50")
     assert loaded.records[0].resolve_sku == "NAV:5001438-3; MANUAL-SG-A"
     assert loaded.metadata.sheet_name == "shopee sg"
+
+
+def test_configured_sg_loader_uses_usolf_not_price_sgd(tmp_path, monkeypatch):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        [
+            "Product Name", "Variation Name", "Parent SKU", "SKU", "NAV CODE",
+            "Price SGD", "UNIT PRICE BASED USOLF",
+        ],
+        ["SG Product", "One", "PARENT-1", "SKU-1", "NAV-1", "bad price", "7.75"],
+    ]
+    source = _google_source(tmp_path, rows)
+    settings = ProductMasterSourceSettings(
+        source="google_sheets",
+        local_excel_path=tmp_path / "unused.xlsx",
+        google_credentials_path=source.credentials_path,
+        google_spreadsheet_id=source.spreadsheet_id,
+        google_worksheet_name="shopee sg",
+    )
+    monkeypatch.setattr(ProductMasterSourceSettings, "create_source", lambda _self: source)
+    clear_product_master_source_cache()
+    try:
+        master, _ = product_master_source._load_configured_product_price_master(
+            SHOPEE_SG, settings
+        )
+    finally:
+        clear_product_master_source_cache()
+
+    assert master.records[0].unit_selling_price == Decimal("7.75")
+    assert master.records[0].unit_price_usolf == Decimal("7.75")
+
+
+def test_configured_sg_loader_admits_blank_listing_skus_for_exact_name_variation(tmp_path, monkeypatch):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        [
+            "Product Name", "Variation Name", "Parent SKU", "SKU", "NAV CODE",
+            "Resolved SKU", "Price SGD", "UNIT PRICE BASED USOLF",
+        ],
+        [
+            "(Next Day Delivery)Organic Papaya 1pc Thailand/Malaysia", "", "", "",
+            "2000842", "2000842", "9.90", "9.90",
+        ],
+    ]
+    source = _google_source(tmp_path, rows)
+    settings = ProductMasterSourceSettings(
+        source="google_sheets",
+        local_excel_path=tmp_path / "unused.xlsx",
+        google_credentials_path=source.credentials_path,
+        google_spreadsheet_id=source.spreadsheet_id,
+        google_worksheet_name="shopee sg",
+    )
+    monkeypatch.setattr(ProductMasterSourceSettings, "create_source", lambda _self: source)
+    clear_product_master_source_cache()
+    try:
+        master, _ = product_master_source._load_configured_product_price_master(
+            SHOPEE_SG, settings
+        )
+    finally:
+        clear_product_master_source_cache()
+
+    result = master.lookup_sg_full_order(
+        seller_sku="",
+        product_name="(Next Day Delivery)Organic Papaya 1pc Thailand/Malaysia",
+        variation_name="",
+    )
+
+    assert len(master.records) == 1
+    assert master.records[0].seller_sku == ""
+    assert master.records[0].parent_sku == ""
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
+    assert result.source_rows == (3,)
+    assert result.nav_code == "2000842"
+    assert result.unit_price_usolf == Decimal("9.90")
+    assert result.resolve_sku == "2000842"
+
+
+def test_my_google_loader_still_excludes_blank_listing_skus(tmp_path):
+    rows = [
+        ["SHOPEE PRODUCT LISTING"],
+        ["Product Name", "Variation Name", "Parent SKU", "SKU", "Price"],
+        ["MY blank SKU item", "", "", "", "9.90"],
+    ]
+
+    loaded = _google_source(tmp_path, rows).load()
+
+    assert loaded.records == ()
 
 
 def test_sg_google_sheet_rejects_invalid_price_sgd_rows(tmp_path):

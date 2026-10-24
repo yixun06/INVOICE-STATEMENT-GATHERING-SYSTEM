@@ -394,6 +394,36 @@ def test_full_order_match_only_resolves_only_after_normal_name_variation():
     assert result.nav_code == "NAV-1"
 
 
+def test_sg_full_order_exact_name_variation_includes_full_order_match_only_row():
+    master = _master([
+        _row(
+            seller_sku="BRAGG-SKU",
+            parent_sku="BRAGG-PARENT",
+            product_name="Historical BRAGG Full Order Name",
+            variation_name="Bundle of 2",
+            unit_selling_price="30.00",
+        )
+        | {
+            "nav_code": "NAV-BRAGG",
+            "unit_price_usolf": "30.00",
+            "resolve_sku": "BRAGG-2",
+            "remark": "FULL_ORDER_MATCH_ONLY",
+        },
+    ])
+
+    result = master.lookup_sg_full_order(
+        seller_sku="",
+        product_name="Historical BRAGG Full Order Name",
+        variation_name="Bundle of 2",
+    )
+
+    assert result.status is PriceLookupStatus.MATCHED_BY_NAME_VARIATION
+    assert result.matched_sku == "BRAGG-SKU"
+    assert result.nav_code == "NAV-BRAGG"
+    assert result.unit_price_usolf == Decimal("30.00")
+    assert result.resolve_sku == "BRAGG-2"
+
+
 def test_full_order_preserves_earlier_sku_ambiguity_when_all_fallbacks_fail():
     master = _master([
         _row(

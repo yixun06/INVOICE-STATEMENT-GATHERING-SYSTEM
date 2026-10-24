@@ -33,6 +33,8 @@ class _FakeStreamlit:
     def __init__(self) -> None:
         self.session_state = _SessionState()
         self.errors: list[str] = []
+        self.successes: list[str] = []
+        self.warnings: list[str] = []
         self.dataframes: list[object] = []
 
     def container(self, **_kwargs):
@@ -53,6 +55,12 @@ class _FakeStreamlit:
     def error(self, message, **_kwargs):
         self.errors.append(message)
 
+    def success(self, message, **_kwargs):
+        self.successes.append(message)
+
+    def warning(self, message, **_kwargs):
+        self.warnings.append(message)
+
     def rerun(self):
         pass
 
@@ -70,11 +78,11 @@ def _configure_full_order_sync(monkeypatch, *, commit):
     monkeypatch.setattr(data_import, "st", fake)
     monkeypatch.setattr(data_import, "_full_order_review", _ready_review)
     monkeypatch.setattr(data_import, "render_authoritative_status", lambda **_kwargs: None)
-    monkeypatch.setattr(data_import, "_active_invoice_market_context", lambda: object())
+    monkeypatch.setattr(data_import, "_required_persistence_market_context", lambda: object())
     monkeypatch.setattr(
         data_import,
         "configured_uat2_data_settings",
-        lambda _context: SimpleNamespace(create_full_order_current_repository=lambda: object()),
+        lambda _context, **_kwargs: SimpleNamespace(create_full_order_current_repository=lambda: object()),
     )
     monkeypatch.setattr(data_import, "load_configured_product_price_master", lambda _context: (object(), "test"))
     monkeypatch.setattr(data_import, "commit_shopee_full_order_review", commit)
@@ -166,3 +174,63 @@ def test_full_order_validation_displays_listing_resolve_sku_separately(monkeypat
             }
         ]
     ]
+
+
+def test_completed_full_order_sync_starts_a_clean_next_upload_without_reusing_review(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.session_state.update(
+        {
+            "import_source_type": data_import.SHOPEE_FULL_ORDER_LIST,
+            "data_import_step": 5,
+            "batch_id": "july",
+            "full_order_review": object(),
+            "full_order_sync_result": SimpleNamespace(
+                new_count=1, updated_count=0, unchanged_count=0
+            ),
+            "full_order_uploader_version": 2,
+            "full_order_uploader_2": object(),
+        }
+    )
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(data_import, "_full_order_review", _ready_review)
+    monkeypatch.setattr(data_import, "render_authoritative_status", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        fake,
+        "button",
+        lambda _label, *, key, **_kwargs: key == "full_order_upload_another",
+    )
+
+    data_import._render_full_order_review_and_sync()
+
+    assert "full_order_review" not in fake.session_state
+    assert "full_order_sync_result" not in fake.session_state
+    assert "batch_id" not in fake.session_state
+    assert "full_order_uploader_2" not in fake.session_state
+    assert fake.session_state["full_order_uploader_version"] == 3
+    assert fake.session_state["data_import_step"] == 2
+
+
+def test_completed_full_order_sync_keeps_success_state_when_review_was_cleared(monkeypatch):
+    fake = _FakeStreamlit()
+    fake.session_state["full_order_sync_result"] = SimpleNamespace(
+        new_count=1, updated_count=0, unchanged_count=0
+    )
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(data_import, "_full_order_review", lambda: None)
+
+    data_import._render_full_order_review_and_sync()
+
+    assert fake.successes == ["Full Order current sync complete."]
+    assert fake.warnings == []
+    assert fake.errors == []
+
+
+def test_stale_full_order_completed_step_returns_to_upload_without_a_review():
+    state = {
+        "import_source_type": data_import.SHOPEE_FULL_ORDER_LIST,
+        "data_import_step": 3,
+        "full_order_uploader_version": 0,
+    }
+
+    assert data_import._normalize_step_for_source(state) == 2
+    assert state["data_import_step"] == 2
