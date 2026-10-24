@@ -13,6 +13,36 @@ InvoiceGather is a reconciliation-and-evidence system. Committed Invoice-derived
 
 ## Current System State
 
+### SHOPEE_MY_CLOSING_PHASE_1 - MY-01 IMPLEMENTED / TESTED / PUSHED; MY-02 AUDITED
+
+- **MY-01 date-source alignment is implemented.** Shopee MY Live Analysis and
+  Consolidated Product Summary now take `Order Created Date` exclusively from
+  `Shopee_FullOrder_Current_Orders.order_created_date` and `Payout Date`
+  exclusively from `PASSED` + `COMMITTED` `Statement_Data` `ORDER` rows, using
+  normalized `(market, order_id)`. Repeated Statement SKU/component rows cannot
+  multiply reporting orders or amounts; duplicate equal payout rows collapse to
+  one date and conflicting payout dates fail closed. A missing Statement match
+  remains unknown/unreleased with no Invoice/PDF date fallback.
+- Current Payout Product Summary financial/product calculation remains canonical
+  `Invoice_Orders` + `Invoice_Items`; the broader Statement + Full Order Current
+  + Product Master migration remains pending. Live Analysis financial-layout and
+  amount calculations likewise remain unchanged in this phase.
+- **MY-02 audit:** the active 808-order warning is caused by
+  `shopee_full_order_reconciliation.py` producing the legacy compatibility
+  layout `FULL_ORDER_STATEMENT_PROVED`; Live Analysis deliberately recognizes
+  only `NORMAL_ORDER`, `CANCELLED_ORDER`, and `RETURN_REFUND`, so those records
+  fail closed. No reclassification was made. Legacy Invoice/PDF tables remain
+  preserved; no deletion/decommissioning is authorized.
+- Read-only September 2026 comparison is unchanged before/after alignment:
+  Order Created 2,168 selected / 2,160 normal / RM60,468.12 sales / 4,341 units
+  / RM263.70 refunds; Payout 2,049 selected / 2,039 normal / RM59,552.65 sales
+  / 4,215 units / RM320.31 refunds. Focused MY report tests: 59 passed.
+  Google Sheets/UAT2/schema/business write delta: 0. Checkpoint `71d0135`
+  (`feat: align Shopee MY reporting dates with Full Order and Statement`) is
+  pushed to `origin/feature/uat2-invoice-persistence-integration`; deployment:
+  **NOT VERIFIED**. Next: Product Owner scope for MY-03 legacy financial-layout
+  migration, if desired.
+
 ### SHOPEE_STATEMENT_FULL_ORDER_ARCHITECTURE_MIGRATION_CLOSED - PERSISTENCE VERIFIED / TESTED / CHECKPOINT AUTHORIZED
 
 - Active Shopee MY and SG Statement readiness is now Full Order Current + market-scoped Product Master + Statement only, joined by exact `(market, order_id)`. Validate, Review, ready-to-commit, currency check, and the fresh locked pre-commit rebuild use the same review builder; the pre-commit writer reads and writes only Statement-owned tabs.
@@ -354,6 +384,8 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+- Date: 2026-10-24; Task: Shopee MY Closing Phase 1 (MY-01 date-source alignment and MY-02 legacy PDF dependency audit); State: MY-01 IMPLEMENTED / TESTED / PUSHED; MY-02 AUDITED; Outcome: Live Analysis and Consolidated Product Summary date provenance is now Full Order Current for Order Created and committed Statement_Data ORDER rows for Payout, joined by normalized `(market, order_id)` with no Invoice/PDF date fallback. Existing legacy Invoice financial calculations, status/refund semantics, Resolve SKU, Compact Barcode PDF, and MY/SG isolation are unchanged. The 808 excluded Live Analysis records are `FULL_ORDER_STATEMENT_PROVED` compatibility layouts produced by `shopee_full_order_reconciliation.py`, not a date-source defect; they remain safely excluded pending a separately approved financial-layout migration. September 2026 before/after results are identical: Order Created 2,168 selected / RM60,468.12 sales and Payout 2,049 selected / RM59,552.65 sales. Verification: 90 focused report/UI/Compact Barcode tests passed; real read-only Google Sheets comparison; no Google Sheets/UAT2/schema/business write. Git: `71d0135` (`feat: align Shopee MY reporting dates with Full Order and Statement`) pushed to `origin/feature/uat2-invoice-persistence-integration`; deployment: **NOT VERIFIED**. Decision required: Product Owner approval before changing legacy financial-layout classification or Payout product/financial authority. Next: stop after MY-01/MY-02; do not begin MY-03.
+
 
 - Date: 2026-10-24; Task: checkpoint verified Shopee SG Full Order persistence; State: `SHOPEE_SG_FULL_ORDER_PERSISTENCE` VERIFIED; Outcome: Product Owner confirmed the native SG Full Order parse/import and dedicated SG Google Sheet persistence end to end. Exact normalized Product Name + Variation selects one SG Product Master row, with Seller SKU only as deterministic exact-candidate disambiguation; NAV, `UNIT PRICE USOLF`, and `resolve_sku` persist from that same row. No `Price SGD`, MY, or cross-market fallback occurs. The completed-result UI renders before a cleared review, keeps success and `Upload another Full Order` available, avoids duplicate Sync, and cannot report success after failure/partial write. Verification: focused SG Full Order regression, `py_compile`, cached diff check, and staged secret scan. Git: `feat: complete shopee sg full order persistence`; deployment: **NOT VERIFIED**. UAT2/schema/business write delta in this checkpoint: 0. Decision required: none. Next: first controlled SG Statement smoke after populated SG Current.
 
