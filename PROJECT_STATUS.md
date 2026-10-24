@@ -44,9 +44,12 @@ data remains read-only comparison/audit evidence.
   Billing, Monthly Billing, and the still-legacy financial/product report
   modules are outside this migration and must not be treated as migration
   blockers or active-source fallbacks.
-- No Google Sheets write, schema migration, deployment, stage, commit, or push
-  occurred in this integration task. Next independent scope: migrate a report
-  surface to the shared Full Order + committed Statement read contract.
+- Checkpoint `c7908deaaa520794e78e40b4f765c3d5ed2a83b1`
+  (`feat: align shopee my with any-period statement pipeline`) is committed and
+  pushed to `origin/feature/uat2-invoice-persistence-integration`. No Google
+  Sheets write, schema migration, or deployment occurred. Next independent
+  scope: migrate a report surface to the shared Full Order + committed
+  Statement read contract.
 
 ### SHOPEE_MY_CLOSING_PHASE_1 - MY-01 IMPLEMENTED / TESTED / PUSHED; MY-02 AUDITED
 
@@ -484,6 +487,8 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-24; Task: Shopee MY any-period Statement integration and active test-contract cleanup; State: IMPLEMENTED / TESTED / COMMITTED / PUSHED; Outcome: MY adopted the SG-style market-scoped Full Order Current existence gate and semantic overlap dedupe, with a shared committed Statement financial read boundary; active tests no longer require Invoice/PDF, Product Master, SKU allocation, or calendar-period gates. 14 explicitly retired V2/Product Master/Invoice-PDF tests remain archived. Verification: 118 focused MY/SG Statement tests passed and 14 archived tests skipped; py_compile and staged diff check passed. Git: `c7908deaaa520794e78e40b4f765c3d5ed2a83b1` pushed to `feature/uat2-invoice-persistence-integration`; UAT2 write delta 0; schema delta 0; deployment NOT VERIFIED. Next: migrate a report surface only after separate Product Owner authorization.
 
 - Date: 2026-10-24; Task: SG Full Order same-row SKU identity persistence for Consolidated Product Summary; State: IMPLEMENTED / TESTED / NO BACKFILL REQUIRED / COMMITTED / PUSHED; Outcome: SG Full Order now requires one deterministic SG PM row to supply nonblank canonical Seller SKU (same-row Seller SKU, or the same-row Parent SKU only when Seller SKU is blank), NAV, `UNIT PRICE USOLF`, and `resolve_sku`; it never derives Seller SKU from `resolve_sku`. SG snapshot hashes now include `resolve_sku` and SG re-sync replaces it from that proven row, while MY preserves its stored resolve-SKU behavior. Live read-only audit of the dedicated SG Current found 8,173 orders / 10,886 items and zero blank persisted `resolved_seller_sku` or `resolve_sku`, so no repair write was authorized. The latest PM has six exact Name+Variation rows (12 existing items, including Papaya row 142 / `260705UFDDASVX`) with both Seller and Parent SKU blank; they are now correctly future-upload blockers rather than candidates for inferred identity. Order Created Date Consolidated Product Summary read 10,395 eligible SG items over 89 dates into 317 unique NAV/SKU/USOLF groups with no duplicate identity groups. Verification: 70 focused Full Order/Summary tests passed; no Google Sheets, MY, schema, or business write. Git: checkpoint `1c1d0fe` (`fix: preserve shopee sg sku identity`) pushed to `feature/uat2-invoice-persistence-integration`; deployment remains NOT VERIFIED. Next: PO/PM owner must populate a same-row canonical Seller/Parent SKU for those six Listing rows before future SG revalidation of those products.
 
