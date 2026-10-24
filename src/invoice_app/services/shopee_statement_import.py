@@ -61,6 +61,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitPlan,
     StatementWriteNotApplied,
     prepare_full_order_statement_commit_plan,
+    prepare_full_order_existence_statement_commit_plan,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
@@ -71,6 +72,18 @@ from src.invoice_app.services.shopee_weekly_statement_service import (
 
 INVOICE_COVERAGE_INCOMPLETE = "INVOICE_COVERAGE_INCOMPLETE"
 ADDITIONAL_EVIDENCE_REQUIRED = "ADDITIONAL_EVIDENCE_REQUIRED"
+FULL_ORDER_EXISTENCE_PROOF_RULE_VERSION = "FULL_ORDER_EXISTENCE_V1"
+
+
+def expected_full_order_proof_rule_version(market_context: MarketContext) -> str:
+    """Return the active Full Order proof contract for one explicit market."""
+
+    context = resolve_market_context(market_context)
+    return (
+        FULL_ORDER_EXISTENCE_PROOF_RULE_VERSION
+        if context.statement_order_existence_gate
+        else FULL_ORDER_STATEMENT_PROOF_RULE_VERSION
+    )
 
 
 @dataclass(frozen=True)
@@ -154,12 +167,19 @@ class StatementImportReview:
     # Session-only handle used to re-read Full Order Current during fresh
     # review/pre-commit validation; never serialized as business data.
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None
+    active_gate: str = "V2"
 
     @property
     def ready(self) -> bool:
-        """Whether the V2 business review is complete and fail-closed."""
+        """Whether the configured active Statement gate is complete."""
 
-        return self.reconciliation_v2 is not None and not self.blockers
+        return (
+            not self.blockers
+            and (
+                self.reconciliation_v2 is not None
+                or (self.plan is not None and self.plan.authority == "FULL_ORDER_CURRENT")
+            )
+        )
 
     @property
     def commit_ready(self) -> bool:
@@ -172,6 +192,26 @@ class StatementImportReview:
         )
 
 
+def statement_review_requires_proof_rule_refresh(
+    review: StatementImportReview | None,
+    market_context: MarketContext,
+) -> bool:
+    """Return whether a retained review predates the active market proof rule.
+
+    This is deliberately a UI-state guard only. Fresh authority evidence is
+    still compared by ``check_statement_review_currency`` immediately before
+    commit.
+    """
+
+    evidence_version = getattr(review, "evidence_version", None)
+    if evidence_version is None:
+        return False
+    return (
+        getattr(evidence_version, "full_order_proof_rule_version", None)
+        != expected_full_order_proof_rule_version(market_context)
+    )
+
+
 def review_statement_upload(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
@@ -179,7 +219,7 @@ def review_statement_upload(
     batch_id: str,
     uploaded_by: str,
     writer: GoogleSheetsStatementWriter,
-    product_master: ProductPriceMaster,
+    product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
     market_context: MarketContext = SHOPEE_MY,
@@ -200,7 +240,10 @@ def review_statement_upload(
         source_bytes,
         source_filename=source_filename,
         existing_statements=state.committed_statements,
+        existing_order_evidence=state.committed_order_evidence,
         evaluate_legacy_order_reconciliation=False,
+        source_contract=market_context.statement_source_contract,
+        semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
     )
     full_order_orders, full_order_items, full_order_blockers, evidence_coverage = (
         _statement_inputs_with_full_order(
@@ -234,7 +277,7 @@ def refresh_statement_review(
     review: StatementImportReview,
     *,
     writer: GoogleSheetsStatementWriter,
-    product_master: ProductPriceMaster,
+    product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
     market_context: MarketContext = SHOPEE_MY,
@@ -251,7 +294,10 @@ def refresh_statement_review(
         review.source_bytes,
         source_filename=review.stage.source_filename,
         existing_statements=state.committed_statements,
+        existing_order_evidence=state.committed_order_evidence,
         evaluate_legacy_order_reconciliation=False,
+        source_contract=market_context.statement_source_contract,
+        semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
     )
     full_order_orders, full_order_items, full_order_blockers, evidence_coverage = (
         _statement_inputs_with_full_order(
@@ -318,7 +364,10 @@ def commit_statement_review(
         current_review = refresh_statement_review(
             review,
             writer=writer,
-            product_master=load_product_master(),
+            product_master=(
+                None if market_context.statement_order_existence_gate
+                else load_product_master()
+            ),
             full_order_repository=full_order_repository,
             market_context=market_context,
             verified_artifact_repairs=verified_artifact_repairs,
@@ -348,7 +397,7 @@ def check_statement_review_currency(
     review: StatementImportReview,
     *,
     writer: GoogleSheetsStatementWriter,
-    product_master: ProductPriceMaster,
+    product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
     market_context: MarketContext = SHOPEE_MY,
@@ -389,7 +438,7 @@ def _build_review(
     invoice_orders: Iterable[CanonicalInvoiceOrder],
     invoice_items: Iterable[CanonicalInvoiceItem],
     canonical_adjustments: Iterable[CanonicalOrderAdjustment],
-    product_master: ProductPriceMaster,
+    product_master: ProductPriceMaster | None,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair],
     now: Callable[[], datetime],
     source_bytes: bytes,
@@ -465,7 +514,26 @@ def _build_review(
             evidence_coverage=evidence_coverage,
             full_order_canonical_inserts=(),
             full_order_repository=full_order_repository,
+            active_gate=(
+                "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+                if market_context.statement_order_existence_gate else "V2"
+            ),
         )
+    if market_context.statement_order_existence_gate:
+        return _build_order_existence_review(
+            stage,
+            batch_id=batch_id,
+            uploaded_at=uploaded_at,
+            uploaded_by=uploaded_by,
+            source_bytes=source_bytes,
+            full_order_blockers=full_order_blockers,
+            evidence_coverage=evidence_coverage,
+            market_context=market_context,
+            full_order_repository=full_order_repository,
+            now=now,
+        )
+    if product_master is None:
+        raise StatementCommitBlocked("Product Master is required by the configured Statement gate.")
     repairs = tuple(verified_artifact_repairs)
     product_families = product_family_resolver_from_price_master(product_master)
     reconciliation_v2 = evaluate_statement_reconciliation(
@@ -484,6 +552,8 @@ def _build_review(
         verified_artifact_repairs=repairs,
         persisted_platform=market_context.persisted_platform,
     )
+
+
     persistence_blockers = list(stage.rejection_reasons)
     persistence_blockers.extend(full_order_blockers)
     persistence_blockers.extend(
@@ -554,6 +624,67 @@ def _build_review(
     )
 
 
+def _build_order_existence_review(
+    stage: StagedShopeeWeeklyStatement,
+    *,
+    batch_id: str,
+    uploaded_at: datetime,
+    uploaded_by: str,
+    source_bytes: bytes,
+    full_order_blockers: tuple[str, ...],
+    evidence_coverage: StatementEvidenceCoverage | None,
+    market_context: MarketContext,
+    full_order_repository: ShopeeFullOrderCurrentRepository | None,
+    now: Callable[[], datetime],
+) -> StatementImportReview:
+    """Build the exact Current-order existence gate without legacy evidence."""
+
+    statement = stage.statement
+    assert statement is not None
+    blockers = [*stage.rejection_reasons, *full_order_blockers]
+    blockers.extend(issue.message for issue in stage.validation_issues)
+    if stage.duplicate_status:
+        blockers.extend(stage.review_reasons)
+    persistence_blockers = list(blockers)
+    plan = None
+    if not blockers and evidence_coverage is not None and evidence_coverage.complete:
+        try:
+            plan = prepare_full_order_existence_statement_commit_plan(
+                statement,
+                audit=StatementBatchAudit(
+                    statement_batch_id=batch_id,
+                    uploaded_at=uploaded_at,
+                    uploaded_by=uploaded_by,
+                    committed_at=now(),
+                ),
+                full_order_ids=evidence_coverage.ready_from_full_order_order_ids,
+                validation_passed=True,
+                persisted_platform=market_context.persisted_platform,
+                semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
+            )
+        except StatementCommitBlocked as error:
+            persistence_blockers.append(str(error))
+    return StatementImportReview(
+        batch_id=batch_id,
+        uploaded_at=uploaded_at,
+        uploaded_by=uploaded_by,
+        stage=stage,
+        reconciliation_v2=None,
+        evidence_version=_order_existence_evidence_version(statement, evidence_coverage),
+        sku_matches=StatementItemMatchBatch((), False),
+        plan=plan,
+        blockers=tuple(dict.fromkeys(blockers)),
+        limitations=(
+            "Statement SKU rows are retained as raw source facts; no product allocation is inferred.",
+        ),
+        persistence_blockers=tuple(dict.fromkeys(persistence_blockers)),
+        source_bytes=source_bytes,
+        evidence_coverage=evidence_coverage,
+        full_order_repository=full_order_repository,
+        active_gate="FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+    )
+
+
 def classify_statement_invoice_coverage(
     statement: ParsedShopeeWeeklyStatement,
     invoice_orders: Iterable[CanonicalInvoiceOrder],
@@ -598,7 +729,7 @@ def classify_statement_invoice_coverage(
 def _statement_inputs_with_full_order(
     statement: ParsedShopeeWeeklyStatement | None,
     *,
-    product_master: ProductPriceMaster,
+    product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None,
     imported_at: datetime | None = None,
     market_context: MarketContext = SHOPEE_MY,
@@ -645,6 +776,34 @@ def _statement_inputs_with_full_order(
             (f"FULL_ORDER_CURRENT_UNAVAILABLE:{error}",),
             StatementEvidenceCoverage(statement_order_ids, (), (), requirements),
         )
+    if market_context.statement_order_existence_gate:
+        available = {
+            order.order_id
+            for order in snapshot.orders
+            if order.market == market_context.key.value
+        }
+        requirements = tuple(
+            StatementEvidenceRequirement(
+                order_id,
+                None,
+                "Full Order Current order is missing for this market.",
+            )
+            for order_id in statement_order_ids
+            if order_id not in available
+        )
+        return (
+            (),
+            (),
+            (),
+            StatementEvidenceCoverage(
+                statement_order_ids,
+                (),
+                tuple(order_id for order_id in statement_order_ids if order_id in available),
+                requirements,
+            ),
+        )
+    if product_master is None:
+        return (), (), ("PRODUCT_MASTER_UNAVAILABLE",), None
     proof = prove_full_order_current_against_statement(
         statement,
         snapshot,
@@ -814,6 +973,27 @@ def _v2_limitations(batch: StatementReconciliationBatch) -> tuple[str, ...]:
             "claim is made."
         )
     return tuple(limitations)
+
+
+def _order_existence_evidence_version(
+    statement: ParsedShopeeWeeklyStatement,
+    coverage: StatementEvidenceCoverage | None,
+) -> StatementReviewEvidenceVersion:
+    """Fingerprint only the evidence consumed by the simplified active gate."""
+
+    covered = coverage.ready_from_full_order_order_ids if coverage else ()
+    return StatementReviewEvidenceVersion(
+        statement_file_hash=statement.file_hash,
+        full_order_snapshot_sha256=_stable_hash(covered),
+        product_family_snapshot_sha256="NOT_APPLICABLE",
+        order_adjustment_snapshot_sha256="NOT_APPLICABLE",
+        rule_version=FULL_ORDER_EXISTENCE_PROOF_RULE_VERSION,
+        full_order_proof_rule_version=FULL_ORDER_EXISTENCE_PROOF_RULE_VERSION,
+        reconciliation_sha256=_stable_hash({
+            "statement_order_ids": tuple(row.order_id for row in statement.order_rows),
+            "covered_order_ids": covered,
+        }),
+    )
 
 
 def _evidence_version(

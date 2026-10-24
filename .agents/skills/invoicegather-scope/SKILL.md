@@ -119,6 +119,50 @@ Any implementation that still enforces one of those rules must be treated as
 legacy behavior requiring a separately scoped migration to this architecture;
 do not silently retain it as an active business rule.
 
+### Statement settlement pilot contract — Product Owner confirmed (2026-10-24)
+
+This contract supersedes only conflicting active-flow Statement implementation
+rules. It preserves the source models and immutable evidence ledgers.
+
+- **Full Order Current** remains the order/product authority. **Statement_Data**
+  remains the authoritative order-level settlement ledger. **Statement_Financial_
+  Components** remains the authoritative detailed financial-fact ledger for
+  arbitrary date/order/component drill-down; it is not an archive-only table.
+  **Order_Adjustments** remains the independent immutable post-payout lifecycle
+  event ledger. Dashboard projections read the appropriate authority directly:
+  overview from Full Order Current plus Statement_Data, detailed settlement
+  facts from Financial Components, and adjustment timeline/impact from
+  Order_Adjustments.
+- Do not project Statement settlement fields into Full Order Current and do not
+  introduce a Statement overwrite/current-snapshot model. Every upload is one
+  immutable native-source artifact/batch with deterministic source hash,
+  provenance, duplicate, conflict, atomic-write, and readback controls.
+- One native Shopee Statement workbook may cover any valid source period. Keep
+  its actual `period_start` and `period_end`; do not enforce seven days or
+  invent a calendar-month rule. A multi-file monthly assembler is explicitly
+  deferred unless a separately approved UI constraint requires it.
+- The active Statement commit gate is the exact market-scoped `(market,
+  order_id)` existence proof against Full Order Current plus internal Statement
+  Summary/component controls, source duplicate/conflict protection, market and
+  currency isolation, adjustment lifecycle/conflicting-evidence guards, fresh
+  pre-commit reload, application lock, and atomic write/readback verification.
+  It must not require Invoice/PDF evidence, Product Master evidence, merchandise
+  or SKU/group reconciliation, or `EXACT` / `EXPLAINED` / `NONE` residual
+  classification. Do not invent a Full Order income equality comparison:
+  `Total Amount` and `Grand Total` are explicitly rejected as independent
+  settlement-income sources.
+- Native MY and SG Statements use one market-aware source contract. The source
+  contract may map market-specific worksheet/header/component spellings (for
+  example SG `Total Released Amount (S$)`, GST components, BCRS, and no
+  `Shipping Fee Discrepancy`) into the existing canonical Statement models, but
+  must never duplicate business parser logic or add `if market == SG` business
+  rules outside source config/routing.
+- The SG pilot persists only to the configured SG UAT2 Statement_Data,
+  Statement_Financial_Components, Statement_Summary, and Order_Adjustments
+  sheets. There is no MY fallback and no PostgreSQL runtime/cutoff change.
+  MY behavior remains unchanged except for shared market-neutral infrastructure
+  required by the pilot. Payout Product Summary is out of scope.
+
 ## Monetary presentation — Approved
 
 - Business-facing monetary values use the applicable currency symbol, thousands
@@ -182,7 +226,7 @@ do not silently retain it as an active business rule.
   the existing internal persisted `Shopee` analysis path; Shopee SG and TikTok
   show a fail-closed unavailable page and must not expose MY or ZENXIN data.
 
-## Shopee SG architecture direction — PDF Test Entry Implemented / Persistence Pending
+## Shopee SG architecture direction — PDF Test Entry and Database Routing Implemented
 
 Shopee MY and Shopee SG remain in one InvoiceGather application. The approved
 long-term shape is shared workflow/reporting engines with market-specific
@@ -202,6 +246,12 @@ The following rules are locked for future implementation:
 - Shopee MY and SG use separate Google spreadsheets/databases. SG should
   initially mirror the applicable current MY tabs and schemas, but SG-specific
   evidence may later justify additive SG-only fields. Do not rewrite MY storage.
+- Database routing is explicit: MY uses `INV_UAT2_DATA_SPREADSHEET_ID`; SG uses
+  `INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID` and
+  `INV_SHOPEE_SG_UAT2_GOOGLE_CREDENTIALS_PATH`. A market-capable persistence
+  path requires an explicit MarketContext and fails closed for missing,
+  unsupported, or default-MY-as-SG configuration; it must never borrow the
+  other market's destination.
 - Market selection must bind the Invoice repository, Statement repository and
   writer, commit lock, Product Master source, reporting reader, and currency as
   one immutable context. Cross-market reads, reconciliation, commits, and stale
@@ -249,10 +299,12 @@ The following rules are locked for future implementation:
   only behavior proven identical and keep differing SG behavior in explicit
   extension points.
 
-The SG PDF/ZIP test entry stops at Manual Review / Accepted Candidate. Current
-blockers to permanent SG persistence are an approved separate SG destination,
-schema/acceptance contract, and runtime configuration. SG Statement support and
-cancelled/refund/return layouts remain pending evidence. Do not infer them.
+The SG PDF/ZIP test entry stops at Manual Review / Accepted Candidate. The
+shared canonical, Full Order Current, and Statement writer factories are now
+destination-routed for SG, but no SG business data has been written or
+preflighted in this code scope. SG source-entry/commit UX, Monthly Statement,
+Weekly Billing, and cancelled/refund/return layouts remain separately gated by
+source evidence and approval. Do not infer them.
 
 ## Data Import platform entry — Approved / Implemented
 

@@ -139,12 +139,13 @@ def make_statement_adjustment(
     statement_source_filename: str,
     statement_file_hash: str,
     first_observed_at: datetime,
+    persisted_platform: str = "Shopee",
 ) -> CanonicalOrderAdjustment | None:
     """Build one persistable source-driven Statement event when its type is usable."""
     adjustment_type = supported_adjustment_type(adjustment_description)
     if adjustment_type is None:
         return None
-    platform = "Shopee"
+    platform = _required_text(persisted_platform, "persisted_platform")
     description = _required_text(adjustment_description, "adjustment_description")
     order_id = _required_text(linked_order_id, "linked_order_id")
     return CanonicalOrderAdjustment(

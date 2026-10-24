@@ -96,15 +96,28 @@ class UAT2DataSettings:
         )
 
     def create_statement_writer(self) -> GoogleSheetsStatementWriter:
-        require_capability(self.market_context, "statement_commit")
+        context = resolve_market_context(self.market_context)
+        require_capability(context, "statement_commit")
+        if (
+            context.key is MarketKey.SHOPEE_SG
+            and self.google_spreadsheet_id == DEFAULT_UAT2_DATA_SPREADSHEET_ID
+        ):
+            raise MarketConfigurationUnavailable(
+                "Shopee SG Statement persistence requires an explicit SG spreadsheet."
+            )
         return GoogleSheetsStatementWriter(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
-            persisted_platform=self.market_context.persisted_platform,
+            persisted_platform=context.persisted_platform,
         )
 
     def create_monthly_statement_writer(self) -> GoogleSheetsMonthlyStatementWriter:
-        require_capability(self.market_context, "statement_commit")
+        context = resolve_market_context(self.market_context)
+        if context.key is not MarketKey.SHOPEE_MY:
+            raise MarketConfigurationUnavailable(
+                f"{context.display_name} Monthly Statement persistence is MY-only by design."
+            )
+        require_capability(context, "statement_commit")
         return GoogleSheetsMonthlyStatementWriter(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),

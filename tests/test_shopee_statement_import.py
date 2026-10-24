@@ -37,8 +37,13 @@ from src.invoice_app.services.shopee_statement_import import (
     check_statement_review_currency,
     classify_statement_invoice_coverage,
     commit_statement_review,
+    expected_full_order_proof_rule_version,
     refresh_statement_review,
     review_statement_upload,
+    statement_review_requires_proof_rule_refresh,
+)
+from src.invoice_app.services.data_import_state import (
+    replace_statement_review_after_refresh,
 )
 from src.invoice_app.services.import_result_adapters import (
     adapt_shopee_weekly_statement_import_result,
@@ -49,6 +54,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
 )
 from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
 from src.invoice_app.services.shopee_weekly_statement_service import (
+    NEEDS_REVIEW,
     stage_parsed_shopee_weekly_statement,
 )
 from src.invoice_app.domain.weekly_billing import BillingPeriod
@@ -1964,6 +1970,152 @@ def test_stale_product_master_review_is_visible_and_commit_is_disabled(
     assert next(
         button for button in app.button if button.label == "Commit Statement"
     ).proto.type == "secondary"
+
+
+def test_sg_obsolete_proof_review_refreshes_once_without_repeating_stale_state(
+    monkeypatch,
+):
+    """A new SG existence-gate review must not immediately self-mark stale."""
+
+    review, _, _ = _review(monkeypatch)
+    assert review.evidence_version is not None
+    refreshed = replace(
+        review,
+        active_gate="FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+        reconciliation_v2=None,
+        evidence_version=replace(
+            review.evidence_version,
+            rule_version="FULL_ORDER_EXISTENCE_V1",
+            full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                SHOPEE_SG
+            ),
+        ),
+    )
+    obsolete = replace(
+        refreshed,
+        evidence_version=replace(
+            refreshed.evidence_version,
+            full_order_proof_rule_version="legacy-full-order-proof-rule",
+        ),
+    )
+    assert (
+        obsolete.evidence_version.full_order_proof_rule_version
+        != expected_full_order_proof_rule_version(SHOPEE_SG)
+    )
+
+    assert statement_review_requires_proof_rule_refresh(obsolete, SHOPEE_SG)
+
+    state = {
+        "weekly_statement_review": obsolete,
+        "weekly_statement_review_stale_reason": (
+            "Full Order Statement proof rules changed after this review."
+        ),
+    }
+    replace_statement_review_after_refresh(state, refreshed)
+
+    assert state["weekly_statement_review"] == refreshed
+    assert "weekly_statement_review_stale_reason" not in state
+    assert not statement_review_requires_proof_rule_refresh(refreshed, SHOPEE_SG)
+
+
+def test_sg_current_proof_rule_advances_validate_reconcile_and_review(
+    tmp_path, monkeypatch
+):
+    review, _, _ = _review(monkeypatch)
+    assert review.evidence_version is not None
+    refreshed = replace(
+        review,
+        active_gate="FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+        reconciliation_v2=None,
+        evidence_version=replace(
+            review.evidence_version,
+            rule_version="FULL_ORDER_EXISTENCE_V1",
+            full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                SHOPEE_SG
+            ),
+        ),
+    )
+    monkeypatch.setattr(data_import, "_refresh_statement_review", lambda _review: True)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "sg-current-proof-batch",
+        "data_import.active_platform": "shopee_sg",
+        "data_import.active_market": "shopee_sg",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": refreshed.stage,
+        "weekly_statement_review": refreshed,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    validate_next = next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    )
+    assert not validate_next.disabled
+    validate_next.click().run(timeout=20)
+
+    reconcile_next = next(
+        button for button in app.button if button.label == "Continue to review & commit"
+    )
+    assert not reconcile_next.disabled
+    reconcile_next.click().run(timeout=20)
+
+    commit = next(button for button in app.button if button.label == "Commit Statement")
+    assert not commit.disabled
+
+
+def test_sg_settlement_conflict_is_visible_and_commit_is_disabled(tmp_path, monkeypatch):
+    review, _, _ = _review(monkeypatch)
+    assert review.evidence_version is not None
+    conflict = "Conflicting committed settlement evidence for Order ID: ORDER-1"
+    blocked = replace(
+        review,
+        stage=replace(
+            review.stage,
+            result=NEEDS_REVIEW,
+            review_reasons=(conflict,),
+            duplicate_status="SETTLEMENT_EVIDENCE_CONFLICT",
+        ),
+        active_gate="FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+        reconciliation_v2=None,
+        plan=None,
+        blockers=(conflict,),
+        persistence_blockers=(conflict,),
+        evidence_version=replace(
+            review.evidence_version,
+            rule_version="FULL_ORDER_EXISTENCE_V1",
+            full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                SHOPEE_SG
+            ),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "sg-conflict-batch",
+        "data_import.active_platform": "shopee_sg",
+        "data_import.active_market": "shopee_sg",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 5,
+        "weekly_statement_stage": blocked.stage,
+        "weekly_statement_review": blocked,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert any(conflict in error.value for error in app.error)
+    commit = next(button for button in app.button if button.label == "Commit Statement")
+    assert commit.disabled
 
 
 def test_statement_back_is_navigation_only_and_forward_restores_staging(

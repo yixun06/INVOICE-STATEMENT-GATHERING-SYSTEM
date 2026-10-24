@@ -13,6 +13,11 @@ from ..parsers.shopee_weekly_statement_parser import (
     SettlementIncomeRow,
     WeeklyStatementParseError,
     parse_shopee_weekly_statement,
+    parse_shopee_statement,
+)
+from ..parsers.shopee_statement_source_contract import (
+    ShopeeStatementSourceContract,
+    resolve_statement_source_contract,
 )
 from .batch_service import canonical_order_identity
 from .statement_reconciliation import (
@@ -58,6 +63,31 @@ class StatementReference:
     statement_period_from: date
     statement_period_to: date
     commit_status: str = "COMMITTED"
+
+
+@dataclass(frozen=True)
+class CommittedOrderSettlementEvidence:
+    """One immutable committed order-level settlement fact."""
+
+    platform: str
+    order_id: str
+    payout_completed_date: date | None
+    total_released_amount: Decimal | None
+    release_channel: str | None
+    order_type: str | None
+
+
+@dataclass(frozen=True)
+class StatementOverlapAssessment:
+    """Classify persisted order evidence relevant to an incoming Statement."""
+
+    semantic_duplicate: bool = False
+    conflict_order_ids: tuple[str, ...] = ()
+    duplicate_order_ids: tuple[str, ...] = ()
+
+    @property
+    def partial_duplicate(self) -> bool:
+        return bool(self.duplicate_order_ids) and not self.semantic_duplicate
 
 
 @dataclass(frozen=True)
@@ -115,11 +145,17 @@ def stage_shopee_weekly_statement(
     source_filename: str | None = None,
     existing_orders: Iterable[Mapping[str, Any]] = (),
     existing_statements: Iterable[StatementReference | Mapping[str, Any]] = (),
+    existing_order_evidence: Iterable[CommittedOrderSettlementEvidence] = (),
     evaluate_legacy_order_reconciliation: bool = True,
+    source_contract: str | ShopeeStatementSourceContract | None = None,
+    semantic_overlap_dedupe: bool = False,
 ) -> StagedShopeeWeeklyStatement:
     try:
-        statement = parse_shopee_weekly_statement(
-            source, source_filename=source_filename
+        statement = parse_shopee_statement(
+            source,
+            source_filename=source_filename,
+            source_label="Shopee Statement",
+            source_contract=source_contract,
         )
     except (WeeklyStatementParseError, OSError) as exc:
         source_error = StatementSourceError(
@@ -147,7 +183,9 @@ def stage_shopee_weekly_statement(
         statement,
         existing_orders=existing_orders,
         existing_statements=existing_statements,
+        existing_order_evidence=existing_order_evidence,
         evaluate_legacy_order_reconciliation=evaluate_legacy_order_reconciliation,
+        semantic_overlap_dedupe=semantic_overlap_dedupe,
     )
 
 
@@ -156,7 +194,9 @@ def stage_parsed_shopee_weekly_statement(
     *,
     existing_orders: Iterable[Mapping[str, Any]] = (),
     existing_statements: Iterable[StatementReference | Mapping[str, Any]] = (),
+    existing_order_evidence: Iterable[CommittedOrderSettlementEvidence] = (),
     evaluate_legacy_order_reconciliation: bool = True,
+    semantic_overlap_dedupe: bool = False,
 ) -> StagedShopeeWeeklyStatement:
     orders = tuple(existing_orders)
     references = tuple(existing_statements)
@@ -184,7 +224,38 @@ def stage_parsed_shopee_weekly_statement(
     result = NEEDS_REVIEW if validation_issues else READY_TO_COMMIT
     duplicate_status = None
     review_reasons: list[str] = []
-    if any(_same_period(statement, item) for item in committed_references):
+    overlap = assess_statement_order_evidence(
+        statement, existing_order_evidence
+    ) if semantic_overlap_dedupe else StatementOverlapAssessment()
+    if overlap.semantic_duplicate:
+        return StagedShopeeWeeklyStatement(
+            result=ALREADY_IMPORTED,
+            source_filename=statement.source_filename,
+            file_hash=statement.file_hash,
+            statement=statement,
+            validation_issues=(),
+            review_reasons=(),
+            rejection_reasons=(),
+            duplicate_status="ALREADY_IMPORTED",
+            order_reconciliations=(),
+            adjustment_reconciliations=(),
+        )
+    if overlap.conflict_order_ids:
+        result = NEEDS_REVIEW
+        duplicate_status = "SETTLEMENT_EVIDENCE_CONFLICT"
+        review_reasons.append(
+            "Conflicting committed settlement evidence for Order ID: "
+            + ", ".join(overlap.conflict_order_ids[:5])
+        )
+    elif overlap.partial_duplicate:
+        result = NEEDS_REVIEW
+        review_reasons.append(
+            "The source mixes already committed settlement evidence with new orders; "
+            "split the source before committing."
+        )
+    elif not semantic_overlap_dedupe and any(
+        _same_period(statement, item) for item in committed_references
+    ):
         duplicate_status = "POSSIBLE_REVISION"
         result = NEEDS_REVIEW
         review_reasons.append(
@@ -289,7 +360,10 @@ def validate_shopee_weekly_statement(
 
     component_mismatches: list[str] = []
     for row in order_rows:
-        values = tuple(row.financial_components.get(name) for name in INCOME_COMPONENT_COLUMNS)
+        values = tuple(
+            row.financial_components.get(name)
+            for name in statement.income_component_columns
+        )
         if row.total_released_amount is None or any(value is None for value in values):
             continue
         component_total = sum(
@@ -486,4 +560,61 @@ def _same_period(
         and _reference_value(reference, "statement_period_to")
         == statement.statement_period_to
         and _reference_value(reference, "file_hash") != statement.file_hash
+    )
+
+
+def assess_statement_order_evidence(
+    statement: ParsedShopeeWeeklyStatement,
+    committed: Iterable[CommittedOrderSettlementEvidence],
+) -> StatementOverlapAssessment:
+    """Compare immutable order settlement facts without using period as a key."""
+
+    existing_by_order: dict[str, set[tuple[date | None, Decimal | None, str | None, str | None]]] = defaultdict(set)
+    for item in committed:
+        if item.order_id:
+            existing_by_order[item.order_id].add(_settlement_fact(item))
+    incoming = tuple(row for row in statement.order_rows if row.order_id)
+    duplicate_ids: list[str] = []
+    conflict_ids: list[str] = []
+    for row in incoming:
+        persisted = existing_by_order.get(row.order_id)
+        if not persisted:
+            continue
+        if _income_settlement_fact(row) in persisted and len(persisted) == 1:
+            duplicate_ids.append(row.order_id)
+        else:
+            conflict_ids.append(row.order_id)
+    unique_incoming_ids = tuple(dict.fromkeys(row.order_id for row in incoming))
+    duplicate_unique = tuple(dict.fromkeys(duplicate_ids))
+    conflict_unique = tuple(dict.fromkeys(conflict_ids))
+    return StatementOverlapAssessment(
+        semantic_duplicate=(
+            bool(unique_incoming_ids)
+            and len(duplicate_unique) == len(unique_incoming_ids)
+            and not conflict_unique
+        ),
+        conflict_order_ids=conflict_unique,
+        duplicate_order_ids=duplicate_unique,
+    )
+
+
+def _settlement_fact(
+    item: CommittedOrderSettlementEvidence,
+) -> tuple[date | None, Decimal | None, str | None, str | None]:
+    return (
+        item.payout_completed_date,
+        item.total_released_amount,
+        item.release_channel,
+        item.order_type,
+    )
+
+
+def _income_settlement_fact(
+    row: SettlementIncomeRow,
+) -> tuple[date | None, Decimal | None, str | None, str | None]:
+    return (
+        row.payout_completed_date,
+        row.total_released_amount,
+        row.release_channel,
+        row.order_type,
     )

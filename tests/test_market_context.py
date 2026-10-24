@@ -181,18 +181,36 @@ def test_manually_constructed_sg_repository_accepts_explicit_sg_settings():
     assert repository is not None
 
 
-def test_sg_market_capabilities_fail_closed_even_with_manually_constructed_settings():
+def test_sg_statement_writer_routes_to_its_explicit_destination_while_monthly_and_billing_stay_my_only():
     settings = UAT2DataSettings(
         google_spreadsheet_id="sg-only-sheet",
+        google_service_account={"type": "service_account"},
         market_context=SHOPEE_SG,
     )
 
-    with pytest.raises(MarketConfigurationUnavailable, match="statement commit is unavailable"):
-        settings.create_statement_writer()
-    with pytest.raises(MarketConfigurationUnavailable, match="statement commit is unavailable"):
+    canonical = settings.create_repository()
+    current = settings.create_full_order_current_repository()
+    statement = settings.create_statement_writer()
+
+    assert canonical._spreadsheet_id == "sg-only-sheet"
+    assert current._spreadsheet_id == "sg-only-sheet"
+    assert statement._spreadsheet_id == "sg-only-sheet"
+    assert statement._persisted_platform == SHOPEE_SG.persisted_platform
+
+    with pytest.raises(MarketConfigurationUnavailable, match="Monthly Statement persistence is MY-only"):
         settings.create_monthly_statement_writer()
     with pytest.raises(MarketConfigurationUnavailable, match="weekly billing is unavailable"):
         settings.create_weekly_billing_reader()
+
+
+def test_sg_statement_writer_rejects_the_default_my_destination_before_io():
+    settings = UAT2DataSettings(
+        google_service_account={"type": "service_account"},
+        market_context=SHOPEE_SG,
+    )
+
+    with pytest.raises(MarketConfigurationUnavailable, match="explicit SG spreadsheet"):
+        settings.create_statement_writer()
 
 
 def test_sg_product_master_reuses_only_shared_google_credentials(monkeypatch, tmp_path):

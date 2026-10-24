@@ -105,6 +105,7 @@ from ..services.shopee_statement_import import (
     commit_statement_review,
     refresh_statement_review,
     review_statement_upload,
+    statement_review_requires_proof_rule_refresh,
 )
 from ..services.shopee_statement_persistence import (
     StatementCommitBlocked,
@@ -117,9 +118,6 @@ from ..services.shopee_full_order_import import (
     refresh_shopee_full_order_review,
     inspect_shopee_full_order_upload,
     review_shopee_full_order_upload,
-)
-from ..services.shopee_full_order_reconciliation import (
-    FULL_ORDER_STATEMENT_PROOF_RULE_VERSION,
 )
 from ..services.shopee_monthly_statement_service import (
     StagedShopeeMonthlyStatement,
@@ -208,7 +206,9 @@ DATA_IMPORT_PLATFORMS = (
         display_name="Shopee SG",
         subtitle="Singapore marketplace import workspace.",
         expected_platform="Shopee",
-        supported_source_types=frozenset({PLATFORM_ORDERS, SHOPEE_FULL_ORDER_LIST}),
+        supported_source_types=frozenset({
+            PLATFORM_ORDERS, SHOPEE_FULL_ORDER_LIST, SHOPEE_WEEKLY_STATEMENT,
+        }),
         market_context=SHOPEE_SG,
     ),
     DataImportPlatform(
@@ -710,7 +710,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
             (
                 "Invoice Import",
                 "Full Order Import",
-                "Weekly Statement",
+                "Statement",
                 "Monthly Statement",
             ),
             key="weekly_statement_selected_source",
@@ -719,7 +719,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
         source_type = {
             "Invoice Import": PLATFORM_ORDERS,
             "Full Order Import": SHOPEE_FULL_ORDER_LIST,
-            "Weekly Statement": SHOPEE_WEEKLY_STATEMENT,
+            "Statement": SHOPEE_WEEKLY_STATEMENT,
             "Monthly Statement": SHOPEE_MONTHLY_STATEMENT,
         }[source_label]
         st.caption(
@@ -729,7 +729,7 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
                 "Native Shopee Full Order List export (.xlsx)."
                 if source_type == SHOPEE_FULL_ORDER_LIST
             else (
-                "Native Shopee Weekly Statement settlement export (.xlsx)."
+                "Native Shopee Statement settlement export for its source period (.xlsx)."
                 if source_type == SHOPEE_WEEKLY_STATEMENT
                 else "Native Shopee full-calendar-month Statement export (.xlsx)."
             )
@@ -753,7 +753,7 @@ def _render_unavailable_capability(platform: DataImportPlatform, source_type: st
     source_label = {
         PLATFORM_ORDERS: "Invoice Import",
         SHOPEE_FULL_ORDER_LIST: "Full Order Import",
-        SHOPEE_WEEKLY_STATEMENT: "Weekly Statement",
+        SHOPEE_WEEKLY_STATEMENT: "Statement",
         SHOPEE_MONTHLY_STATEMENT: "Monthly Statement",
     }[source_type]
     if platform.key == "shopee_sg":
@@ -1020,8 +1020,8 @@ def _render_full_order_market_mismatch(
 
 
 def _render_weekly_statement_upload() -> None:
-    st.subheader("Upload Shopee Weekly Statement")
-    st.caption("Upload one native Shopee Weekly Statement workbook (.xlsx).")
+    st.subheader("Upload Shopee Statement")
+    st.caption("Upload one native Shopee Statement workbook for its actual source period (.xlsx).")
     consistency = statement_stage_review_consistency(st.session_state)
     if not consistency.coherent:
         _render_inconsistent_statement_destination(2)
@@ -1038,7 +1038,7 @@ def _render_weekly_statement_upload() -> None:
         return
     version = int(st.session_state.get("weekly_statement_uploader_version", 0))
     uploaded_file = st.file_uploader(
-        "Shopee Weekly Statement (.xlsx)",
+        "Shopee Statement (.xlsx)",
         type=["xlsx"],
         key=f"weekly_statement_uploader_{version}",
     )
@@ -1065,7 +1065,11 @@ def _render_weekly_statement_upload() -> None:
             settings = configured_uat2_data_settings(
                 context, require_explicit_context=True
             )
-            master, _label = load_configured_product_price_master(context)
+            master = (
+                None
+                if context.statement_order_existence_gate
+                else load_configured_product_price_master(context)[0]
+            )
             review = review_statement_upload(
                 uploaded_file,
                 source_filename=uploaded_file.name,
@@ -1699,16 +1703,6 @@ def _render_contract_validation(result: ImportResult) -> None:
     _render_recovery_notice()
     queue = build_exception_work_queue(result)
     blockers, notes = _partition_exception_work_queue(queue)
-    if (
-        result.source_type == SHOPEE_WEEKLY_STATEMENT
-        and missing_invoice_order_ids(blockers)
-    ):
-        _render_missing_invoice_exception_details(
-            blockers,
-            notes,
-            key_prefix="statement_exception_queue",
-        )
-        return
     _render_actionable_blockers_and_notes(
         blockers,
         notes,
@@ -3734,11 +3728,14 @@ def _render_product_master_revalidation(entries: tuple[Any, ...]) -> None:
     begin_workflow_activity(st.session_state, "Revalidating")
     try:
         clear_product_master_source_cache()
-        master, source_label = load_configured_product_price_master()
+        context = _required_persistence_market_context()
+        master, source_label = load_configured_product_price_master(context)
         result = revalidate_current_invoice_batch(
             st.session_state,
             price_master=master,
-            repository=configured_uat2_data_settings().create_repository(),
+            repository=configured_uat2_data_settings(
+                context, require_explicit_context=True
+            ).create_repository(),
             staging_signature=_historical_commit_signature(),
         )
     except Exception as error:
@@ -3924,6 +3921,23 @@ def _render_review_and_commit_step() -> None:
         _render_back_button(4, key="coverage_statement_commit_back")
         _render_source_summary(result)
         return
+    if review is not None and review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE":
+        if readiness.ready and review.commit_ready and not _statement_review_stale():
+            st.success(
+                "Statement review complete — Full Order coverage and source financial controls passed.",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.error(
+                "Statement cannot commit until the current source and Full Order coverage blockers are resolved. "
+                + (readiness.reasons[0] if readiness.reasons else ""),
+                icon=":material/error:",
+            )
+        _render_statement_commit(readiness.ready)
+        _render_back_button(4, key="order_existence_statement_commit_back")
+        _render_statement_exit_button(key="order_existence_statement_commit_exit")
+        _render_source_summary(result)
+        return
     if (
         review is not None
         and readiness.ready
@@ -4053,6 +4067,7 @@ def _render_full_order_review_and_sync() -> None:
     except (
         ValueError,
         HistoricalInvoiceStorageError,
+        MarketConfigurationUnavailable,
         ProductMasterSourceError,
         ApplicationCommitInProgress,
     ) as error:
@@ -4160,7 +4175,10 @@ def _render_historical_invoice_commit() -> None:
         key="uat2_historical_commit",
     ):
         try:
-            repository = configured_uat2_data_settings().create_repository()
+            context = _required_persistence_market_context()
+            repository = configured_uat2_data_settings(
+                context, require_explicit_context=True
+            ).create_repository()
             outcome = import_new_staging(entries, repository)
             st.session_state.uat2_historical_commit_entries = outcome.entries
             actual = outcome.bulk_result.results
@@ -4188,7 +4206,7 @@ def _render_historical_invoice_commit() -> None:
             st.rerun()
         except ApplicationCommitInProgress as error:
             st.warning(str(error))
-        except HistoricalInvoiceStorageError as error:
+        except (HistoricalInvoiceStorageError, MarketConfigurationUnavailable) as error:
             st.error(f"Historical Invoice storage write failed: {error}")
 
 
@@ -4248,7 +4266,8 @@ def _reconcile_historical_invoice_staging() -> tuple[Any, ...]:
         or refresh_required
     ):
         try:
-            master, _label = load_configured_product_price_master()
+            context = _required_persistence_market_context()
+            master, _label = load_configured_product_price_master(context)
             candidates = build_current_batch_staging(
                 batch_id=st.session_state.get("batch_id"),
                 orders=st.session_state.get("orders", []),
@@ -4667,7 +4686,11 @@ def _render_statement_commit(ready: bool) -> None:
         settings = configured_uat2_data_settings(
             context, require_explicit_context=True
         )
-        master, _label = load_configured_product_price_master(context)
+        master = (
+            None
+            if context.statement_order_existence_gate
+            else load_configured_product_price_master(context)[0]
+        )
         currency = check_statement_review_currency(
             review,
             writer=settings.create_statement_writer(),
@@ -4723,8 +4746,11 @@ def _refresh_statement_review(review: StatementImportReview) -> bool:
         settings = configured_uat2_data_settings(
             context, require_explicit_context=True
         )
-        clear_product_master_source_cache()
-        master, _label = load_configured_product_price_master(context)
+        if context.statement_order_existence_gate:
+            master = None
+        else:
+            clear_product_master_source_cache()
+            master, _label = load_configured_product_price_master(context)
         refreshed = refresh_statement_review(
             review,
             writer=settings.create_statement_writer(),
@@ -4961,9 +4987,8 @@ def _statement_review_stale() -> bool:
     evidence_version = getattr(review, "evidence_version", None)
     if evidence_version is None:
         return False
-    if (
-        getattr(evidence_version, "full_order_proof_rule_version", None)
-        == FULL_ORDER_STATEMENT_PROOF_RULE_VERSION
+    if not statement_review_requires_proof_rule_refresh(
+        review, _active_invoice_market_context()
     ):
         return False
     st.session_state["weekly_statement_review_stale_reason"] = (

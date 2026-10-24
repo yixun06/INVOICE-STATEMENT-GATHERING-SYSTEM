@@ -450,6 +450,16 @@ def _adapt_v2_statement_review(
     batch = review.reconciliation_v2
     source = stage.source_filename
     source_error = _statement_source_error_presentation(stage)
+    if (
+        review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+        and batch is None
+        and statement is not None
+    ):
+        return _adapt_order_existence_statement_review(
+            review,
+            batch_id=batch_id,
+            source_error=source_error,
+        )
     recovery_actions = recovery_actions_for_source(
         source=source,
         action_type=REMOVE_STAGED_SOURCE,
@@ -757,5 +767,121 @@ def _adapt_v2_statement_review(
             batch_id=batch_id,
         ),
         source_specific_details=source_details,
+        source_error=source_error,
+    )
+
+
+def _adapt_order_existence_statement_review(
+    review: StatementImportReview,
+    *,
+    batch_id: str | None,
+    source_error: SourceErrorPresentation | None,
+) -> ImportResult:
+    """Present the active exact-Current-order gate without V2 residual UI."""
+
+    stage = review.stage
+    statement = stage.statement
+    assert statement is not None
+    coverage = review.evidence_coverage
+    missing = coverage.additional_evidence if coverage else ()
+    blockers = tuple(review.blockers) + tuple(
+        requirement.reason for requirement in missing
+    )
+    validation = ValidationResult(
+        blocking_issues=tuple(
+            ValidationIssue(
+                layer="statement_full_order_coverage",
+                severity="error",
+                blocking=True,
+                reason=requirement.reason,
+                affected_item=requirement.order_id,
+                evidence={"order_id": requirement.order_id},
+                suggested_action="Sync the exact order to this market's Full Order Current first.",
+            )
+            for requirement in missing
+        ) + tuple(
+            ValidationIssue(
+                layer="statement_validation",
+                severity="error",
+                blocking=True,
+                reason=reason,
+                affected_item=stage.source_filename,
+            )
+            for reason in review.blockers
+        ),
+        warnings=tuple(
+            ValidationIssue(
+                layer="statement_source_facts",
+                severity="warning",
+                blocking=False,
+                reason=limitation,
+                affected_item=stage.source_filename,
+            )
+            for limitation in review.limitations
+        ),
+    )
+    covered_count = len(coverage.ready_from_full_order_order_ids) if coverage else 0
+    summary = (
+        SummaryItem("Statement Orders", len(statement.order_rows)),
+        SummaryItem("Full Order covered", covered_count),
+        SummaryItem("Full Order missing", len(missing)),
+        SummaryItem("Total Released", statement.summary_total_released),
+        SummaryItem("Adjustment Total", statement.adjustment_control_total),
+    )
+    ready = review.commit_ready
+    return ImportResult(
+        source_type=SHOPEE_WEEKLY_STATEMENT,
+        batch_status="Ready to Commit" if ready else "Not Ready",
+        source_summary=SourceSummary(
+            title="Shopee Statement result",
+            items=(
+                SummaryItem(
+                    "Statement Period",
+                    f"{statement.statement_period_from:%d/%m/%Y} – {statement.statement_period_to:%d/%m/%Y}",
+                ),
+                *summary,
+            ),
+            empty_message="Upload one native Shopee Statement .xlsx file to begin validation.",
+        ),
+        validation=validation,
+        reconciliation=ReconciliationResult(
+            available=not missing and source_error is None,
+            status="Available" if not missing and source_error is None else "Full Order coverage required",
+            summary=summary,
+            exceptions=tuple(
+                ReconciliationException(
+                    status="Missing Full Order Current",
+                    affected_item=requirement.order_id,
+                    evidence={"reason": requirement.reason},
+                )
+                for requirement in missing
+            ),
+            source_specific_details={
+                "stage": stage,
+                "statement": statement,
+                "review": review,
+                "statement_evidence_coverage": coverage,
+                "statement_source_error": source_error,
+                "active_gate": "FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+            },
+        ),
+        commit_readiness=CommitReadiness(
+            ready=ready,
+            status="Ready to Commit" if ready else "Not Ready",
+            reasons=tuple(dict.fromkeys(blockers)) or (() if ready else ("Statement is not ready.",)),
+            database_commit_available=ready,
+        ),
+        session_state=SessionState(
+            applied_to_current_session=bool(batch_id),
+            label="Applied to Current Session" if batch_id else "No Active Session Batch",
+            batch_id=batch_id,
+        ),
+        source_specific_details={
+            "stage": stage,
+            "statement": statement,
+            "review": review,
+            "statement_evidence_coverage": coverage,
+            "active_gate": "FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+        },
         source_error=source_error,
     )

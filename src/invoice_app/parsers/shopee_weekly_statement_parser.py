@@ -16,35 +16,26 @@ from zipfile import BadZipFile, ZipFile
 from openpyxl import load_workbook
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
-
-REQUIRED_SHEETS = (
-    "Summary", "Income", "Service Fee Details",
-    "Shipping Fee Discrepancy",
+from .shopee_statement_source_contract import (
+    SHOPEE_MY_STATEMENT_SOURCE,
+    ShopeeStatementSourceContract,
+    SummaryLineSpec,
+    resolve_statement_source_contract,
 )
-OPTIONAL_SHEETS = ("Adjustment",)
+
+
+REQUIRED_SHEETS = SHOPEE_MY_STATEMENT_SOURCE.required_sheets
+OPTIONAL_SHEETS = SHOPEE_MY_STATEMENT_SOURCE.optional_sheets
 
 MISSING_REQUIRED_WORKSHEET = "MISSING_REQUIRED_WORKSHEET"
 INVALID_REQUIRED_HEADER = "INVALID_REQUIRED_HEADER"
 INVALID_WORKBOOK = "INVALID_WORKBOOK"
 OTHER_SOURCE_CONTRACT_FAILURE = "OTHER_SOURCE_CONTRACT_FAILURE"
-INCOME_COMPONENT_COLUMNS = (
-    "Product Price", "Refund Amount",
-    "Shipping Fee Paid by Buyer (excl. SST)",
-    "Shipping Fee Charged by Logistic Provider",
-    "Seller Paid Shipping Fee SST", "Shipping Rebate From Shopee",
-    "Reverse Shipping Fee", "Reverse Shipping Fee SST",
-    "Saver Programme Shipping Fee Savings", "Return to Seller Fee",
-    "Rebate Provided by Shopee", "Voucher Sponsored by Seller",
-    "Cofund Voucher Sponsored by Seller", "Coin Cashback Sponsored by Seller",
-    "Cofund Coin Cashback Sponsored by Seller", "Commission Fee (incl. SST)",
-    "Service Fee (Incl. SST)", "Transaction Fee (Incl. SST)",
-    "AMS Commission Fee", "Saver Programme Fee (Incl. SST)",
-    "Ads Escrow Top Up Fee",
-)
+INCOME_COMPONENT_COLUMNS = SHOPEE_MY_STATEMENT_SOURCE.income_component_columns
 INCOME_REQUIRED_COLUMNS = (
     "Sequence No.", "View By", "Order ID", "Product ID", "Product Name",
     "Order Creation Date", "Payout Completed Date", "Release Channel",
-    "Order Type", "Total Released Amount (RM)", *INCOME_COMPONENT_COLUMNS,
+    "Order Type", SHOPEE_MY_STATEMENT_SOURCE.total_released_header, *INCOME_COMPONENT_COLUMNS,
 )
 SERVICE_FEE_REQUIRED_COLUMNS = ("Sequence No.", "Order ID")
 SHIPPING_REQUIRED_COLUMNS = (
@@ -55,50 +46,6 @@ ADJUSTMENT_REQUIRED_COLUMNS = (
     "Sequence No.", "Adjustment Complete Date", "Adjustment Type | Description",
     "Adjustment Reason", "Adjustment Amount", "Linked Order No.",
     "Payout Completed Date",
-)
-
-
-@dataclass(frozen=True)
-class _SummaryLineSpec:
-    native_label: str
-    line_type: str
-    parent_label: str | None
-    label_column_index: int
-
-
-_SUMMARY_LINE_SPECS = (
-    _SummaryLineSpec("1. Total Revenue", "TOTAL", None, 0),
-    _SummaryLineSpec("Merchandise Subtotal", "SUBTOTAL", "1. Total Revenue", 0),
-    _SummaryLineSpec("Original product price", "DETAIL", "Merchandise Subtotal", 1),
-    _SummaryLineSpec("Your Seller product promotion", "DETAIL", "Merchandise Subtotal", 1),
-    _SummaryLineSpec("Refund Amount", "DETAIL", "Merchandise Subtotal", 1),
-    _SummaryLineSpec("Voucher & Rebates", "SUBTOTAL", "1. Total Revenue", 0),
-    _SummaryLineSpec("Rebate Provided by Shopee", "DETAIL", "Voucher & Rebates", 1),
-    _SummaryLineSpec("Voucher Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
-    _SummaryLineSpec("Cofund Voucher Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
-    _SummaryLineSpec("Coin Cashback Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
-    _SummaryLineSpec("Cofund Coin Cashback Sponsored by Seller", "DETAIL", "Voucher & Rebates", 1),
-    _SummaryLineSpec("2. Total Expenses", "TOTAL", None, 0),
-    _SummaryLineSpec("Shipping Subtotal", "SUBTOTAL", "2. Total Expenses", 0),
-    _SummaryLineSpec("Shipping Fee Paid by Buyer (excl. SST)", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Shipping Fee Discount from 3PL", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Shipping Rebate From Shopee", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Seller Paid Shipping Fee SST", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Actual Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Reverse Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Reverse Shipping Fee SST", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Saver Programme Shipping Fee Savings", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Return to Seller Shipping Fee", "DETAIL", "Shipping Subtotal", 1),
-    _SummaryLineSpec("Fees & Charges", "SUBTOTAL", "2. Total Expenses", 0),
-    _SummaryLineSpec("AMS Commission Fee", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("Commission Fee (incl. SST)", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("Service Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("Saver Programme Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("Transaction Fee (Incl. SST)", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("Ads Escrow Top Up Fee", "DETAIL", "Fees & Charges", 1),
-    _SummaryLineSpec("3. Total Released Amount", "TOTAL", None, 0),
-    _SummaryLineSpec("Other Reference Values", "SECTION_HEADER", None, 0),
-    _SummaryLineSpec("Shipping Fee Promotion by Seller", "REFERENCE", "Other Reference Values", 0),
 )
 
 
@@ -187,6 +134,8 @@ class ParsedShopeeStatement:
     source_value_issues: tuple[SourceValueIssue, ...]
     dimension_fallback_sheets: tuple[str, ...]
     summary_lines: tuple[StatementSummaryLine, ...] = ()
+    source_contract_key: str = SHOPEE_MY_STATEMENT_SOURCE.key
+    income_component_columns: tuple[str, ...] = INCOME_COMPONENT_COLUMNS
 
     @property
     def order_rows(self) -> tuple[SettlementIncomeRow, ...]:
@@ -222,7 +171,9 @@ def parse_shopee_statement(
     *,
     source_filename: str | None = None,
     source_label: str = "Shopee Statement",
+    source_contract: str | ShopeeStatementSourceContract | None = None,
 ) -> ParsedShopeeStatement:
+    contract = resolve_statement_source_contract(source_contract)
     workbook_bytes, filename = _read_source(source, source_filename)
     file_hash = sha256(workbook_bytes).hexdigest()
     if filename and Path(filename).suffix.casefold() != ".xlsx":
@@ -247,7 +198,7 @@ def parse_shopee_statement(
         ) from exc
 
     try:
-        missing = [name for name in REQUIRED_SHEETS if name not in workbook.sheetnames]
+        missing = [name for name in contract.required_sheets if name not in workbook.sheetnames]
         if missing:
             raise ShopeeStatementParseError(
                 "Missing required sheet(s): " + ", ".join(missing),
@@ -262,16 +213,25 @@ def parse_shopee_statement(
             workbook_bytes, workbook["Summary"],
             ("3. Total Released Amount",), fallback_sheets,
         )
+        income_required_columns = (
+            "Sequence No.", "View By", "Order ID", "Product ID", "Product Name",
+            "Order Creation Date", "Payout Completed Date", "Release Channel",
+            "Order Type", contract.total_released_header, *contract.income_component_columns,
+        )
         income_rows = _read_worksheet_rows(
-            workbook_bytes, workbook["Income"], INCOME_REQUIRED_COLUMNS, fallback_sheets,
+            workbook_bytes, workbook["Income"], income_required_columns, fallback_sheets,
         )
         service_rows = _read_worksheet_rows(
             workbook_bytes, workbook["Service Fee Details"],
             SERVICE_FEE_REQUIRED_COLUMNS, fallback_sheets,
         )
-        shipping_rows = _read_worksheet_rows(
-            workbook_bytes, workbook["Shipping Fee Discrepancy"],
-            SHIPPING_REQUIRED_COLUMNS, fallback_sheets,
+        shipping_rows = (
+            _read_worksheet_rows(
+                workbook_bytes, workbook["Shipping Fee Discrepancy"],
+                SHIPPING_REQUIRED_COLUMNS, fallback_sheets,
+            )
+            if "Shipping Fee Discrepancy" in workbook.sheetnames
+            else None
         )
         adjustment_rows = (
             _read_worksheet_rows(
@@ -283,7 +243,7 @@ def parse_shopee_statement(
         )
         period_from = _required_label_date(summary_rows, "From", "Summary")
         period_to = _required_label_date(summary_rows, "to", "Summary")
-        summary_lines = _parse_summary_lines(summary_rows)
+        summary_lines = _parse_summary_lines(summary_rows, contract)
         summary_total = _summary_amount(summary_lines, "3. Total Released Amount")
         adjustment_control = (
             _required_label_decimal(
@@ -298,11 +258,14 @@ def parse_shopee_statement(
             else None
         )
         issues: list[SourceValueIssue] = []
-        parsed_income = _parse_income_rows(income_rows, issues)
+        parsed_income = _parse_income_rows(income_rows, issues, contract)
         parsed_service = _parse_service_fee_rows(service_rows, issues)
-        parsed_shipping = _parse_shipping_rows(shipping_rows, issues)
+        parsed_shipping = (
+            _parse_shipping_rows(shipping_rows, issues)
+            if shipping_rows is not None else []
+        )
         parsed_adjustments = (
-            _parse_adjustment_rows(adjustment_rows, issues)
+            _parse_adjustment_rows(adjustment_rows, issues, contract)
             if adjustment_rows is not None
             else []
         )
@@ -332,6 +295,8 @@ def parse_shopee_statement(
         source_value_issues=tuple(issues),
         dimension_fallback_sheets=tuple(fallback_sheets),
         summary_lines=tuple(summary_lines),
+        source_contract_key=contract.key,
+        income_component_columns=contract.income_component_columns,
     )
 
 
@@ -350,6 +315,7 @@ def parse_shopee_weekly_statement(
         source,
         source_filename=source_filename,
         source_label="Shopee Weekly Statement",
+        source_contract=SHOPEE_MY_STATEMENT_SOURCE,
     )
 
 
@@ -519,7 +485,9 @@ def _optional_label_decimal(rows: list[tuple[Any, ...]], label: str) -> Decimal 
     return _parse_decimal(_find_label_value(rows, label))
 
 
-def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLine]:
+def _parse_summary_lines(
+    rows: list[tuple[Any, ...]], contract: ShopeeStatementSourceContract
+) -> list[StatementSummaryLine]:
     """Parse only the reviewed native Summary hierarchy, preserving its labels."""
 
     anchor_matches = [
@@ -546,9 +514,9 @@ def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLi
     currency = currency_values[0]
 
     specs_by_label = {
-        _normalize_header(spec.native_label): spec for spec in _SUMMARY_LINE_SPECS
+        _normalize_header(spec.native_label): spec for spec in contract.summary_line_specs
     }
-    found: dict[str, tuple[_SummaryLineSpec, int, str, Decimal | None]] = {}
+    found: dict[str, tuple[SummaryLineSpec, int, str, Decimal | None]] = {}
     for row_number, row in enumerate(rows[anchor_row:], start=anchor_row + 1):
         populated = [
             (column_number, value)
@@ -590,6 +558,13 @@ def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLi
                     f"Summary section header {spec.native_label!r} must not contain an amount."
                 )
             amount = None
+        elif contract.summary_allows_auxiliary_values:
+            amount_column = 3 if label_column == 0 else 2
+            amount = _parse_decimal(row[amount_column] if amount_column < len(row) else None)
+            if amount is None:
+                raise WeeklyStatementParseError(
+                    f"Summary monetary line {spec.native_label!r} has no valid amount."
+                )
         else:
             if len(remaining) != 1:
                 raise WeeklyStatementParseError(
@@ -602,10 +577,10 @@ def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLi
                 )
         found[normalized_label] = (spec, row_number, _text(raw_label), amount)
 
-    expected_labels = tuple(_normalize_header(spec.native_label) for spec in _SUMMARY_LINE_SPECS)
+    expected_labels = tuple(_normalize_header(spec.native_label) for spec in contract.summary_line_specs)
     missing = [
         spec.native_label
-        for spec in _SUMMARY_LINE_SPECS
+        for spec in contract.summary_line_specs
         if _normalize_header(spec.native_label) not in found
     ]
     if missing:
@@ -617,7 +592,7 @@ def _parse_summary_lines(rows: list[tuple[Any, ...]]) -> list[StatementSummaryLi
         raise WeeklyStatementParseError("Summary native line order is unsupported.")
 
     result: list[StatementSummaryLine] = []
-    for spec in _SUMMARY_LINE_SPECS:
+    for spec in contract.summary_line_specs:
         normalized_label = _normalize_header(spec.native_label)
         _, row_number, native_label, amount = found[normalized_label]
         parent_row = (
@@ -701,9 +676,16 @@ def _source_mapping(headers: tuple[Any, ...], row: tuple[Any, ...]) -> dict[str,
     }
 
 def _parse_income_rows(
-    rows: list[tuple[Any, ...]], issues: list[SourceValueIssue]
+    rows: list[tuple[Any, ...]],
+    issues: list[SourceValueIssue],
+    contract: ShopeeStatementSourceContract = SHOPEE_MY_STATEMENT_SOURCE,
 ) -> list[SettlementIncomeRow]:
-    header_index, positions = _require_header(rows, INCOME_REQUIRED_COLUMNS, "Income")
+    required_columns = (
+        "Sequence No.", "View By", "Order ID", "Product ID", "Product Name",
+        "Order Creation Date", "Payout Completed Date", "Release Channel",
+        "Order Type", contract.total_released_header, *contract.income_component_columns,
+    )
+    header_index, positions = _require_header(rows, required_columns, "Income")
     headers = rows[header_index]
     parsed: list[SettlementIncomeRow] = []
     for row_number, row in enumerate(rows, start=1):
@@ -728,10 +710,10 @@ def _parse_income_rows(
             continue
         order_created = _parse_date(row_value("Order Creation Date"))
         payout_completed = _parse_date(row_value("Payout Completed Date"))
-        total_released = _parse_decimal(row_value("Total Released Amount (RM)"))
+        total_released = _parse_decimal(row_value(contract.total_released_header))
         components = {
             header: _parse_decimal(row_value(header))
-            for header in INCOME_COMPONENT_COLUMNS
+            for header in contract.income_component_columns
         }
         if view_by not in {"Order", "Sku"} and not order_id:
             _record_issue(issues, code="unrecognized_income_row", sheet="Income", row_number=row_number, column="View By", value=view_by)
@@ -745,7 +727,7 @@ def _parse_income_rows(
             if payout_completed is None:
                 _record_issue(issues, code="invalid_payout_completed_date", sheet="Income", row_number=row_number, column="Payout Completed Date", value=row_value("Payout Completed Date"))
             if total_released is None:
-                _record_issue(issues, code="invalid_total_released", sheet="Income", row_number=row_number, column="Total Released Amount (RM)", value=row_value("Total Released Amount (RM)"))
+                _record_issue(issues, code="invalid_total_released", sheet="Income", row_number=row_number, column=contract.total_released_header, value=row_value(contract.total_released_header))
         if view_by == "Order":
             for header, component_value in components.items():
                 if component_value is None:
@@ -853,7 +835,9 @@ def _parse_shipping_rows(
 
 
 def _parse_adjustment_rows(
-    rows: list[tuple[Any, ...]], issues: list[SourceValueIssue]
+    rows: list[tuple[Any, ...]],
+    issues: list[SourceValueIssue],
+    contract: ShopeeStatementSourceContract = SHOPEE_MY_STATEMENT_SOURCE,
 ) -> list[SettlementAdjustment]:
     header_index, positions = _require_header(
         rows, ADJUSTMENT_REQUIRED_COLUMNS, "Adjustment"
@@ -871,7 +855,7 @@ def _parse_adjustment_rows(
             _record_issue(issues, code="invalid_adjustment_amount", sheet="Adjustment", row_number=row_number, column="Adjustment Amount", value=row[positions["Adjustment Amount"]])
         if complete_date is None:
             _record_issue(issues, code="invalid_adjustment_complete_date", sheet="Adjustment", row_number=row_number, column="Adjustment Complete Date", value=row[positions["Adjustment Complete Date"]])
-        if payout_date is None:
+        if payout_date is None and contract.adjustment_payout_date_required:
             _record_issue(issues, code="invalid_adjustment_payout_date", sheet="Adjustment", row_number=row_number, column="Payout Completed Date", value=row[positions["Payout Completed Date"]])
         parsed.append(SettlementAdjustment(
             sequence_no=_text(row[positions["Sequence No."]]),

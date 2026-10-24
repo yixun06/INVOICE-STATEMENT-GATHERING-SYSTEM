@@ -37,6 +37,9 @@ class MarketContext:
     cross_platform_eligible: bool
     statement_commit_available: bool
     weekly_billing_available: bool
+    statement_source_contract: str = "shopee_my"
+    statement_order_existence_gate: bool = False
+    statement_semantic_overlap_dedupe: bool = False
 
     @property
     def state_namespace(self) -> str:
@@ -52,6 +55,8 @@ SHOPEE_MY = MarketContext(
     cross_platform_eligible=True,
     statement_commit_available=True,
     weekly_billing_available=True,
+    statement_source_contract="shopee_my",
+    statement_order_existence_gate=False,
 )
 
 SHOPEE_SG = MarketContext(
@@ -61,8 +66,14 @@ SHOPEE_SG = MarketContext(
     currency_code="SGD",
     currency_display="SGD",
     cross_platform_eligible=True,
-    statement_commit_available=False,
+    # The shared Statement writer is destination-safe for SG.  The SG upload
+    # and billing workflows remain separately gated until their source
+    # contracts are approved.
+    statement_commit_available=True,
     weekly_billing_available=False,
+    statement_source_contract="shopee_sg",
+    statement_order_existence_gate=True,
+    statement_semantic_overlap_dedupe=True,
 )
 
 LAZADA = MarketContext(

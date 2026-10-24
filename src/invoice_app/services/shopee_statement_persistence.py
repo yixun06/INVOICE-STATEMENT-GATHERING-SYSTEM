@@ -61,6 +61,10 @@ from src.invoice_app.services.statement_reconciliation import (
     UNMATCHED_ORDER,
     compare_statement_order,
 )
+from src.invoice_app.services.shopee_weekly_statement_service import (
+    CommittedOrderSettlementEvidence,
+    assess_statement_order_evidence,
+)
 
 
 class StatementCommitBlocked(RuntimeError):
@@ -148,6 +152,7 @@ class StatementCommitPlan:
     # The retained default keeps the historical Invoice-centric writer API
     # available only for archived/audit callers.
     authority: str = "LEGACY_INVOICE_V2"
+    semantic_overlap_dedupe: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +161,7 @@ class StatementCommitState:
     committed_statements: Sequence[CommittedStatementReference]
     items: tuple[CanonicalInvoiceItem, ...] = ()
     order_adjustments: tuple[CanonicalOrderAdjustment, ...] = ()
+    committed_order_evidence: tuple[CommittedOrderSettlementEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -458,6 +464,7 @@ def prepare_v2_statement_commit_plan(
                     match_method=_v2_item_match_method(edge.match_method),
                     product_price=product_price,
                     refund_amount=refund_amount,
+                    persisted_platform=persisted_platform,
                 )
                 item_targets.add(key)
                 item_updates.append(
@@ -514,6 +521,7 @@ def prepare_v2_statement_commit_plan(
                     match_method=GROUP_MATCH_METHOD,
                     product_price=product_price,
                     refund_amount=refund_amount,
+                    persisted_platform=persisted_platform,
                 )
 
     if planned_statement_members != set(source_rows):
@@ -528,7 +536,7 @@ def prepare_v2_statement_commit_plan(
 
     comparison_tuple = tuple(comparisons)
     rows = [
-        _order_row(statement, audit, row, comparison)
+        _order_row(statement, audit, row, comparison, persisted_platform=persisted_platform)
         for row, comparison in zip(statement.order_rows, comparison_tuple)
     ]
     for source_row in statement.sku_rows:
@@ -540,7 +548,7 @@ def prepare_v2_statement_commit_plan(
         )
         rows.append(serialized_sku_rows[member])
     rows.extend(
-        _adjustment_row(statement, audit, adjustment)
+        _adjustment_row(statement, audit, adjustment, persisted_platform=persisted_platform)
         for adjustment in statement.adjustments
     )
     order_updates = tuple(
@@ -583,12 +591,16 @@ def prepare_v2_statement_commit_plan(
         statement=statement,
         audit=audit,
         rows=tuple(rows),
-        financial_component_rows=_financial_component_rows(statement, audit),
+        financial_component_rows=_financial_component_rows(
+            statement, audit, persisted_platform=persisted_platform
+        ),
         order_comparisons=comparison_tuple,
         invoice_order_updates=order_updates,
         invoice_item_updates=tuple(item_updates),
-        summary_rows=_summary_rows(statement, audit),
-        order_adjustments=_order_adjustment_events(statement, audit),
+        summary_rows=_summary_rows(statement, audit, persisted_platform=persisted_platform),
+        order_adjustments=_order_adjustment_events(
+            statement, audit, persisted_platform=persisted_platform
+        ),
         protected_invoice_items=tuple(
             group_targets[key] for key in sorted(group_targets)
         ),
@@ -639,6 +651,75 @@ def prepare_full_order_statement_commit_plan(
     )
 
 
+def prepare_full_order_existence_statement_commit_plan(
+    statement: ParsedShopeeWeeklyStatement,
+    *,
+    audit: StatementBatchAudit,
+    full_order_ids: Iterable[str],
+    validation_passed: bool,
+    persisted_platform: str,
+    semantic_overlap_dedupe: bool = False,
+) -> StatementCommitPlan:
+    """Persist source settlement facts after exact Current-order existence proof.
+
+    This active gate deliberately has no Invoice/PDF, Product Master, SKU, or
+    merchandise allocation dependency.  It records unallocated SKU source rows
+    intact and leaves legacy Invoice projection fields blank.
+    """
+
+    if not validation_passed:
+        raise StatementCommitBlocked("Statement internal validation has not passed.")
+    if not audit.statement_batch_id.strip():
+        raise ValueError("statement_batch_id is required.")
+    _validate_statement_row_identity(statement)
+    covered = {str(order_id).strip() for order_id in full_order_ids if str(order_id).strip()}
+    missing = [row.order_id for row in statement.order_rows if row.order_id not in covered]
+    if missing:
+        raise StatementCommitBlocked(
+            "Statement target Order ID is missing from Full Order Current: " + missing[0]
+        )
+    comparisons = tuple(
+        StatementOrderComparison(
+            order_id=row.order_id,
+            comparison_source="Full Order Current",
+            comparison_amount=None,
+            difference=None,
+            reconciliation_status="FULL_ORDER_EXISTS",
+            payout_completed_date=row.payout_completed_date,
+        )
+        for row in statement.order_rows
+    )
+    rows = [
+        _order_row(statement, audit, row, comparison, persisted_platform=persisted_platform)
+        for row, comparison in zip(statement.order_rows, comparisons)
+    ]
+    rows.extend(
+        _unallocated_sku_row(statement, audit, row, persisted_platform=persisted_platform)
+        for row in statement.sku_rows
+    )
+    rows.extend(
+        _adjustment_row(statement, audit, adjustment, persisted_platform=persisted_platform)
+        for adjustment in statement.adjustments
+    )
+    return StatementCommitPlan(
+        statement=statement,
+        audit=audit,
+        rows=tuple(rows),
+        financial_component_rows=_financial_component_rows(
+            statement, audit, persisted_platform=persisted_platform
+        ),
+        order_comparisons=comparisons,
+        invoice_order_updates=(),
+        invoice_item_updates=(),
+        summary_rows=_summary_rows(statement, audit, persisted_platform=persisted_platform),
+        order_adjustments=_order_adjustment_events(
+            statement, audit, persisted_platform=persisted_platform
+        ),
+        authority="FULL_ORDER_CURRENT",
+        semantic_overlap_dedupe=semantic_overlap_dedupe,
+    )
+
+
 def validate_active_statement_state(
     plan: StatementCommitPlan,
     state: StatementCommitState,
@@ -654,6 +735,20 @@ def validate_active_statement_state(
     )
     if any(reference.file_hash == plan.statement.file_hash for reference in references):
         return ("ALREADY_IMPORTED",)
+    if plan.semantic_overlap_dedupe:
+        overlap = assess_statement_order_evidence(
+            plan.statement, state.committed_order_evidence
+        )
+        if overlap.semantic_duplicate:
+            return ("ALREADY_IMPORTED",)
+        if overlap.conflict_order_ids:
+            return tuple(
+                f"SETTLEMENT_EVIDENCE_CONFLICT:{order_id}"
+                for order_id in overlap.conflict_order_ids
+            )
+        if overlap.partial_duplicate:
+            return ("PARTIAL_DUPLICATE_SETTLEMENT_EVIDENCE",)
+        return ()
     if any(
         reference.statement_period_from == plan.statement.statement_period_from
         and reference.statement_period_to == plan.statement.statement_period_to
@@ -825,12 +920,20 @@ def _compare_order_by_id(
     return _compare_order(row, order)
 
 
-def _common(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit, record_type: str, sequence_no: str, source_row: int) -> dict[str, object]:
+def _common(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    record_type: str,
+    sequence_no: str,
+    source_row: int,
+    *,
+    persisted_platform: str = "Shopee",
+) -> dict[str, object]:
     return {
         "statement_batch_id": audit.statement_batch_id,
         "record_type": record_type,
         "sequence_no": sequence_no,
-        "platform": "Shopee",
+        "platform": persisted_platform,
         "statement_source_filename": statement.source_filename,
         "statement_file_hash": statement.file_hash,
         "statement_period_from": statement.statement_period_from,
@@ -848,8 +951,18 @@ def _common(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit, 
     }
 
 
-def _order_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit, row: SettlementIncomeRow, comparison: StatementOrderComparison) -> tuple[str, ...]:
-    values = _common(statement, audit, "ORDER", row.sequence_no, row.source_row_number)
+def _order_row(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    row: SettlementIncomeRow,
+    comparison: StatementOrderComparison,
+    *,
+    persisted_platform: str = "Shopee",
+) -> tuple[str, ...]:
+    values = _common(
+        statement, audit, "ORDER", row.sequence_no, row.source_row_number,
+        persisted_platform=persisted_platform,
+    )
     values.update({
         "order_id": row.order_id, "order_creation_date": row.order_creation_date,
         "payout_completed_date": row.payout_completed_date, "release_channel": row.release_channel,
@@ -887,6 +1000,7 @@ def _v2_sku_row(
     match_method: str,
     product_price: Decimal,
     refund_amount: Decimal,
+    persisted_platform: str = "Shopee",
 ) -> tuple[str, ...]:
     values = _common(
         statement,
@@ -894,6 +1008,7 @@ def _v2_sku_row(
         "SKU",
         row.sequence_no,
         row.source_row_number,
+        persisted_platform=persisted_platform,
     )
     values.update({
         "order_id": row.order_id,
@@ -909,6 +1024,40 @@ def _v2_sku_row(
         "statement_net_selling_amount": product_price + refund_amount,
         "matched_item_index": matched_item_index,
         "match_method": match_method,
+    })
+    return _serialize_statement_row(values)
+
+
+def _unallocated_sku_row(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    row: SettlementIncomeRow,
+    *,
+    persisted_platform: str,
+) -> tuple[str, ...]:
+    """Persist raw SKU facts while deliberately leaving allocation fields blank."""
+
+    values = _common(
+        statement, audit, "SKU", row.sequence_no, row.source_row_number,
+        persisted_platform=persisted_platform,
+    )
+    product_price = row.financial_components.get("Product Price")
+    refund_amount = row.financial_components.get("Refund Amount")
+    values.update({
+        "order_id": row.order_id,
+        "order_creation_date": row.order_creation_date,
+        "payout_completed_date": row.payout_completed_date,
+        "release_channel": row.release_channel,
+        "order_type": row.order_type,
+        "total_released_amount": row.total_released_amount,
+        "statement_product_id": row.product_id,
+        "statement_product_name": row.product_name,
+        "statement_product_price": product_price,
+        "statement_refund_amount": refund_amount,
+        "statement_net_selling_amount": (
+            product_price + refund_amount
+            if product_price is not None and refund_amount is not None else None
+        ),
     })
     return _serialize_statement_row(values)
 
@@ -943,8 +1092,17 @@ def _v2_item_match_method(method: str) -> str:
     return " + ".join(labels[token] for token in tokens)
 
 
-def _adjustment_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit, adjustment: SettlementAdjustment) -> tuple[str, ...]:
-    values = _common(statement, audit, "ADJUSTMENT", adjustment.sequence_no, adjustment.source_row_number)
+def _adjustment_row(
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    adjustment: SettlementAdjustment,
+    *,
+    persisted_platform: str = "Shopee",
+) -> tuple[str, ...]:
+    values = _common(
+        statement, audit, "ADJUSTMENT", adjustment.sequence_no,
+        adjustment.source_row_number, persisted_platform=persisted_platform,
+    )
     values.update({
         "linked_order_id": adjustment.linked_order_id,
         "payout_completed_date": adjustment.payout_completed_date,
@@ -959,6 +1117,8 @@ def _adjustment_row(statement: ParsedShopeeWeeklyStatement, audit: StatementBatc
 def _order_adjustment_events(
     statement: ParsedShopeeWeeklyStatement,
     audit: StatementBatchAudit,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[CanonicalOrderAdjustment, ...]:
     """Create canonical events for usable source descriptions; retain every raw row."""
     events: list[CanonicalOrderAdjustment] = []
@@ -982,6 +1142,7 @@ def _order_adjustment_events(
                 statement_source_filename=statement.source_filename,
                 statement_file_hash=statement.file_hash,
                 first_observed_at=audit.committed_at,
+                persisted_platform=persisted_platform,
             )
         except ValueError as error:
             raise StatementCommitBlocked(str(error)) from error
@@ -1055,12 +1216,15 @@ _SUMMARY_LINE_TYPES = {
 
 
 def _summary_rows(
-    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[tuple[str, ...], ...]:
     if not statement.summary_lines:
         raise StatementCommitBlocked("Statement has no parsed native Summary lines.")
     rows = tuple(
-        _summary_row(statement, audit, line)
+        _summary_row(statement, audit, line, persisted_platform=persisted_platform)
         for line in statement.summary_lines
     )
     _validate_summary_rows(rows)
@@ -1071,11 +1235,13 @@ def _summary_row(
     statement: ParsedShopeeWeeklyStatement,
     audit: StatementBatchAudit,
     line: StatementSummaryLine,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[str, ...]:
     values = {
         "statement_batch_id": audit.statement_batch_id,
         "statement_file_hash": statement.file_hash,
-        "platform": "Shopee",
+        "platform": persisted_platform,
         "statement_period_from": statement.statement_period_from,
         "statement_period_to": statement.statement_period_to,
         "statement_source_sheet": line.statement_source_sheet,
@@ -1138,14 +1304,17 @@ _COMPONENT_RECORD_TYPES = {
 
 
 def _financial_component_rows(
-    statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit
+    statement: ParsedShopeeWeeklyStatement,
+    audit: StatementBatchAudit,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[tuple[str, ...], ...]:
     rows: list[tuple[str, ...]] = []
     for income_row in statement.income_rows:
         record_type = {"Order": "ORDER", "Sku": "SKU"}.get(income_row.view_by)
         if record_type is None:
             continue
-        for component_name in INCOME_COMPONENT_COLUMNS:
+        for component_name in statement.income_component_columns:
             amount = income_row.financial_components.get(component_name)
             if amount is None:
                 continue
@@ -1162,11 +1331,16 @@ def _financial_component_rows(
                 component_amount=amount,
                 component_note=None,
                 payout_completed_date=income_row.payout_completed_date,
+                persisted_platform=persisted_platform,
             ))
     for detail in statement.service_fee_details:
-        rows.extend(_service_fee_component_rows(statement, audit, detail))
+        rows.extend(_service_fee_component_rows(
+            statement, audit, detail, persisted_platform=persisted_platform
+        ))
     for discrepancy in statement.shipping_fee_discrepancies:
-        rows.extend(_shipping_discrepancy_component_rows(statement, audit, discrepancy))
+        rows.extend(_shipping_discrepancy_component_rows(
+            statement, audit, discrepancy, persisted_platform=persisted_platform
+        ))
     _validate_financial_component_rows(rows, statement)
     return tuple(rows)
 
@@ -1175,6 +1349,8 @@ def _service_fee_component_rows(
     statement: ParsedShopeeWeeklyStatement,
     audit: StatementBatchAudit,
     detail: ServiceFeeDetail,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[tuple[str, ...], ...]:
     return tuple(
         _financial_component_row(
@@ -1190,6 +1366,7 @@ def _service_fee_component_rows(
             component_amount=amount,
             component_note=None,
             payout_completed_date=None,
+            persisted_platform=persisted_platform,
         )
         for component_name, amount in detail.components.items()
         if amount is not None
@@ -1200,6 +1377,8 @@ def _shipping_discrepancy_component_rows(
     statement: ParsedShopeeWeeklyStatement,
     audit: StatementBatchAudit,
     discrepancy: ShippingFeeDiscrepancy,
+    *,
+    persisted_platform: str = "Shopee",
 ) -> tuple[tuple[str, ...], ...]:
     values: list[tuple[str, ...]] = []
     for component_name, amount in (
@@ -1223,6 +1402,7 @@ def _shipping_discrepancy_component_rows(
                 component_amount=amount,
                 component_note=None,
                 payout_completed_date=None,
+                persisted_platform=persisted_platform,
             ))
     if discrepancy.reason:
         values.append(_financial_component_row(
@@ -1238,6 +1418,7 @@ def _shipping_discrepancy_component_rows(
             component_amount=None,
             component_note=discrepancy.reason,
             payout_completed_date=None,
+            persisted_platform=persisted_platform,
         ))
     return tuple(values)
 
@@ -1256,6 +1437,7 @@ def _financial_component_row(
     component_amount: Decimal | None,
     component_note: str | None,
     payout_completed_date: date | None,
+    persisted_platform: str = "Shopee",
 ) -> tuple[str, ...]:
     values = {
         "statement_batch_id": audit.statement_batch_id,
@@ -1264,7 +1446,7 @@ def _financial_component_row(
         "statement_source_sheet": source_sheet,
         "statement_source_row_number": source_row_number,
         "sequence_no": sequence_no,
-        "platform": "Shopee",
+        "platform": persisted_platform,
         "order_id": order_id,
         "statement_product_id": statement_product_id,
         "component_name": component_name,

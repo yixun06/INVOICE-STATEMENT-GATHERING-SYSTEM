@@ -40,6 +40,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitBlocked,
     StatementCommitPlan,
     StatementCommitState,
+    CommittedOrderSettlementEvidence,
     StatementWriteIntegrityError,
     StatementWriteNotApplied,
     validate_active_statement_state,
@@ -187,10 +188,10 @@ class GoogleSheetsStatementWriter:
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Build one complete batch and verify the deterministic final state."""
+        _validate_plan_market_identity(plan, self._persisted_platform)
         if plan.authority == "FULL_ORDER_CURRENT":
             self._write_active_statement_batch(plan)
             return
-        _validate_plan_market_identity(plan, self._persisted_platform)
         before = self._read_snapshot()
         reasons = validate_current_statement_state(
             plan, before.commit_state, sku_matching_is_current=True
@@ -356,6 +357,9 @@ class GoogleSheetsStatementWriter:
                 orders={},
                 items=(),
                 committed_statements=_committed_statement_references(statement_rows),
+                committed_order_evidence=_committed_order_settlement_evidence(
+                    statement_rows, self._persisted_platform
+                ),
                 order_adjustments=tuple(
                     event
                     for event in adjustments
@@ -718,6 +722,45 @@ def _committed_statement_references(
         CommittedStatementReference(file_hash, period_from, period_to)
         for file_hash, period_from, period_to in batches.values()
     )
+
+
+def _committed_order_settlement_evidence(
+    rows: Sequence[_StatementTarget], persisted_platform: str
+) -> tuple[CommittedOrderSettlementEvidence, ...]:
+    """Return committed raw ORDER facts for semantic overlap checks."""
+
+    positions = {header: index for index, header in enumerate(STATEMENT_DATA_HEADERS)}
+    evidence: list[CommittedOrderSettlementEvidence] = []
+    for target in rows:
+        values = target.values
+        if (
+            _text(values[positions["commit_status"]]) != "COMMITTED"
+            or _text(values[positions["record_type"]]) != "ORDER"
+            or _text(values[positions["platform"]]) != persisted_platform
+        ):
+            continue
+        amount = _required_text(
+            values[positions["total_released_amount"]], "total_released_amount"
+        )
+        try:
+            total_released_amount = Decimal(amount)
+        except InvalidOperation as error:
+            raise StatementCommitBlocked(
+                "Statement_Data has invalid total_released_amount."
+            ) from error
+        evidence.append(
+            CommittedOrderSettlementEvidence(
+                platform=persisted_platform,
+                order_id=_required_text(values[positions["order_id"]], "order_id"),
+                payout_completed_date=_date(
+                    values[positions["payout_completed_date"]], "payout_completed_date"
+                ),
+                total_released_amount=total_released_amount,
+                release_channel=_text(values[positions["release_channel"]]) or None,
+                order_type=_text(values[positions["order_type"]]) or None,
+            )
+        )
+    return tuple(evidence)
 
 
 def _append_row_index(rows: Sequence[Sequence[Any]]) -> int:
