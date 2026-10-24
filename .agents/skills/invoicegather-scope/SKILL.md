@@ -1066,8 +1066,13 @@ zero, or conflicting USOLF evidence blocks Full Order Current persistence as
 `PM_ENRICHMENT_REQUIRED`; do not fall back to `Price`, source selling price, or
 another PM row. Shopee SG Full Order uses its separate deterministic exact
 normalized Product Name + Variation rule, with Seller SKU only as exact-
-candidate disambiguation; NAV, `UNIT PRICE USOLF`, and `resolve_sku` come from
-the same SG Product Master row. It must never use `Price SGD` or MY fallback.
+candidate disambiguation; NAV, `UNIT PRICE USOLF`, `resolved_seller_sku`, and
+`resolve_sku` come from the same SG Product Master row. A same-row Parent SKU
+may be the canonical resolved Seller SKU only when that row's Seller SKU is
+blank; `resolve_sku` must never be substituted into `resolved_seller_sku`.
+All four SG enrichment outputs must be nonblank/valid before Current
+persistence, otherwise the row is `PM_ENRICHMENT_REQUIRED`. It must never use
+`Price SGD` or MY fallback.
 
 This does not alter canonical `Invoice_Items.unit_price`, Invoice/PDF pricing,
 Statement financial semantics, or Weekly Billing rules. For Consolidated
@@ -1085,9 +1090,12 @@ Statement financial semantics, or report money.
 
 `Shopee_FullOrder_Current_Items` has one additive nullable text field named
 exactly `resolve_sku`. It is distinct from the established financial
-`resolved_seller_sku` field. Existing Current rows retain their stored
+`resolved_seller_sku` field. MY Current rows retain their stored
 `resolve_sku` across reuploads and later Listing edits, including a stored
-blank; do not automatically backfill historical rows. An exact legacy
+blank. SG Full Order persistence instead requires nonblank same-row canonical
+Seller SKU and `resolve_sku`, and revalidation replaces those two SG identity
+outputs only from the newly proven same row; do not perform a broad historical
+backfill. An exact legacy
 13-column Current item tab may be planned for an additive header upgrade, but
 no live schema migration is implied without separate authorization.
 

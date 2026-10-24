@@ -157,12 +157,21 @@ def adapt_shopee_full_order(
                     )
                 )
                 continue
+            # `_resolve_product` proves one SG Listing row before this point.
+            # Seller SKU and Parent SKU are peer Listing identity fields, so a
+            # same-row Parent SKU is an approved canonical seller identity only
+            # when the Seller SKU cell itself is blank.  `resolve_sku` is never
+            # used to manufacture this field.
             resolved_sku = lookup.matched_sku or lookup.matched_parent_sku or ""
             unit_price = _full_order_unit_price(lookup)
             if (
-                (parsed.market.key is not MarketKey.SHOPEE_SG and not resolved_sku)
+                not resolved_sku
                 or not lookup.nav_code
                 or unit_price is None
+                or (
+                    parsed.market.key is MarketKey.SHOPEE_SG
+                    and not (lookup.resolve_sku or "").strip()
+                )
             ):
                 issues.append(
                     FullOrderValidationIssue(
@@ -261,8 +270,8 @@ def _full_order_unit_price(lookup: ProductPriceLookupResult) -> Decimal | None:
 
 def _missing_full_order_price_reason() -> str:
     return (
-        "Resolved Product Master row lacks Seller SKU, NAV, or valid "
-        "UNIT PRICE USOLF."
+        "Resolved Product Master row lacks canonical Seller SKU, NAV, valid "
+        "UNIT PRICE USOLF, or resolve_sku."
     )
 
 
@@ -286,21 +295,35 @@ def full_order_snapshot_hash(
         "order_status": order_status,
         "order_created_date": order_created_date.isoformat(),
         "items": [
-            {
-                "item_index": item.item_index,
-                "source_parent_sku": item.source_parent_sku,
-                "source_seller_sku": item.source_seller_sku,
-                "resolved_seller_sku": item.resolved_seller_sku,
-                "nav": item.nav,
-                "product_name": item.product_name,
-                "variation": item.variation,
-                "quantity": item.quantity,
-                "unit_price": format(item.unit_price.quantize(Decimal("0.01")), ".2f"),
-                "product_subtotal": format(item.product_subtotal.quantize(Decimal("0.01")), ".2f"),
-                "return_refund_status": item.return_refund_status,
-            }
+            _full_order_snapshot_item(
+                item,
+                include_resolve_sku=market == MarketKey.SHOPEE_SG.value,
+            )
             for item in sorted(items, key=lambda item: item.item_index)
         ],
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _full_order_snapshot_item(
+    item: FullOrderCurrentItem,
+    *,
+    include_resolve_sku: bool,
+) -> dict[str, str | int]:
+    payload: dict[str, str | int] = {
+        "item_index": item.item_index,
+        "source_parent_sku": item.source_parent_sku,
+        "source_seller_sku": item.source_seller_sku,
+        "resolved_seller_sku": item.resolved_seller_sku,
+        "nav": item.nav,
+        "product_name": item.product_name,
+        "variation": item.variation,
+        "quantity": item.quantity,
+        "unit_price": format(item.unit_price.quantize(Decimal("0.01")), ".2f"),
+        "product_subtotal": format(item.product_subtotal.quantize(Decimal("0.01")), ".2f"),
+        "return_refund_status": item.return_refund_status,
+    }
+    if include_resolve_sku:
+        payload["resolve_sku"] = item.resolve_sku
+    return payload

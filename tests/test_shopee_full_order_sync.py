@@ -187,7 +187,7 @@ def test_same_parser_supports_sg_blank_skus_by_exact_name_variation():
 
     batch = adapt_shopee_full_order(
         parsed,
-        product_master=_master(),
+        product_master=_master(resolve_sku="SG-RESOLVE-1"),
         now=lambda: datetime(2026, 10, 16, tzinfo=timezone.utc),
     )
 
@@ -197,7 +197,7 @@ def test_same_parser_supports_sg_blank_skus_by_exact_name_variation():
     assert batch.items[0].unit_price == Decimal("6.50")
 
 
-def test_sg_unique_blank_listing_sku_persists_as_blank_and_reads_back():
+def test_sg_unique_blank_listing_identity_is_enrichment_required():
     row = list(_rows()[0])
     row[4] = ""
     row[6] = ""
@@ -213,15 +213,101 @@ def test_sg_unique_blank_listing_sku_persists_as_blank_and_reads_back():
     master = ProductPriceMaster((blank_listing_record,), base_master.metadata)
 
     batch = adapt_shopee_full_order(parsed, product_master=master)
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "canonical Seller SKU" in batch.issues[0].message
+
+
+def test_sg_missing_same_row_resolve_sku_is_enrichment_required():
+    row = list(_rows()[0])
+    row[4] = ""
+    row[6] = ""
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "CANONICAL-SG-1", "parent_sku": "",
+                "product_name": "Organic Item", "variation_name": "Red",
+                "unit_selling_price": "9.90", "unit_price_usolf": "9.90",
+                "nav_code": "2000842", "resolve_sku": "",
+            }
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is False
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+    assert "resolve_sku" in batch.issues[0].message
+
+
+def test_sg_name_variation_persists_same_row_sku_identity_and_enrichment():
+    row = list(_rows()[0])
+    row[4] = ""
+    row[6] = ""
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "",
+                "parent_sku": "CANONICAL-SG-1",
+                "product_name": "Organic Item",
+                "variation_name": "Red",
+                "unit_selling_price": "9.90",
+                "unit_price_usolf": "9.90",
+                "nav_code": "2000842",
+                "resolve_sku": "2000842",
+            }
+        ]
+    )
     repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="sg-current", gateway=_Gateway())
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
     repository.sync(batch)
 
+    item = repository.read_snapshot().items[0]
     assert batch.syncable is True
-    assert batch.items[0].resolved_seller_sku == ""
-    assert batch.items[0].nav == "2000842"
-    assert batch.items[0].unit_price == Decimal("9.90")
-    assert batch.items[0].resolve_sku == "2000842"
-    assert repository.read_snapshot().items[0].resolved_seller_sku == ""
+    assert (item.resolved_seller_sku, item.nav, item.unit_price, item.resolve_sku) == (
+        "CANONICAL-SG-1", "2000842", Decimal("9.90"), "2000842"
+    )
+
+
+def test_sg_sku_disambiguation_uses_one_matched_row_for_all_persisted_fields():
+    row = list(_rows()[0])
+    row[4] = ""
+    row[6] = "SKU-B"
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+    master = ProductPriceMaster.from_rows(
+        [
+            {
+                "seller_sku": "SKU-A", "parent_sku": "", "product_name": "Organic Item",
+                "variation_name": "Red", "unit_selling_price": "6.50",
+                "unit_price_usolf": "6.50", "nav_code": "NAV-A", "resolve_sku": "RESOLVE-A",
+            },
+            {
+                "seller_sku": "SKU-B", "parent_sku": "", "product_name": "Organic Item",
+                "variation_name": "Red", "unit_selling_price": "7.75",
+                "unit_price_usolf": "7.75", "nav_code": "NAV-B", "resolve_sku": "RESOLVE-B",
+            },
+        ]
+    )
+
+    batch = adapt_shopee_full_order(parsed, product_master=master)
+
+    assert batch.syncable is True
+    item = batch.items[0]
+    assert (item.resolved_seller_sku, item.nav, item.unit_price, item.resolve_sku) == (
+        "SKU-B", "NAV-B", Decimal("7.75"), "RESOLVE-B"
+    )
 
 
 def test_full_order_refresh_revalidates_retained_source_with_new_product_master():
@@ -296,6 +382,7 @@ def test_sg_full_order_persists_same_row_usolf_price_not_price_sgd():
                 "unit_selling_price": "6.50",
                 "unit_price_usolf": "7.75",
                 "nav_code": "5001",
+                "resolve_sku": "SG-RESOLVE-1",
             }
         ]
     )
@@ -351,11 +438,13 @@ def test_sg_full_order_uses_seller_sku_only_to_disambiguate_exact_name_variation
                 "seller_sku": "SKU-1", "parent_sku": "PARENT-1",
                 "product_name": "Organic Item", "variation_name": "Red",
                 "unit_selling_price": "6.50", "unit_price_usolf": "7.75", "nav_code": "RIGHT",
+                "resolve_sku": "SG-RESOLVE-1",
             },
             {
                 "seller_sku": "SKU-ALT", "parent_sku": "PARENT-ALT",
                 "product_name": "Organic Item", "variation_name": "Red",
                 "unit_selling_price": "6.50", "unit_price_usolf": "8.50", "nav_code": "OTHER",
+                "resolve_sku": "SG-RESOLVE-ALT",
             },
         ]
     )
@@ -425,18 +514,35 @@ def test_market_mismatch_blocks_before_current_write_and_confirmed_switch_is_ide
     assert error.value.parsed.market is detected_market
     assert gateway.write_count == 0
 
+    matching_master = (
+        _master(resolve_sku="SG-RESOLVE-1")
+        if detected_market is SHOPEE_SG
+        else _master()
+    )
     review = review_shopee_full_order_upload(
         error.value.source_bytes,
         source_filename=error.value.parsed.source_filename,
         market=detected_market,
-        product_master=_master(),
+        product_master=matching_master,
         repository=repository,
     )
     first = commit_shopee_full_order_review(
-        review, load_product_master=_master, repository=repository
+        review,
+        load_product_master=(
+            (lambda: _master(resolve_sku="SG-RESOLVE-1"))
+            if detected_market is SHOPEE_SG
+            else _master
+        ),
+        repository=repository,
     )
     second = commit_shopee_full_order_review(
-        review, load_product_master=_master, repository=repository
+        review,
+        load_product_master=(
+            (lambda: _master(resolve_sku="SG-RESOLVE-1"))
+            if detected_market is SHOPEE_SG
+            else _master
+        ),
+        repository=repository,
     )
 
     assert first.new_count == 1
@@ -810,6 +916,26 @@ def test_reupload_preserves_a_stored_blank_resolve_sku_without_backfilling_it():
 
     assert result.unchanged_count == 1
     assert repository.read_snapshot().items[0].resolve_sku == ""
+
+
+def test_sg_reupload_refreshes_same_row_resolve_sku_without_changing_my_behavior():
+    gateway = _Gateway()
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="sg-current", gateway=gateway)
+    row = list(_rows()[0])
+    row[-1] = "SG"
+    parsed = parse_shopee_full_order(
+        _workbook_bytes([row]), source_filename="sg-full-order.xlsx", market=SHOPEE_SG
+    )
+
+    repository.sync(
+        adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="SG-RESOLVE-1"))
+    )
+    result = repository.sync(
+        adapt_shopee_full_order(parsed, product_master=_master(resolve_sku="SG-RESOLVE-2"))
+    )
+
+    assert result.updated_count == 1
+    assert repository.read_snapshot().items[0].resolve_sku == "SG-RESOLVE-2"
 
 
 def test_updated_reupload_preserves_raw_existing_resolve_sku_when_listing_is_unavailable():

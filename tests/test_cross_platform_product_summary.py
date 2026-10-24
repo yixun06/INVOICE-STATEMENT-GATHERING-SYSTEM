@@ -399,6 +399,41 @@ def test_order_created_summary_uses_persisted_current_price_and_source_subtotal(
     )
 
 
+def test_order_created_summary_consumes_persisted_sg_sku_identity():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_product_summary,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    tabs = _current_only_tabs(
+        status_by_order={"SG-CURRENT-1": "Completed"},
+        order_created_date="2026-09-01",
+        market="shopee_sg",
+    )
+    item = tabs[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB][1]
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("resolved_seller_sku")] = "CANONICAL-SG-1"
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("nav")] = "2000842"
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("unit_price")] = "9.90"
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("product_subtotal")] = "19.80"
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("quantity")] = "2"
+    item[SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS.index("resolve_sku")] = "2000842"
+
+    summary = build_cross_platform_product_summary(
+        build_cross_platform_reporting_snapshot(tabs),
+        platform="Shopee SG",
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 9, 1),
+        to_date=date(2026, 9, 1),
+    )
+
+    assert len(summary.product_rows) == 1
+    assert (summary.product_rows[0].nav, summary.product_rows[0].sku_code) == (
+        "2000842", "CANONICAL-SG-1"
+    )
+    assert summary.source_items[0].resolve_sku == "2000842"
+
+
 def test_order_created_current_source_excludes_cancelled_and_never_uses_canonical_fallback():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,

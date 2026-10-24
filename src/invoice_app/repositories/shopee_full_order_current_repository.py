@@ -349,7 +349,7 @@ def _merged_snapshot(
         ]
         final_items.extend(
             replace(item, resolve_sku=existing_items[item.item_index].resolve_sku)
-            if item.item_index in existing_items
+            if item.market != "shopee_sg" and item.item_index in existing_items
             else item
             for item in incoming_items.get(identity, ())
         )
@@ -508,16 +508,13 @@ def _deserialize_item(row: Sequence[Any], row_number: int) -> FullOrderCurrentIt
     values = dict(zip(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS, row))
     try:
         market = _required(values["market"])
-        resolved_seller_sku = _text(values["resolved_seller_sku"])
-        if market != "shopee_sg":
-            resolved_seller_sku = _required(values["resolved_seller_sku"])
         return FullOrderCurrentItem(
             market=market,
             order_id=_required(values["order_id"]),
             item_index=int(_required(values["item_index"])),
             source_parent_sku=_text(values["source_parent_sku"]),
             source_seller_sku=_text(values["source_seller_sku"]),
-            resolved_seller_sku=resolved_seller_sku,
+            resolved_seller_sku=_required(values["resolved_seller_sku"]),
             nav=_required(values["nav"]),
             product_name=_required(values["product_name"]),
             variation=_text(values["variation"]),
