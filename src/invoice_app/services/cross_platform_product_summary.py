@@ -1,4 +1,4 @@
-"""Read-only Cross Platform Product Summary over committed UAT2 Invoice facts."""
+"""Read-only Cross Platform Product Summary over committed reporting facts."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ORDERS_TAB,
     SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+    STATEMENT_DATA_HEADERS,
+    STATEMENT_DATA_TAB,
 )
 from src.invoice_app.repositories.shopee_full_order_current_repository import (
     deserialize_full_order_current_snapshot,
@@ -100,11 +102,33 @@ class CommittedReportingItem:
 
 
 @dataclass(frozen=True)
+class ReportingDateAuthority:
+    """Date facts keyed by the only approved cross-source order identity."""
+
+    order_created_dates: Mapping[tuple[str, str], date]
+    payout_completed_dates: Mapping[tuple[str, str], date]
+
+    def dates_for(
+        self, persisted_platform: str, order_id: str
+    ) -> tuple[date | None, date | None]:
+        identity = _reporting_order_identity_for_persisted_platform(
+            persisted_platform, order_id
+        )
+        return (
+            self.order_created_dates.get(identity),
+            self.payout_completed_dates.get(identity),
+        )
+
+
+@dataclass(frozen=True)
 class CrossPlatformReportingSnapshot:
     """One in-memory committed snapshot shared by filters, UI, and export."""
 
     eligible_items: tuple[CommittedReportingItem, ...]
     order_created_items: tuple[CommittedReportingItem, ...] | None = None
+    date_authority: ReportingDateAuthority | None = None
+    canonical_orders: tuple[CanonicalInvoiceOrder, ...] = ()
+    canonical_items: tuple[CanonicalInvoiceItem, ...] = ()
 
     def items_for(self, date_type: CrossPlatformDateType) -> tuple[CommittedReportingItem, ...]:
         """Select the approved authority without canonical fallback."""
@@ -157,7 +181,7 @@ class CrossPlatformProductSummary:
 
 
 class GoogleSheetsCrossPlatformProductSummaryReader:
-    """Fetch the two committed Invoice tabs exactly once per live snapshot."""
+    """Fetch one committed reporting snapshot exactly once per live render."""
 
     def __init__(
         self, *, spreadsheet_id: str, gateway: CrossPlatformReportingGateway
@@ -173,6 +197,7 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
             INVOICE_ITEMS_TAB,
             SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
             SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+            STATEMENT_DATA_TAB,
         )
         try:
             values = self._gateway.read_tabs(self._spreadsheet_id, tabs)
@@ -188,7 +213,7 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
 def build_cross_platform_reporting_snapshot(
     tabs: Mapping[str, Sequence[Sequence[Any]]],
 ) -> CrossPlatformReportingSnapshot:
-    """Normalize committed Invoice facts without creating or caching reporting data."""
+    """Normalize committed facts without creating or caching reporting data."""
 
     order_rows = _tab_rows(tabs, INVOICE_ORDERS_TAB, INVOICE_ORDERS_HEADERS)
     item_rows = _tab_rows(tabs, INVOICE_ITEMS_TAB, INVOICE_ITEMS_HEADERS)
@@ -203,7 +228,17 @@ def build_cross_platform_reporting_snapshot(
             )
         orders[identity] = order
 
+    date_authority = (
+        _reporting_date_authority(tabs)
+        if {
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+            STATEMENT_DATA_TAB,
+        } <= tabs.keys()
+        else None
+    )
     eligible: list[CommittedReportingItem] = []
+    canonical_items: list[CanonicalInvoiceItem] = []
     item_identities: set[tuple[str, str, int]] = set()
     for row_number, row in item_rows:
         item = _deserialize_item(row, row_number)
@@ -216,6 +251,7 @@ def build_cross_platform_reporting_snapshot(
         item_identities.add(identity)
         if item.platform not in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS:
             continue
+        canonical_items.append(item)
         order_identity = (item.platform, item.order_id)
         if order_identity not in orders:
             raise CrossPlatformProductSummaryError(
@@ -224,7 +260,17 @@ def build_cross_platform_reporting_snapshot(
         order = orders[order_identity]
         if is_cancelled_invoice_order(order):
             continue
-        eligible.append(_reporting_item(item, order))
+        reporting_item = _reporting_item(item, order)
+        if date_authority is not None:
+            order_created_date, payout_completed_date = date_authority.dates_for(
+                item.platform, item.order_id
+            )
+            reporting_item = replace(
+                reporting_item,
+                order_created_date=order_created_date,
+                payout_completed_date=payout_completed_date,
+            )
+        eligible.append(reporting_item)
     return CrossPlatformReportingSnapshot(
         eligible_items=tuple(eligible),
         order_created_items=(
@@ -235,6 +281,13 @@ def build_cross_platform_reporting_snapshot(
             } <= tabs.keys()
             else ()
         ),
+        date_authority=date_authority,
+        canonical_orders=tuple(
+            order
+            for order in orders.values()
+            if order.platform in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS
+        ),
+        canonical_items=tuple(canonical_items),
     )
 
 
@@ -347,6 +400,128 @@ def _reporting_item(
         ),
         order_created_date=order.order_created_date,
     )
+
+
+def _reporting_date_authority(
+    tabs: Mapping[str, Sequence[Sequence[Any]]],
+) -> ReportingDateAuthority:
+    """Project committed Full Order and Statement dates without financial fallback.
+
+    Full Order and Statement rows have different granularities.  This projection
+    deliberately accepts only one committed ``ORDER`` Statement row date per
+    normalized market/order identity; SKU and component rows can therefore
+    never multiply a reporting order or its amounts.
+    """
+
+    current = deserialize_full_order_current_snapshot(
+        {
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB: tabs[
+                SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB
+            ],
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB: tabs[
+                SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB
+            ],
+        }
+    )
+    order_created_dates: dict[tuple[str, str], date] = {}
+    for order in current.orders:
+        identity = _reporting_order_identity(order.market, order.order_id)
+        _set_consistent_date(
+            order_created_dates,
+            identity,
+            order.order_created_date,
+            source="Shopee_FullOrder_Current_Orders",
+        )
+
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    payout_completed_dates: dict[tuple[str, str], date] = {}
+    for row_number, row in _tab_rows(tabs, STATEMENT_DATA_TAB, STATEMENT_DATA_HEADERS):
+        if _text(row[positions["validation_status"]]) != "PASSED":
+            continue
+        if _text(row[positions["commit_status"]]) != "COMMITTED":
+            continue
+        if _text(row[positions["record_type"]]) != "ORDER":
+            continue
+        platform = _text(row[positions["platform"]])
+        order_id = _text(row[positions["order_id"]])
+        if not platform or not order_id:
+            raise CrossPlatformProductSummaryError(
+                f"{STATEMENT_DATA_TAB} row {row_number} has no committed ORDER identity."
+            )
+        try:
+            identity = _reporting_order_identity_for_persisted_platform(platform, order_id)
+        except CrossPlatformProductSummaryError as error:
+            raise CrossPlatformProductSummaryError(
+                f"{STATEMENT_DATA_TAB} row {row_number} has unsupported market identity."
+            ) from error
+        payout_date = _optional_iso_date(
+            row[positions["payout_completed_date"]],
+            tab=STATEMENT_DATA_TAB,
+            row_number=row_number,
+            field="payout_completed_date",
+        )
+        if payout_date is not None:
+            _set_consistent_date(
+                payout_completed_dates,
+                identity,
+                payout_date,
+                source=STATEMENT_DATA_TAB,
+            )
+    return ReportingDateAuthority(
+        order_created_dates=order_created_dates,
+        payout_completed_dates=payout_completed_dates,
+    )
+
+
+def _reporting_order_identity(market: str, order_id: str) -> tuple[str, str]:
+    try:
+        context = resolve_market_context(market)
+    except Exception as error:
+        raise CrossPlatformProductSummaryError(
+            f"Unsupported reporting market identity: {market!r}."
+        ) from error
+    normalized_order_id = _text(order_id)
+    if not normalized_order_id:
+        raise CrossPlatformProductSummaryError("Reporting order identity requires order_id.")
+    return context.key.value, normalized_order_id
+
+
+def _reporting_order_identity_for_persisted_platform(
+    persisted_platform: str, order_id: str
+) -> tuple[str, str]:
+    return _reporting_order_identity(
+        _context_for_persisted_platform(persisted_platform).key.value,
+        order_id,
+    )
+
+
+def _set_consistent_date(
+    target: dict[tuple[str, str], date],
+    identity: tuple[str, str],
+    value: date,
+    *,
+    source: str,
+) -> None:
+    existing = target.get(identity)
+    if existing is not None and existing != value:
+        raise CrossPlatformProductSummaryError(
+            f"{source} has conflicting dates for {identity[0]}/{identity[1]}."
+        )
+    target[identity] = value
+
+
+def _optional_iso_date(
+    value: Any, *, tab: str, row_number: int, field: str
+) -> date | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as error:
+        raise CrossPlatformProductSummaryError(
+            f"{tab} row {row_number} has invalid {field}."
+        ) from error
 
 
 def _full_order_current_reporting_items(

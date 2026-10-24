@@ -12,6 +12,8 @@ from src.invoice_app.services.uat2_persistence_schema import (
     SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+    STATEMENT_DATA_HEADERS,
+    STATEMENT_DATA_TAB,
 )
 
 
@@ -157,6 +159,18 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
                     product_subtotal="10.00",
                 ),
             ],
+            STATEMENT_DATA_TAB: [
+                list(STATEMENT_DATA_HEADERS),
+                _sheet_row(
+                    STATEMENT_DATA_HEADERS,
+                    record_type="ORDER",
+                    platform="Shopee",
+                    validation_status="PASSED",
+                    commit_status="COMMITTED",
+                    order_id="SHP-PAYOUT",
+                    payout_completed_date="2026-08-09",
+                ),
+            ],
         }
     )
 
@@ -173,10 +187,11 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
                 INVOICE_ITEMS_TAB,
                 SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
                 SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+                STATEMENT_DATA_TAB,
             ),
         )
     ]
-    assert snapshot.available_payout_dates("Shopee MY") == (date(2026, 8, 8),)
+    assert snapshot.available_payout_dates("Shopee MY") == (date(2026, 8, 9),)
     assert [item.order_id for item in snapshot.eligible_items] == [
         "SHP-PAYOUT",
         "SHP-NO-PAYOUT",
@@ -252,6 +267,107 @@ def test_order_created_date_uses_explicit_current_rows_without_payout_evidence()
     assert {item.order_id for item in summary.source_items} == {
         "SHP-CURRENT-PENDING",
     }
+
+
+def test_payout_date_uses_only_committed_statement_order_rows_and_never_invoice_fallback():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    tabs = _current_only_tabs(status_by_order={"STATEMENT-ORDER": "Completed"})
+    tabs[INVOICE_ORDERS_TAB] = [
+        list(INVOICE_ORDERS_HEADERS),
+        _sheet_row(
+            INVOICE_ORDERS_HEADERS,
+            platform="Shopee",
+            order_id="STATEMENT-ORDER",
+            order_created_date="2026-08-01",
+            payout_completed_date="2026-08-05",
+            first_imported_at="2026-08-05T00:00:00+00:00",
+        ),
+        _sheet_row(
+            INVOICE_ORDERS_HEADERS,
+            platform="Shopee",
+            order_id="NO-STATEMENT",
+            order_created_date="2026-08-01",
+            payout_completed_date="2026-08-06",
+            first_imported_at="2026-08-06T00:00:00+00:00",
+        ),
+    ]
+    tabs[INVOICE_ITEMS_TAB] = [
+        list(INVOICE_ITEMS_HEADERS),
+        *[
+            _sheet_row(
+                INVOICE_ITEMS_HEADERS,
+                platform="Shopee",
+                order_id=order_id,
+                item_index="0",
+                seller_sku=f"SKU-{index}",
+                nav=f"NAV-{index}",
+                product_name=f"Product {index}",
+                quantity="1",
+                unit_price="10.00",
+                line_subtotal="10.00",
+            )
+            for index, order_id in enumerate(("STATEMENT-ORDER", "NO-STATEMENT"), start=1)
+        ],
+    ]
+    tabs[STATEMENT_DATA_TAB] = [
+        list(STATEMENT_DATA_HEADERS),
+        _sheet_row(
+            STATEMENT_DATA_HEADERS,
+            record_type="ORDER", platform="Shopee", order_id=" STATEMENT-ORDER ",
+            validation_status="PASSED", commit_status="COMMITTED",
+            payout_completed_date="2026-08-09",
+        ),
+        _sheet_row(
+            STATEMENT_DATA_HEADERS,
+            record_type="SKU", platform="Shopee", order_id="STATEMENT-ORDER",
+            validation_status="PASSED", commit_status="COMMITTED",
+            payout_completed_date="2026-08-10",
+        ),
+        _sheet_row(
+            STATEMENT_DATA_HEADERS,
+            record_type="ORDER", platform="Shopee", order_id="STATEMENT-ORDER",
+            validation_status="PASSED", commit_status="COMMITTED",
+            payout_completed_date="2026-08-09",
+        ),
+    ]
+
+    snapshot = build_cross_platform_reporting_snapshot(tabs)
+
+    assert [(item.order_id, item.order_created_date, item.payout_completed_date) for item in snapshot.eligible_items] == [
+        ("STATEMENT-ORDER", date(2026, 10, 22), date(2026, 8, 9)),
+        ("NO-STATEMENT", None, None),
+    ]
+    assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.PAYOUT) == (
+        date(2026, 8, 9),
+    )
+
+
+def test_conflicting_committed_statement_payout_dates_fail_closed():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
+        build_cross_platform_reporting_snapshot,
+    )
+
+    tabs = _current_only_tabs(status_by_order={"CONFLICT": "Completed"})
+    tabs[STATEMENT_DATA_TAB] = [
+        list(STATEMENT_DATA_HEADERS),
+        *[
+            _sheet_row(
+                STATEMENT_DATA_HEADERS,
+                record_type="ORDER", platform="Shopee", order_id="CONFLICT",
+                validation_status="PASSED", commit_status="COMMITTED",
+                payout_completed_date=payout_date,
+            )
+            for payout_date in ("2026-08-09", "2026-08-10")
+        ],
+    ]
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="conflicting dates"):
+        build_cross_platform_reporting_snapshot(tabs)
 
 
 def test_order_created_summary_uses_persisted_current_price_and_source_subtotal():

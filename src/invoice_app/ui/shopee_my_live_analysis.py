@@ -26,7 +26,7 @@ from src.invoice_app.services.shopee_my_live_analysis import (
     ShopeeMyLiveAnalysis,
     TimeSeriesPoint,
     build_shopee_my_live_analysis,
-    load_shopee_my_analytics_snapshot,
+    load_shopee_my_analytics_snapshot_from_reporting_snapshot,
 )
 from src.invoice_app.ui.shopee_my_live_analysis_insights import (
     build_management_insight,
@@ -50,8 +50,9 @@ _AMBER = "#C48A2C"
 
 @st.cache_data(ttl=45, show_spinner=False)
 def _load_shopee_my_analytics_snapshot() -> ShopeeMyAnalyticsSnapshot:
-    repository = configured_uat2_data_settings().create_repository()
-    return load_shopee_my_analytics_snapshot(repository)
+    settings = configured_uat2_data_settings()
+    reporting_snapshot = settings.create_cross_platform_product_summary_reader().load_snapshot()
+    return load_shopee_my_analytics_snapshot_from_reporting_snapshot(reporting_snapshot)
 
 
 def render_shopee_my_live_analysis(

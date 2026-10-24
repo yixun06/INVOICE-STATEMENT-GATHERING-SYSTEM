@@ -8,7 +8,7 @@ rules can be verified independently from the page renderer.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -21,6 +21,9 @@ from src.invoice_app.domain.historical_invoice import (
 from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
     resolve_product_summary_identity,
+)
+from src.invoice_app.services.cross_platform_product_summary import (
+    CrossPlatformReportingSnapshot,
 )
 SHOPEE_MY_PERSISTED_PLATFORM = "Shopee"
 NORMAL_ORDER = "NORMAL_ORDER"
@@ -251,6 +254,42 @@ def load_shopee_my_analytics_snapshot(
         item
         for order_id in order_ids
         for item in items_by_order.get(order_id, ())
+    )
+    return ShopeeMyAnalyticsSnapshot(orders=orders, items=items)
+
+
+def load_shopee_my_analytics_snapshot_from_reporting_snapshot(
+    reporting_snapshot: CrossPlatformReportingSnapshot,
+) -> ShopeeMyAnalyticsSnapshot:
+    """Use legacy financial facts with the active Full Order/Statement date authority.
+
+    Financial layout and amounts remain untouched in this MY-01 phase.  The
+    report's two date facts are deliberately overwritten from the active
+    reporting projection so no Invoice/PDF date can leak into filtering.
+    """
+
+    if reporting_snapshot.date_authority is None:
+        raise ShopeeMyAnalyticsError(
+            "Shopee MY Live Analysis requires Full Order Current and committed Statement date authority."
+        )
+    orders = tuple(
+        replace(
+            order,
+            order_created_date=reporting_snapshot.date_authority.dates_for(
+                order.platform, order.order_id
+            )[0],
+            payout_completed_date=reporting_snapshot.date_authority.dates_for(
+                order.platform, order.order_id
+            )[1],
+        )
+        for order in reporting_snapshot.canonical_orders
+        if order.platform == SHOPEE_MY_PERSISTED_PLATFORM
+    )
+    order_ids = {order.order_id for order in orders}
+    items = tuple(
+        item
+        for item in reporting_snapshot.canonical_items
+        if item.platform == SHOPEE_MY_PERSISTED_PLATFORM and item.order_id in order_ids
     )
     return ShopeeMyAnalyticsSnapshot(orders=orders, items=items)
 

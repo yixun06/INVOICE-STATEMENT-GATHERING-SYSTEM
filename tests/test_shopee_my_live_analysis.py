@@ -20,6 +20,7 @@ from src.invoice_app.services.shopee_my_live_analysis import (
     build_shopee_my_live_analysis,
     compare_kpi,
     load_shopee_my_analytics_snapshot,
+    load_shopee_my_analytics_snapshot_from_reporting_snapshot,
 )
 
 
@@ -433,6 +434,42 @@ def test_snapshot_rejects_sg_and_loader_uses_only_read_methods():
         ("list_orders", {"platform": "Shopee"}),
         ("get_items_by_order_ids", "Shopee", ("MY",)),
     ]
+
+
+def test_live_analysis_overwrites_legacy_dates_with_full_order_and_statement_authority():
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformReportingSnapshot,
+        ReportingDateAuthority,
+    )
+
+    reporting_snapshot = CrossPlatformReportingSnapshot(
+        eligible_items=(),
+        date_authority=ReportingDateAuthority(
+            order_created_dates={
+                ("shopee_my", "MY"): date(2026, 9, 10),
+            },
+            payout_completed_dates={
+                ("shopee_my", "MY"): date(2026, 9, 17),
+            },
+        ),
+        canonical_orders=(
+            _order("MY", created=date(2026, 8, 1), payout=date(2026, 8, 8), final="20"),
+            _order("NO-MATCH", created=date(2026, 8, 2), payout=date(2026, 8, 9), final="30"),
+        ),
+        canonical_items=(
+            _item("MY", 0),
+            _item("NO-MATCH", 0),
+        ),
+    )
+
+    snapshot = load_shopee_my_analytics_snapshot_from_reporting_snapshot(reporting_snapshot)
+
+    assert [(order.order_id, order.order_created_date, order.payout_completed_date) for order in snapshot.orders] == [
+        ("MY", date(2026, 9, 10), date(2026, 9, 17)),
+        ("NO-MATCH", None, None),
+    ]
+    assert snapshot.available_dates(DateBasis.ORDER_CREATED) == (date(2026, 9, 10),)
+    assert snapshot.available_dates(DateBasis.PAYOUT) == (date(2026, 9, 17),)
 
 
 def test_missing_canonical_product_identity_fails_closed():

@@ -390,14 +390,20 @@ representation, not a semantic business classification.
 
 ## Shopee MY Live Analysis V1 — Approved
 
-`LIVE ANALYSIS -> Shopee MY` is a read-only dashboard over committed historical
-`Invoice_Orders` and `Invoice_Items` where persisted `platform = "Shopee"`. It
-must not use current-batch staging, another market/platform, temporary exports,
-or any write path.
+`LIVE ANALYSIS -> Shopee MY` is a read-only dashboard over committed MY
+reporting evidence. Its current financial-layout, amount, and item calculations
+remain the legacy `Invoice_Orders` / `Invoice_Items` contract where persisted
+`platform = "Shopee"`; its reporting dates are not legacy Invoice/PDF facts.
+It must not use current-batch staging, another market/platform, temporary
+exports, or any write path.
 
 - One selected Date Basis governs every KPI and chart: `Order Created Date`
-  uses `order_created_date` and is the default; `Payout Date` uses
-  `payout_completed_date`. From/To date controls use the same evidence-constrained
+  comes only from `Shopee_FullOrder_Current_Orders.order_created_date`; `Payout
+  Date` comes only from `PASSED` + `COMMITTED` `Statement_Data` `ORDER` rows.
+  Both use exact normalized `(market, order_id)` identity. Repeated Statement
+  SKU/component rows never multiply an order, an absent committed Statement
+  match remains unknown/unreleased, and no Invoice/PDF date fallback is
+  permitted. From/To date controls use the same evidence-constrained
   calendar behavior as Consolidated Product Summary: every calendar day remains
   visible, but only distinct committed dates in the current Date Basis and
   Payout Status scope are enabled/selectable. Both endpoints must be available
@@ -451,9 +457,13 @@ or any write path.
 ## Current Consolidated Product Summary — Locked
 
 Consolidated Product Summary is an implemented, **live read-only database-backed
-report** over committed `Invoice_Orders` and `Invoice_Items`. It is not a
-current-session All Products view, does not have its own reporting table, and
-must make no UAT2/schema write merely to render or export.
+report**. `Order Created Date` rows are directly sourced from Full Order Current;
+the current Payout Product Summary product/financial calculation still reads
+canonical `Invoice_Orders` and `Invoice_Items`, but its payout-date eligibility
+comes only from committed `Statement_Data` `ORDER` rows joined by normalized
+`(market, order_id)`. It is not a current-session All Products view, does not
+have its own reporting table, and must make no UAT2/schema write merely to
+render or export.
 
 The current adapter reads one logical committed snapshot per render:
 
