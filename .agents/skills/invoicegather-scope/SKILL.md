@@ -3586,8 +3586,10 @@ The exact formula/classification is not yet locked. Ask before implementing the 
 
 # 14. Long-Term Production Database Direction — Post-UAT2
 
-Google Sheets remains the authoritative read-only source for the current
-limited Product Owner-authorized PostgreSQL phase. The authorized path is:
+`POSTGRESQL_FOUNDATION_READY` is the durable Product Owner-approved stop point
+for the completed local foundation. Google Sheets remains the production
+application source of truth and the read-only source used for this local
+verification path:
 
 ```text
 Google Sheets (read-only source)
@@ -3596,21 +3598,21 @@ Google Sheets (read-only source)
         -> one-way initial migration + verification
 ```
 
-Local PostgreSQL writes are authorized only within that one-way initial
-migration and verified local-target scope. The existing `src/invoice_app/pg_orm/`
-and `scripts/sync_sheets_to_postgres.py` are authorized pending PostgreSQL
-workstream artifacts, not unapproved artifacts.
+The verified foundation is eight Google Sheets-to-local PostgreSQL tables with
+467,329 rows, source row-count/business-key equality, exact financial and
+`resolve_sku` verification, and a no-change rerun. It uses SQLAlchemy ORM,
+externalized credentials, exact `Decimal`/`Numeric` money values, verified
+local Docker target checks, and idempotent fail-closed synchronization. The
+existing `src/invoice_app/pg_orm/` and `scripts/sync_sheets_to_postgres.py`
+are completed foundation artifacts; they do not make the application use
+PostgreSQL.
 
-Before any rerun, audit the current ORM and sync implementation. The first
-migration attempt failed because real `order_status` data exceeded `String(64)`;
-preserve source facts and correct the contract rather than truncate data.
-Hard-coded credentials and unconditional/destructive truncate behavior are not
-acceptable final design. Verify the local target before any destructive action.
-
-This limited authorization does **not** authorize application repository
-cutover, production PostgreSQL deployment, dual-write, replacing or removing
-Google Sheets, Google Sheets business writes, destructive reset without a
-verified local target, or hard-coded credentials.
+No further PostgreSQL work is authorized without a new Product Owner decision.
+In particular, repository integration, an application PostgreSQL backend,
+shadow/dual write, hybrid or full cutover, production PostgreSQL deployment,
+Google Sheets replacement/removal, Google Sheets writes, and the
+company-server-versus-cloud hosting decision are deferred. Do not turn the
+local foundation into an application persistence path by implication.
 
 The production database engine direction is now confirmed:
 
