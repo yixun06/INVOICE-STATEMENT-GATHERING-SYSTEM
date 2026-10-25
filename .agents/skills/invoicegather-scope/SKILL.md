@@ -547,6 +547,12 @@ without payout evidence; `Payout Date` includes only rows with
 the selected date fact before aggregation. Do not claim a new platform adapter
 merely because it appears in a Platform filter option.
 
+- **Order Created status eligibility is market-neutral.** Shopee MY and Shopee
+  SG use the same exact normalized predicate: exclude only `To Ship` and
+  `Cancelled`; every other status, including `Canceled`, retains the existing
+  shared inclusion behavior. Do not add SG-specific status normalization or
+  allowlists.
+
 The reachable page contains only:
 
 ```text

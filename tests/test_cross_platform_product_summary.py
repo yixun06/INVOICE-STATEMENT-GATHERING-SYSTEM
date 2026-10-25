@@ -519,44 +519,30 @@ def test_order_created_current_source_excludes_cancelled_and_never_uses_canonica
     assert [item.order_id for item in payout.source_items] == ["CANONICAL-ONLY"]
 
 
-def test_order_created_current_source_excludes_only_final_po_status_classes():
+def test_order_created_current_source_uses_the_same_status_rule_for_my_and_sg():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,
         build_cross_platform_product_summary,
         build_cross_platform_reporting_snapshot,
     )
 
-    snapshot = build_cross_platform_reporting_snapshot(
-        _current_only_tabs(
-            status_by_order={
-                "TO-SHIP-TITLE": "To Ship",
-                "TO-SHIP-SOURCE": "To ship",
-                "CANCELLED": "Cancelled",
-                "SHIPPING": "Shipping",
-                "SHIPPED": "Shipped",
-                "DELIVERED": "Delivered",
-                "RECEIVED": "Order Received",
-                "COMPLETED": "Completed",
-                "RECEIVED-SEMICOLON": "Order Received; refund window until 2026-10-29",
-                "RECEIVED-LIVE": (
-                    "Order Received, but buyer can raise return/refund until 2026-10-29"
-                ),
-                "SINGLE-L-CANCEL": "Canceled",
-                "FUTURE": "Some Future Shopee Status",
-            }
-        )
-    )
-    summary = build_cross_platform_product_summary(
-        snapshot,
-        date_type=CrossPlatformDateType.ORDER_CREATED,
-        from_date=date(2026, 10, 22),
-        to_date=date(2026, 10, 22),
-    )
-
-    assert snapshot.available_dates("Shopee MY", CrossPlatformDateType.ORDER_CREATED) == (
-        date(2026, 10, 22),
-    )
-    assert {item.order_id for item in summary.source_items} == {
+    statuses = {
+        "TO-SHIP-TITLE": "To Ship",
+        "TO-SHIP-SOURCE": "To ship",
+        "CANCELLED": "Cancelled",
+        "SHIPPING": "Shipping",
+        "SHIPPED": "Shipped",
+        "DELIVERED": "Delivered",
+        "RECEIVED": "Order Received",
+        "COMPLETED": "Completed",
+        "RECEIVED-SEMICOLON": "Order Received; refund window until 2026-10-29",
+        "RECEIVED-LIVE": (
+            "Order Received, but buyer can raise return/refund until 2026-10-29"
+        ),
+        "SINGLE-L-CANCEL": "Canceled",
+        "FUTURE": "Some Future Shopee Status",
+    }
+    expected_order_ids = {
         "SHIPPING",
         "SHIPPED",
         "DELIVERED",
@@ -567,18 +553,34 @@ def test_order_created_current_source_excludes_only_final_po_status_classes():
         "SINGLE-L-CANCEL",
         "FUTURE",
     }
-    assert [(row.quantity, row.unit_price, row.original_sales, row.amount, row.discount_amount)
-            for row in summary.product_rows] == [
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-        (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
-    ]
+    for market, platform in (("shopee_my", "Shopee MY"), ("shopee_sg", "Shopee SG")):
+        snapshot = build_cross_platform_reporting_snapshot(
+            _current_only_tabs(market=market, status_by_order=statuses)
+        )
+        summary = build_cross_platform_product_summary(
+            snapshot,
+            platform=platform,
+            date_type=CrossPlatformDateType.ORDER_CREATED,
+            from_date=date(2026, 10, 22),
+            to_date=date(2026, 10, 22),
+        )
+
+        assert snapshot.available_dates(platform, CrossPlatformDateType.ORDER_CREATED) == (
+            date(2026, 10, 22),
+        )
+        assert {item.order_id for item in summary.source_items} == expected_order_ids
+        assert [(row.quantity, row.unit_price, row.original_sales, row.amount, row.discount_amount)
+                for row in summary.product_rows] == [
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+            (1, Decimal("10.00"), Decimal("10.00"), Decimal("8.00"), Decimal("2.00")),
+        ]
 
 
 def test_order_received_annotation_remains_selectable_and_visible_by_created_date():
@@ -656,59 +658,41 @@ def test_dispatched_current_statuses_keep_each_order_created_date_selectable():
         assert [item.order_id for item in summary.source_items] == expected_order_ids
 
 
-def test_order_created_current_status_transition_keeps_original_created_date():
+def test_order_created_current_status_transition_keeps_original_created_date_for_my_and_sg():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,
         build_cross_platform_product_summary,
         build_cross_platform_reporting_snapshot,
     )
 
-    pending_snapshot = build_cross_platform_reporting_snapshot(
-        _current_only_tabs(status_by_order={"SAME-ORDER": "To Ship"})
-    )
-    shipped_snapshot = build_cross_platform_reporting_snapshot(
-        _current_only_tabs(status_by_order={"SAME-ORDER": "Shipped"})
-    )
-
-    assert pending_snapshot.available_dates(
-        "Shopee MY", CrossPlatformDateType.ORDER_CREATED
-    ) == ()
-    assert build_cross_platform_product_summary(
-        pending_snapshot, date_type=CrossPlatformDateType.ORDER_CREATED
-    ).source_items == ()
-
-    shipped_summary = build_cross_platform_product_summary(
-        shipped_snapshot,
-        date_type=CrossPlatformDateType.ORDER_CREATED,
-        from_date=date(2026, 10, 22),
-        to_date=date(2026, 10, 22),
-    )
-    assert [item.order_id for item in shipped_summary.source_items] == ["SAME-ORDER"]
-    assert shipped_summary.source_items[0].order_created_date == date(2026, 10, 22)
-
-
-def test_order_created_my_status_exclusions_do_not_change_sg_current_behavior():
-    from src.invoice_app.services.cross_platform_product_summary import (
-        CrossPlatformDateType,
-        build_cross_platform_product_summary,
-        build_cross_platform_reporting_snapshot,
-    )
-
-    snapshot = build_cross_platform_reporting_snapshot(
-        _current_only_tabs(
-            market="shopee_sg",
-            status_by_order={"SG-TO-SHIP": "To Ship", "SG-CANCELLED": "Cancelled"},
+    for market, platform in (("shopee_my", "Shopee MY"), ("shopee_sg", "Shopee SG")):
+        pending_snapshot = build_cross_platform_reporting_snapshot(
+            _current_only_tabs(
+                market=market, status_by_order={"SAME-ORDER": "To Ship"}
+            )
         )
-    )
-    summary = build_cross_platform_product_summary(
-        snapshot,
-        platform="Shopee SG",
-        date_type=CrossPlatformDateType.ORDER_CREATED,
-        from_date=date(2026, 10, 22),
-        to_date=date(2026, 10, 22),
-    )
+        shipped_snapshot = build_cross_platform_reporting_snapshot(
+            _current_only_tabs(
+                market=market, status_by_order={"SAME-ORDER": "Shipped"}
+            )
+        )
 
-    assert [item.order_id for item in summary.source_items] == ["SG-TO-SHIP"]
+        assert pending_snapshot.available_dates(platform, CrossPlatformDateType.ORDER_CREATED) == ()
+        assert build_cross_platform_product_summary(
+            pending_snapshot,
+            platform=platform,
+            date_type=CrossPlatformDateType.ORDER_CREATED,
+        ).source_items == ()
+
+        shipped_summary = build_cross_platform_product_summary(
+            shipped_snapshot,
+            platform=platform,
+            date_type=CrossPlatformDateType.ORDER_CREATED,
+            from_date=date(2026, 10, 22),
+            to_date=date(2026, 10, 22),
+        )
+        assert [item.order_id for item in shipped_summary.source_items] == ["SAME-ORDER"]
+        assert shipped_summary.source_items[0].order_created_date == date(2026, 10, 22)
 
 
 def test_cross_product_summary_excludes_cancelled_parent_by_status_or_layout():

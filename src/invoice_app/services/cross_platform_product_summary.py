@@ -53,7 +53,7 @@ PLATFORM_OPTIONS = CROSS_PLATFORM_OPTIONS
 CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS = frozenset(
     context.persisted_platform for context in CROSS_PLATFORM_MARKET_CONTEXTS
 )
-SHOPEE_MY_ORDER_CREATED_EXCLUDED_STATUSES = frozenset(
+SHOPEE_ORDER_CREATED_EXCLUDED_STATUSES = frozenset(
     {"TO_SHIP", "CANCELLED"}
 )
 
@@ -543,13 +543,7 @@ def _full_order_current_reporting_items(
     eligible: list[CommittedReportingItem] = []
     for item in current.items:
         order = orders[(item.market, item.order_id)]
-        if order.market == SHOPEE_MY.key and _is_excluded_my_order_created_status(
-            order.order_status
-        ):
-            continue
-        if order.market != SHOPEE_MY.key and _is_explicitly_cancelled_full_order(
-            order.order_status
-        ):
+        if _is_excluded_order_created_status(order.order_status):
             continue
         context = resolve_market_context(item.market)
         seller_sku = normalize_sku_text(_text(item.resolved_seller_sku))
@@ -598,17 +592,17 @@ def _full_order_current_reporting_items(
     return tuple(eligible)
 
 
-def _is_excluded_my_order_created_status(order_status: str) -> bool:
-    """Exclude only Product Owner-approved MY Order Created status classes."""
+def _is_excluded_order_created_status(order_status: str) -> bool:
+    """Exclude only Product Owner-approved Order Created status classes."""
 
     return (
-        _normalize_my_order_created_exclusion_status(order_status)
-        in SHOPEE_MY_ORDER_CREATED_EXCLUDED_STATUSES
+        _normalize_order_created_exclusion_status(order_status)
+        in SHOPEE_ORDER_CREATED_EXCLUDED_STATUSES
     )
 
 
-def _normalize_my_order_created_exclusion_status(order_status: str) -> str:
-    """Normalize only exact MY Order Created exclusion equivalents."""
+def _normalize_order_created_exclusion_status(order_status: str) -> str:
+    """Normalize only exact approved Order Created exclusion equivalents."""
 
     normalized = " ".join(_text(order_status).split())
     exclusion_statuses = {
@@ -616,12 +610,6 @@ def _normalize_my_order_created_exclusion_status(order_status: str) -> str:
         "cancelled": "CANCELLED",
     }
     return exclusion_statuses.get(normalized.casefold(), normalized)
-
-
-def _is_explicitly_cancelled_full_order(order_status: str) -> bool:
-    return _text(order_status).casefold() in {"cancelled", "canceled"}
-
-
 def _direct_full_order_amounts(
     items: Sequence[CommittedReportingItem],
 ) -> tuple[CommittedReportingItem, ...]:
