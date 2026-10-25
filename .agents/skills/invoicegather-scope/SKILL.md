@@ -144,6 +144,14 @@ rules. It preserves the source models and immutable evidence ledgers.
   overview from Full Order Current plus Statement_Data, detailed settlement
   facts from Financial Components, and adjustment timeline/impact from
   Order_Adjustments.
+- **Shopee SG Analysis Phase A** is a read-only market-aware projection. Order
+  Created Date uses Full Order Current alone; Payout Date uses available
+  Statement ORDER evidence alone; component detail and adjustment lookup use
+  the same exact market/order identity. A missing Statement remains unavailable,
+  never zero. Adjustments are displayed as independent lifecycle events and
+  must not alter released amount. Phase A excludes Original Sales, Discount,
+  Invoice/PDF financial layouts, profit/net-result formulas, and any product
+  allocation of order-level settlement components.
 - Do not project Statement settlement fields into Full Order Current and do not
   introduce a Statement overwrite/current-snapshot model. Every upload is one
   immutable native-source artifact/batch with deterministic source hash,

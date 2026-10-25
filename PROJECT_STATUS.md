@@ -15,6 +15,27 @@ data remains read-only comparison/audit evidence.
 
 ## Current System State
 
+### SHOPEE_SG_ANALYSIS_PHASE_A - IMPLEMENTED / TESTED / UNCHECKPOINTED
+
+- Shopee SG Live Analysis now uses only market-scoped Full Order Current,
+  Statement_Data / Statement_Financial_Components through the shared
+  `read_committed_statement_financials` boundary, and a new read-only
+  Order_Adjustments boundary. The route never invokes the Invoice/PDF-based MY
+  service. Order Created Date reports order count, item quantity, and source
+  product subtotal; Payout Date reports only settled order count and native
+  released amount. An order without Statement evidence remains explicitly
+  unavailable, not zero.
+- Financial components retain their native persisted rows and component-name
+  totals only; the adjustment timeline remains independent of released amount.
+  Product-level settlement allocation, Original Sales, Discount, MY-02B
+  financial layouts, net result, profit, Payout Product Summary, and Billing
+  remain deferred. Market mismatch at either financial or adjustment reader
+  fails closed; no SG-to-MY fallback is available.
+- Live SG read-only validation: 8,173 Current Orders / 10,886 Items;
+  2,417 available Statement orders and 5,756 without settlement; 123,033
+  component rows, all linked to the 2,417 settled orders; 17 adjustment events
+  totalling S$207.16 separately. UAT2/business/schema write delta: 0.
+
 ### SHOPEE_MY_SG_ANY_PERIOD_STATEMENT_MODEL - IMPLEMENTED / TESTED
 
 - **Shopee MY now uses the same native any-period Statement workflow as Shopee

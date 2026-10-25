@@ -372,7 +372,7 @@ def test_tiktok_navigation_does_not_expose_zenxin_batch_data(tmp_path, monkeypat
     assert app.dataframe == []
 
 
-@pytest.mark.parametrize("page", ("Shopee SG", "TikTok"))
+@pytest.mark.parametrize("page", ("TikTok",))
 def test_unimplemented_analysis_pages_do_not_expose_my_or_zenxin_data(
     tmp_path, monkeypatch, page
 ):

@@ -111,6 +111,7 @@ from src.invoice_app.ui.cross_platform_product_summary import (
 from src.invoice_app.ui.shopee_my_live_analysis import (
     render_shopee_my_live_analysis,
 )
+from src.invoice_app.ui.shopee_sg_analysis import render_shopee_sg_analysis
 
 st.set_page_config(page_title=APP_TITLE, page_icon=":material/receipt_long:", layout="wide")
 
@@ -2075,7 +2076,9 @@ elif selected_page == "Consolidated Product Summary":
     render_cross_platform_product_summary()
 elif selected_page == "Shopee MY":
     render_shopee_my_live_analysis()
-elif selected_page in {"Shopee SG", "TikTok"}:
+elif selected_page == "Shopee SG":
+    render_shopee_sg_analysis()
+elif selected_page == "TikTok":
     st.title(selected_page)
     st.info(f"{selected_page} analysis is not configured yet.")
 else:
