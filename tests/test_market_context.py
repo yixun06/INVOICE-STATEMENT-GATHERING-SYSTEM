@@ -34,6 +34,9 @@ from src.invoice_app.services.uat2_data_settings import (
     UAT2DataSettings,
     configured_uat2_data_settings,
 )
+from src.invoice_app.services.postgres_statement_repository import (
+    PostgresStatementRepository,
+)
 
 
 def test_market_registry_preserves_my_identity_and_reserves_sg_identity():
@@ -190,6 +193,7 @@ def test_sg_statement_writer_routes_to_its_explicit_destination_while_monthly_an
         google_spreadsheet_id="sg-only-sheet",
         google_service_account={"type": "service_account"},
         market_context=SHOPEE_SG,
+        statement_backend="google_sheets",
     )
 
     canonical = settings.create_repository()
@@ -207,14 +211,18 @@ def test_sg_statement_writer_routes_to_its_explicit_destination_while_monthly_an
         settings.create_weekly_billing_reader()
 
 
-def test_sg_statement_writer_rejects_the_default_my_destination_before_io():
+def test_sg_postgres_statement_writer_does_not_require_a_statement_sheet(monkeypatch):
+    monkeypatch.setenv("INVOICEGATHER_PG_USER", "test-user")
+    monkeypatch.setenv("INVOICEGATHER_PG_PASSWORD", "test-password")
     settings = UAT2DataSettings(
         google_service_account={"type": "service_account"},
         market_context=SHOPEE_SG,
     )
 
-    with pytest.raises(MarketConfigurationUnavailable, match="explicit SG spreadsheet"):
-        settings.create_statement_writer()
+    statement = settings.create_statement_writer()
+
+    assert isinstance(statement, PostgresStatementRepository)
+    assert statement.persisted_platform == SHOPEE_SG.persisted_platform
 
 
 def test_sg_product_master_reuses_only_shared_google_credentials(monkeypatch, tmp_path):

@@ -50,6 +50,8 @@ from src.invoice_app.services.market_context import (
 
 
 DEFAULT_UAT2_DATA_SPREADSHEET_ID = "1sZHYrmL9KuxhIdlZUN-EIy5tedmlbY62fOPxP22hsF8"
+POSTGRES_STATEMENT_BACKEND = "postgresql"
+GOOGLE_SHEETS_STATEMENT_BACKEND = "google_sheets"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class UAT2DataSettings:
     google_service_account: GoogleServiceAccountInfo | None = field(default=None, repr=False)
     cache_ttl_seconds: float = 45.0
     market_context: MarketContext = SHOPEE_MY
+    statement_backend: str = POSTGRES_STATEMENT_BACKEND
 
     def create_repository(self) -> GoogleSheetsHistoricalInvoiceRepository:
         context = resolve_market_context(self.market_context)
@@ -104,7 +107,8 @@ class UAT2DataSettings:
     def create_statement_writer(self) -> GoogleSheetsStatementWriter | PostgresStatementRepository:
         context = resolve_market_context(self.market_context)
         require_capability(context, "statement_commit")
-        if context.key is MarketKey.SHOPEE_MY:
+        backend = self._statement_backend(context)
+        if backend == POSTGRES_STATEMENT_BACKEND:
             return PostgresStatementRepository(
                 engine=PostgresRuntimeConfig.from_environment().engine(),
                 persisted_platform=context.persisted_platform,
@@ -121,6 +125,18 @@ class UAT2DataSettings:
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
             persisted_platform=context.persisted_platform,
         )
+
+    def _statement_backend(self, context: MarketContext) -> str:
+        backend = self.statement_backend.strip().casefold()
+        if backend not in {POSTGRES_STATEMENT_BACKEND, GOOGLE_SHEETS_STATEMENT_BACKEND}:
+            raise MarketConfigurationUnavailable(
+                f"{context.display_name} Statement backend is unsupported: {self.statement_backend!r}."
+            )
+        if context.key is MarketKey.SHOPEE_MY and backend != POSTGRES_STATEMENT_BACKEND:
+            raise MarketConfigurationUnavailable(
+                "Shopee MY Statement runtime is PostgreSQL-only; Sheets is not an active fallback."
+            )
+        return backend
 
     def create_monthly_statement_writer(self) -> GoogleSheetsMonthlyStatementWriter:
         context = resolve_market_context(self.market_context)
@@ -220,6 +236,7 @@ def configured_uat2_data_settings(
             "google_spreadsheet_id": os.getenv("INV_UAT2_DATA_SPREADSHEET_ID", DEFAULT_UAT2_DATA_SPREADSHEET_ID),
             "google_credentials_path": os.getenv("INV_UAT2_GOOGLE_CREDENTIALS_PATH", ""),
             "cache_ttl_seconds": os.getenv("INV_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
+            "statement_backend": POSTGRES_STATEMENT_BACKEND,
         }
         configured = _configured_uat2_secret_mapping()
     elif resolved.key is MarketKey.SHOPEE_SG:
@@ -227,6 +244,9 @@ def configured_uat2_data_settings(
             "google_spreadsheet_id": os.getenv("INV_SHOPEE_SG_UAT2_DATA_SPREADSHEET_ID", ""),
             "google_credentials_path": os.getenv("INV_SHOPEE_SG_UAT2_GOOGLE_CREDENTIALS_PATH", ""),
             "cache_ttl_seconds": os.getenv("INV_SHOPEE_SG_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
+            "statement_backend": os.getenv(
+                "INV_SHOPEE_SG_STATEMENT_BACKEND", POSTGRES_STATEMENT_BACKEND
+            ),
         }
         configured = _configured_market_uat2_secret_mapping(resolved)
     else:
@@ -251,6 +271,7 @@ def configured_uat2_data_settings(
         google_service_account=dict(service_account) if isinstance(service_account, Mapping) and service_account else None,
         cache_ttl_seconds=ttl,
         market_context=resolved,
+        statement_backend=values["statement_backend"].strip(),
     )
 
 

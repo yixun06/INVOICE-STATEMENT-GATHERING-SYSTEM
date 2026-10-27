@@ -1,4 +1,4 @@
-"""MY-only PostgreSQL persistence adapter for the active Statement contract.
+"""Market-scoped PostgreSQL persistence adapter for the active Statement contract.
 
 The adapter deliberately delegates all business classification to the shared
 Statement preflight.  It owns only typed PostgreSQL reconstruction, one locked
@@ -48,15 +48,21 @@ from src.invoice_app.services.uat2_persistence_schema import (
 
 
 _MY_PLATFORM = "Shopee"
-_MY_STATEMENT_ADVISORY_LOCK = "invoicegather:my-statement"
+_SG_PLATFORM = "Shopee SG"
+_STATEMENT_ADVISORY_LOCKS = {
+    _MY_PLATFORM: "invoicegather:my-statement",
+    _SG_PLATFORM: "invoicegather:sg-statement",
+}
 
 
 class PostgresStatementRepository:
-    """One MY-locked committed Statement reader/writer backed only by PostgreSQL."""
+    """One market-locked committed Statement reader/writer backed only by PostgreSQL."""
 
     def __init__(self, *, engine: Engine, persisted_platform: str = _MY_PLATFORM) -> None:
-        if persisted_platform != _MY_PLATFORM:
-            raise ValueError("PostgreSQL Statement runtime is MY-only; SG remains unchanged.")
+        if persisted_platform not in _STATEMENT_ADVISORY_LOCKS:
+            raise ValueError(
+                "PostgreSQL Statement runtime requires an explicitly supported market platform."
+            )
         self._engine = engine
         self._persisted_platform = persisted_platform
 
@@ -69,7 +75,7 @@ class PostgresStatementRepository:
             return self._read_state(connection)
 
     def reload_commit_state(self) -> StatementCommitState:
-        """Compatibility entry point; active MY never reads Invoice/PDF state."""
+        """Compatibility entry point; active Statement never reads Invoice/PDF state."""
         return self.reload_active_commit_state()
 
     def read_committed_financial_facts(self) -> CommittedStatementFinancialFacts:
@@ -107,10 +113,10 @@ class PostgresStatementRepository:
             return self._preflight(plan, self._read_state(connection))[0]
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
-        """Classify and commit an active MY plan in one serializable transaction.
+        """Classify and commit an active market plan in one serializable transaction.
 
-        ``pg_advisory_xact_lock`` serializes MY Statement writers across app
-        processes.  The existing unique constraints remain the final identity
+        ``pg_advisory_xact_lock`` serializes Statement writers per market across
+        app processes.  The existing unique constraints remain the final identity
         protection; serializable isolation rejects a stale concurrent snapshot.
         """
 
@@ -122,7 +128,7 @@ class PostgresStatementRepository:
                 with connection.begin():
                     connection.execute(
                         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-                        {"key": _MY_STATEMENT_ADVISORY_LOCK},
+                        {"key": _STATEMENT_ADVISORY_LOCKS[self._persisted_platform]},
                     )
                     preview, effective = self._preflight(plan, self._read_state(connection))
                     if not preview.eligible or effective is None:
@@ -149,7 +155,7 @@ class PostgresStatementRepository:
             ) from error
 
     def weekly_statement_rows(self) -> Mapping[str, tuple[tuple[str, ...], ...]]:
-        """Return only MY Statement-owned rows for the legacy Billing projector."""
+        """Return only this market's Statement-owned rows for an approved projector."""
 
         with self._engine.connect() as connection:
             return {
@@ -180,7 +186,7 @@ class PostgresStatementRepository:
             }
 
     def reporting_statement_data_rows(self) -> tuple[tuple[str, ...], ...]:
-        """Return MY committed-order date authority for reporting without Sheets."""
+        """Return this market's committed-order date authority without Sheets."""
 
         with self._engine.connect() as connection:
             return tuple(
@@ -272,7 +278,9 @@ def _validate_plan_market(plan: StatementCommitPlan, platform: str) -> None:
     positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
     for values in plan.rows:
         if values[positions["platform"]] != platform:
-            raise StatementCommitBlocked("Statement plan platform does not match the PostgreSQL MY writer.")
+            raise StatementCommitBlocked(
+                "Statement plan platform does not match the PostgreSQL market writer."
+            )
 
 
 def _insert_plan(connection: Connection, plan: StatementCommitPlan) -> None:

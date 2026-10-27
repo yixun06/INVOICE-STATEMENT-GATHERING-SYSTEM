@@ -3747,11 +3747,24 @@ fix then preserved full-field verification. A subsequent authorized real MY
 commit succeeded and reprocessing the same source returned `ALREADY_IMPORTED`
 without an additional write.
 
-Current migration order is: (1) close/checkpoint MY Statement locally without
-push, (2) migrate SG Statement through the same shared architecture and full
-acceptance playbook, (3) migrate market-isolated MY and SG Full Order Current
-through one shared repository, then (4) inventory remaining application-owned
-runtime/history data as migrate, source-only Sheets, or legacy/decommission.
+Shopee SG Statement uses the same market-scoped PostgreSQL repository when
+the explicit SG Statement backend is `postgresql`. Its four Statement domains
+are read and written only through PostgreSQL; SG uses its own deterministic
+transaction advisory-lock namespace and never falls back to, unions with, or
+directly reads a legacy SG Statement Sheet in that mode. Full Order Current
+and Product Master remain their approved Google Sheets authorities. The stable
+SG Google Sheets Statement writer remains available only when the explicit
+`google_sheets` backend is selected; it is not an automatic fallback. Historical
+parity is verified at 5,606 / 123,033 / 68 / 17 rows. The runtime cutover is
+verified by local transaction/rollback controls and historical duplicate replay;
+a genuinely NEW live SG Statement Commit requires separate Product Owner
+authorization and remains pending.
+
+Current migration order is: (1) close/checkpoint the MY and SG Statement
+runtime cutovers locally without push, (2) migrate market-isolated MY and SG
+Full Order Current through one shared repository, then (3) inventory remaining
+application-owned runtime/history data as migrate, source-only Sheets, or
+legacy/decommission.
 The next Full Order repository must retain market isolation, order/item facts,
 USOLF/unit price, NAV, resolved seller SKU, resolve SKU, status, quantity,
 product subtotal, and required provenance. Product Master remains separate on

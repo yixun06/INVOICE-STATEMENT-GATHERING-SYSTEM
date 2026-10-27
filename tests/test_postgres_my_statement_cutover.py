@@ -86,9 +86,17 @@ def test_my_statement_factory_is_postgres_not_google(monkeypatch: pytest.MonkeyP
     )
 
 
-def test_postgres_statement_runtime_rejects_sg_market() -> None:
-    with pytest.raises(ValueError, match="MY-only"):
-        PostgresStatementRepository(engine=object(), persisted_platform="Shopee SG")  # type: ignore[arg-type]
+def test_postgres_statement_runtime_accepts_explicit_sg_market() -> None:
+    repository = PostgresStatementRepository(  # type: ignore[arg-type]
+        engine=object(), persisted_platform="Shopee SG"
+    )
+
+    assert repository.persisted_platform == "Shopee SG"
+
+
+def test_postgres_statement_runtime_rejects_unknown_market() -> None:
+    with pytest.raises(ValueError, match="explicitly supported market"):
+        PostgresStatementRepository(engine=object(), persisted_platform="Unknown")  # type: ignore[arg-type]
 
 
 class ForbiddenLegacyStatementSheets:

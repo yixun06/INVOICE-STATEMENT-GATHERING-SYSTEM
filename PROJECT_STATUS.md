@@ -88,6 +88,32 @@ data remains read-only comparison/audit evidence.
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
 
+### POSTGRES_SG_STATEMENT_POSTGRESQL - IMPLEMENTED / TESTED / REPLAY VERIFIED / LOCAL CHECKPOINT PENDING
+
+- SG `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`,
+  and `Order_Adjustments` now use the shared market-scoped PostgreSQL
+  repository when the explicit SG Statement backend is `postgresql`. Data
+  Import, Reconcile/Review/preflight/Commit/readback, financial component and
+  adjustment projections, and SG Analysis Phase A receive the same PostgreSQL
+  Statement reader/writer; there is no union, fallback, or direct legacy SG
+  Statement Sheet access in that mode. Full Order Current and Product Master
+  remain Google Sheets authorities.
+- The repository has a deterministic SG-only advisory transaction lock and
+  retains the MY shared complete-bundle classifier, `SERIALIZABLE`
+  transaction, four-domain atomic write, pre-COMMIT full-field readback, and
+  Decimal/Numeric comparison boundary. Explicit `google_sheets` selection
+  retains the stable SG Sheets writer during the migration period, but it is
+  never an automatic PostgreSQL fallback. SG Weekly/Monthly Billing remains
+  fail-closed/not enabled, so no unapproved SG Billing behavior was added.
+- Historical PostgreSQL parity remains 5,606 Statement Data, 123,033
+  Financial Components, 68 Summary, and 17 Adjustments. The current populated
+  SG history is the read-only duplicate-replay population: 2,417 ORDER bundles
+  and 17 adjustments are exact duplicates; no genuinely NEW live source was
+  selected. Focused factory, active Statement, SG Analysis, MY isolation, and
+  local four-domain transaction/rollback tests pass. A real NEW SG Statement
+  Commit is deliberately **NOT PERFORMED** and requires separate Product Owner
+  authorization. Deployment is **NOT VERIFIED**.
+
 ### SHOPEE_SG_ANALYSIS_PHASE_A - IMPLEMENTED / TESTED / UNCHECKPOINTED
 
 - Shopee SG Live Analysis now uses only market-scoped Full Order Current,
@@ -561,11 +587,10 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
    PostgreSQL. Historical parity, runtime reader/writer, atomic transaction,
    rollback safety, idempotency, successful real Commit, repeat-source no-op,
    and migration lessons are verified.
-2. **Next:** Shopee SG Statement PostgreSQL via the shared architecture:
-   historical and reconstruction parity, duplicate/conflict replay, Numeric
-   normalization, atomic rollback/adjustments, forbidden legacy-Sheets access,
-   local smoke, and a local-only checkpoint.
-3. **Then:** market-isolated MY and SG Full Order Current PostgreSQL through a
+2. **Current local checkpoint:** Shopee SG Statement PostgreSQL runtime is
+   implemented and replay-verified; a separate Product Owner authorization is
+   required for a genuinely NEW live SG Statement Commit.
+3. **Next:** market-isolated MY and SG Full Order Current PostgreSQL through a
    shared repository, retaining identity, USOLF/unit price, NAV, resolved
    seller SKU, resolve SKU, status, quantity, product subtotal, and provenance.
 4. **Then:** inventory remaining application-owned Sheets-backed runtime/history
