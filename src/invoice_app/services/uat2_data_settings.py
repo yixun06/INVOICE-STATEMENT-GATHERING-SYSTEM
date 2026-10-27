@@ -21,17 +21,23 @@ from src.invoice_app.repositories.shopee_full_order_current_repository import (
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
+from src.invoice_app.pg_orm.runtime import PostgresRuntimeConfig
+from src.invoice_app.services.postgres_statement_repository import (
+    PostgresStatementRepository,
+)
 from src.invoice_app.services.google_sheets_monthly_statement_writer import (
     GoogleSheetsMonthlyStatementWriter,
 )
 from src.invoice_app.services.weekly_billing import (
     GoogleSheetsWeeklyBillingReader,
+    PostgresMyWeeklyBillingReader,
 )
 from src.invoice_app.services.monthly_billing import (
     GoogleSheetsMonthlyBillingReader,
 )
 from src.invoice_app.services.cross_platform_product_summary import (
     GoogleSheetsCrossPlatformProductSummaryReader,
+    PostgresMyCrossPlatformProductSummaryReader,
 )
 from src.invoice_app.services.market_context import (
     MarketConfigurationUnavailable,
@@ -95,9 +101,14 @@ class UAT2DataSettings:
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )
 
-    def create_statement_writer(self) -> GoogleSheetsStatementWriter:
+    def create_statement_writer(self) -> GoogleSheetsStatementWriter | PostgresStatementRepository:
         context = resolve_market_context(self.market_context)
         require_capability(context, "statement_commit")
+        if context.key is MarketKey.SHOPEE_MY:
+            return PostgresStatementRepository(
+                engine=PostgresRuntimeConfig.from_environment().engine(),
+                persisted_platform=context.persisted_platform,
+            )
         if (
             context.key is MarketKey.SHOPEE_SG
             and self.google_spreadsheet_id == DEFAULT_UAT2_DATA_SPREADSHEET_ID
@@ -123,8 +134,18 @@ class UAT2DataSettings:
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )
 
-    def create_weekly_billing_reader(self) -> GoogleSheetsWeeklyBillingReader:
+    def create_weekly_billing_reader(self) -> GoogleSheetsWeeklyBillingReader | PostgresMyWeeklyBillingReader:
         require_capability(self.market_context, "weekly_billing")
+        context = resolve_market_context(self.market_context)
+        if context.key is MarketKey.SHOPEE_MY:
+            return PostgresMyWeeklyBillingReader(
+                spreadsheet_id=self.google_spreadsheet_id,
+                gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+                statement_repository=PostgresStatementRepository(
+                    engine=PostgresRuntimeConfig.from_environment().engine(),
+                    persisted_platform=context.persisted_platform,
+                ),
+            )
         return GoogleSheetsWeeklyBillingReader(
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
@@ -140,10 +161,20 @@ class UAT2DataSettings:
 
     def create_cross_platform_product_summary_reader(
         self,
-    ) -> GoogleSheetsCrossPlatformProductSummaryReader:
+    ) -> GoogleSheetsCrossPlatformProductSummaryReader | PostgresMyCrossPlatformProductSummaryReader:
         if not self.market_context.cross_platform_eligible:
             raise MarketConfigurationUnavailable(
                 f"{self.market_context.display_name} is permanently excluded from Cross Platform Summary."
+            )
+        context = resolve_market_context(self.market_context)
+        if context.key is MarketKey.SHOPEE_MY:
+            return PostgresMyCrossPlatformProductSummaryReader(
+                spreadsheet_id=self.google_spreadsheet_id,
+                gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+                statement_repository=PostgresStatementRepository(
+                    engine=PostgresRuntimeConfig.from_environment().engine(),
+                    persisted_platform=context.persisted_platform,
+                ),
             )
         return GoogleSheetsCrossPlatformProductSummaryReader(
             spreadsheet_id=self.google_spreadsheet_id,

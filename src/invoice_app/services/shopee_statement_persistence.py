@@ -10,10 +10,11 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from enum import Enum
 from hashlib import sha256
 import json
-from typing import Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
@@ -63,7 +64,6 @@ from src.invoice_app.services.statement_reconciliation import (
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     CommittedOrderSettlementEvidence,
-    assess_statement_order_evidence,
 )
 
 
@@ -71,8 +71,62 @@ class StatementCommitBlocked(RuntimeError):
     """The staged Statement cannot safely become a committed batch."""
 
 
+@dataclass(frozen=True)
+class StatementWriteTargetDiagnostic:
+    """Redacted shape of one Sheets values range in a Statement write."""
+
+    target: str
+    row_count: int
+    column_count: int
+    cell_count: int
+    range_name: str = "unknown"
+
+
+@dataclass(frozen=True)
+class StatementWriteFailureDiagnostic:
+    """Payload-free failure facts retained after a verified no-write result."""
+
+    category: str
+    exception_type: str
+    http_status: int | None
+    api_reason: str | None
+    message: str
+    request_method: str
+    operation_type: str
+    payload_bytes: int
+    value_range_count: int
+    total_planned_cells: int
+    elapsed_milliseconds: int
+    targets: tuple[StatementWriteTargetDiagnostic, ...]
+
+    def trace_summary(self) -> str:
+        """Return a bounded redacted summary safe for opt-in session diagnostics."""
+
+        targets = ",".join(
+            f"{target.target}[{target.range_name}]:{target.row_count}x{target.column_count}"
+            for target in self.targets
+        ) or "none"
+        return (
+            f"category={self.category};exception={self.exception_type};"
+            f"http={self.http_status if self.http_status is not None else 'none'};"
+            f"api_reason={self.api_reason or 'none'};payload_bytes={self.payload_bytes};"
+            f"ranges={self.value_range_count};cells={self.total_planned_cells};"
+            f"elapsed_ms={self.elapsed_milliseconds};targets={targets};"
+            f"message={self.message}"
+        )
+
+
 class StatementWriteNotApplied(RuntimeError):
     """An uncertain authoritative write was verified to have applied nothing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic: StatementWriteFailureDiagnostic | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 class StatementWriteIntegrityError(RuntimeError):
@@ -162,18 +216,74 @@ class StatementCommitState:
     items: tuple[CanonicalInvoiceItem, ...] = ()
     order_adjustments: tuple[CanonicalOrderAdjustment, ...] = ()
     committed_order_evidence: tuple[CommittedOrderSettlementEvidence, ...] = ()
+    committed_statement_rows: tuple[tuple[str, ...], ...] = ()
+    committed_financial_component_rows: tuple[tuple[str, ...], ...] = ()
+
+
+class StatementCommitOutcome(str, Enum):
+    """Navigation-safe outcomes produced by the existing commit authority."""
+
+    COMMITTED = "COMMITTED"
+    ALREADY_IMPORTED = "ALREADY_IMPORTED"
+    STALE_REVIEW = "STALE_REVIEW"
+    CONFLICT = "CONFLICT"
+    INCOMPLETE_UNSAFE = "INCOMPLETE_UNSAFE"
+    WRITE_FAILED = "WRITE_FAILED"
+    BLOCKED = "BLOCKED"
 
 
 @dataclass(frozen=True)
 class StatementCommitAttempt:
+    """Authoritative result of one locked Statement commit attempt."""
+
     committed: bool
     reasons: tuple[str, ...]
+    outcome: StatementCommitOutcome = StatementCommitOutcome.BLOCKED
+    write_failure_diagnostic: StatementWriteFailureDiagnostic | None = None
+
+
+@dataclass(frozen=True)
+class StatementCommitPreflight:
+    """Read-only projection of the active writer's commit eligibility checks."""
+
+    status: str
+    eligible: bool
+    blocker_codes: tuple[str, ...] = ()
+    blocker_reasons: tuple[str, ...] = ()
+    new_order_ids: tuple[str, ...] = ()
+    exact_duplicate_order_ids: tuple[str, ...] = ()
+    conflict_order_ids: tuple[str, ...] = ()
+    incomplete_unsafe_order_ids: tuple[str, ...] = ()
+    statement_batch_id: str = ""
+    statement_file_hash: str = ""
+    source_filename: str = ""
+    representative_source_rows: tuple[tuple[str, int], ...] = ()
+    proposed_statement_rows: int = 0
+    proposed_financial_component_rows: int = 0
+    proposed_summary_rows: int = 0
+    proposed_adjustment_rows: int = 0
+    skipped_adjustment_rows: int = 0
+    conflicting_adjustment_rows: int = 0
+    proposed_new_released_amount: Decimal = Decimal("0.00")
+    no_new_facts: bool = False
+    proposed_plan: StatementCommitPlan | None = None
 
 
 class StatementAtomicWriter(Protocol):
     """Implemented only by a storage adapter with an approved atomic contract."""
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None: ...
+
+
+class ActiveStatementRepository(StatementAtomicWriter, Protocol):
+    """Storage-only contract shared by MY PostgreSQL and retained SG Sheets."""
+
+    @property
+    def persisted_platform(self) -> str: ...
+
+    def reload_active_commit_state(self) -> StatementCommitState: ...
+
+    def preview_statement_batch(self, plan: StatementCommitPlan) -> StatementCommitPreflight: ...
 
 
 def prepare_statement_commit_plan(
@@ -726,36 +836,397 @@ def validate_active_statement_state(
 ) -> tuple[str, ...]:
     """Fresh pre-commit checks that deliberately exclude Invoice/PDF state."""
 
-    if plan.authority != "FULL_ORDER_CURRENT":
-        return ("ACTIVE_STATEMENT_AUTHORITY_MISMATCH",)
-    references = tuple(
-        reference
-        for reference in state.committed_statements
-        if reference.commit_status == "COMMITTED"
+    return preview_active_statement_state(plan, state).blocker_codes
+
+
+def preview_active_statement_state(
+    plan: StatementCommitPlan,
+    state: StatementCommitState,
+) -> StatementCommitPreflight:
+    """Classify complete order bundles before applying the Full Order gate."""
+
+    statement = plan.statement
+    incoming_ids = tuple(
+        dict.fromkeys(row.order_id for row in statement.order_rows if row.order_id)
     )
-    if any(reference.file_hash == plan.statement.file_hash for reference in references):
-        return ("ALREADY_IMPORTED",)
-    if plan.semantic_overlap_dedupe:
-        overlap = assess_statement_order_evidence(
-            plan.statement, state.committed_order_evidence
+    source_row_by_order = {
+        row.order_id: row.source_row_number for row in statement.order_rows if row.order_id
+    }
+
+    def provenance(order_ids: Iterable[str]) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            (order_id, source_row_by_order[order_id])
+            for order_id in tuple(dict.fromkeys(order_ids))[:10]
+            if order_id in source_row_by_order
         )
-        if overlap.semantic_duplicate:
-            return ("ALREADY_IMPORTED",)
-        if overlap.conflict_order_ids:
-            return tuple(
-                f"SETTLEMENT_EVIDENCE_CONFLICT:{order_id}"
-                for order_id in overlap.conflict_order_ids
-            )
-        if overlap.partial_duplicate:
-            return ("PARTIAL_DUPLICATE_SETTLEMENT_EVIDENCE",)
-        return ()
-    if any(
-        reference.statement_period_from == plan.statement.statement_period_from
-        and reference.statement_period_to == plan.statement.statement_period_to
-        for reference in references
+
+    if plan.authority != "FULL_ORDER_CURRENT":
+        return StatementCommitPreflight(
+            status="CONFLICT",
+            eligible=False,
+            blocker_codes=("ACTIVE_STATEMENT_AUTHORITY_MISMATCH",),
+            blocker_reasons=(
+                "The proposed write does not use the active Full Order Current Statement authority.",
+            ),
+            representative_source_rows=provenance(incoming_ids),
+            statement_batch_id=plan.audit.statement_batch_id,
+            statement_file_hash=statement.file_hash,
+            source_filename=statement.source_filename,
+        )
+
+    new_ids, duplicate_ids, conflict_ids, unsafe_ids = _classify_order_bundles(
+        plan, state
+    )
+    new_adjustments, skipped_adjustments, adjustment_conflicts = (
+        _classify_adjustment_events(plan.order_adjustments, state.order_adjustments)
+    )
+    effective_plan = _active_write_plan(
+        plan,
+        new_order_ids=new_ids,
+        new_adjustments=new_adjustments,
+    )
+    released_by_order = {
+        row.order_id: row.total_released_amount or Decimal("0.00")
+        for row in statement.order_rows
+        if row.order_id
+    }
+    proposed_released = sum(
+        (released_by_order[order_id] for order_id in new_ids), Decimal("0.00")
+    )
+    common = dict(
+        new_order_ids=new_ids,
+        exact_duplicate_order_ids=duplicate_ids,
+        conflict_order_ids=conflict_ids,
+        incomplete_unsafe_order_ids=unsafe_ids,
+        statement_batch_id=plan.audit.statement_batch_id,
+        statement_file_hash=statement.file_hash,
+        source_filename=statement.source_filename,
+        representative_source_rows=provenance(
+            (*conflict_ids, *unsafe_ids, *duplicate_ids, *new_ids)
+        ),
+        proposed_statement_rows=len(effective_plan.rows),
+        proposed_financial_component_rows=len(
+            effective_plan.financial_component_rows
+        ),
+        proposed_summary_rows=len(effective_plan.summary_rows),
+        proposed_adjustment_rows=len(new_adjustments),
+        skipped_adjustment_rows=skipped_adjustments,
+        conflicting_adjustment_rows=adjustment_conflicts,
+        proposed_new_released_amount=proposed_released,
+        proposed_plan=effective_plan,
+    )
+    if conflict_ids or adjustment_conflicts:
+        return StatementCommitPreflight(
+            status="CONFLICT",
+            eligible=False,
+            blocker_codes=tuple(
+                [f"SETTLEMENT_EVIDENCE_CONFLICT:{order_id}" for order_id in conflict_ids]
+                + (["ADJUSTMENT_EVIDENCE_CONFLICT"] if adjustment_conflicts else [])
+            ),
+            blocker_reasons=(
+                "Committed complete evidence conflicts with the incoming source for "
+                f"{len(conflict_ids)} order(s) and {adjustment_conflicts} adjustment(s).",
+            ),
+            **common,
+        )
+    if unsafe_ids:
+        return StatementCommitPreflight(
+            status="INCOMPLETE_UNSAFE",
+            eligible=False,
+            blocker_codes=tuple(
+                f"INCOMPLETE_SETTLEMENT_EVIDENCE:{order_id}" for order_id in unsafe_ids
+            ),
+            blocker_reasons=(
+                "Committed evidence is missing, extra, or ambiguous for "
+                f"{len(unsafe_ids)} order bundle(s); no facts will be discarded.",
+            ),
+            **common,
+        )
+    if not new_ids and not new_adjustments:
+        return StatementCommitPreflight(
+            status="ALREADY_IMPORTED",
+            eligible=False,
+            blocker_codes=(),
+            blocker_reasons=(),
+            no_new_facts=True,
+            **common,
+        )
+    return StatementCommitPreflight(
+        status="MIXED" if duplicate_ids or skipped_adjustments else "NEW",
+        eligible=True,
+        **common,
+    )
+
+
+_ORDER_BUNDLE_FIELDS = (
+    "record_type", "order_id", "order_creation_date", "payout_completed_date",
+    "release_channel", "order_type", "total_released_amount",
+    "statement_product_id", "statement_product_name", "statement_product_price",
+    "statement_refund_amount", "statement_net_selling_amount", "platform",
+)
+_COMPONENT_BUNDLE_FIELDS = (
+    "record_type", "statement_source_sheet", "order_id", "statement_product_id",
+    "component_name", "component_amount", "component_note", "payout_completed_date",
+    "platform",
+)
+_ORDER_BUNDLE_MONETARY_FIELDS = frozenset(
+    {
+        "total_released_amount",
+        "statement_product_price",
+        "statement_refund_amount",
+        "statement_net_selling_amount",
+    }
+)
+_COMPONENT_BUNDLE_MONETARY_FIELDS = frozenset({"component_amount"})
+
+
+def _classify_order_bundles(
+    plan: StatementCommitPlan,
+    state: StatementCommitState,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    incoming = _bundle_map(plan.rows, plan.financial_component_rows)
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    incoming_platforms = {
+        row[positions["platform"]] for row in plan.rows if row[positions["platform"]]
+    }
+    if len(incoming_platforms) != 1:
+        order_ids = tuple(
+            dict.fromkeys(row.order_id for row in plan.statement.order_rows if row.order_id)
+        )
+        return (), (), (), order_ids
+    persisted_platform = next(iter(incoming_platforms))
+    committed = _committed_bundle_map(
+        state.committed_statement_rows,
+        state.committed_financial_component_rows,
+        persisted_platform=persisted_platform,
+    )
+    new: list[str] = []
+    duplicate: list[str] = []
+    conflict: list[str] = []
+    unsafe: list[str] = []
+    for order_id in tuple(
+        dict.fromkeys(row.order_id for row in plan.statement.order_rows if row.order_id)
     ):
-        return ("POSSIBLE_REVISION",)
-    return ()
+        source_bundle = incoming.get(order_id)
+        candidates = committed.get(order_id, ())
+        if source_bundle is None:
+            unsafe.append(order_id)
+        elif not candidates:
+            new.append(order_id)
+        elif all(candidate == source_bundle for candidate in candidates):
+            duplicate.append(order_id)
+        elif any(candidate == source_bundle for candidate in candidates):
+            unsafe.append(order_id)
+        elif any(
+            _bundle_shape(candidate) != _bundle_shape(source_bundle)
+            for candidate in candidates
+        ):
+            unsafe.append(order_id)
+        else:
+            conflict.append(order_id)
+    return tuple(new), tuple(duplicate), tuple(conflict), tuple(unsafe)
+
+
+def _bundle_map(
+    rows: Iterable[tuple[str, ...]],
+    components: Iterable[tuple[str, ...]],
+) -> dict[str, tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]]:
+    data_positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    component_positions = {
+        name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    result: dict[str, tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]] = {}
+    for row in rows:
+        record_type = row[data_positions["record_type"]]
+        order_id = row[data_positions["order_id"]]
+        if record_type not in {"ORDER", "SKU"} or not order_id:
+            continue
+        result.setdefault(order_id, (Counter(), Counter()))[0][
+            _bundle_values(
+                row,
+                positions=data_positions,
+                fields=_ORDER_BUNDLE_FIELDS,
+                monetary_fields=_ORDER_BUNDLE_MONETARY_FIELDS,
+            )
+        ] += 1
+    for row in components:
+        order_id = row[component_positions["order_id"]]
+        if not order_id:
+            continue
+        result.setdefault(order_id, (Counter(), Counter()))[1][
+            _bundle_values(
+                row,
+                positions=component_positions,
+                fields=_COMPONENT_BUNDLE_FIELDS,
+                monetary_fields=_COMPONENT_BUNDLE_MONETARY_FIELDS,
+            )
+        ] += 1
+    return result
+
+
+def _bundle_values(
+    row: Sequence[object],
+    *,
+    positions: Mapping[str, int],
+    fields: Sequence[str],
+    monetary_fields: frozenset[str],
+) -> tuple[object, ...]:
+    """Build one comparison tuple without changing stored source evidence.
+
+    The active Statement duplicate contract compares complete evidence bundles.
+    Money has numeric, rather than lexical-scale, identity at that boundary so
+    a source ``107.4`` and a PostgreSQL ``NUMERIC(12,2)`` readback of
+    ``107.40`` remain the same fact.  All non-monetary provenance remains
+    byte-for-byte under the existing serializer contract.
+    """
+
+    return tuple(
+        _canonicalize_bundle_monetary_value(row[positions[field]])
+        if field in monetary_fields
+        else row[positions[field]]
+        for field in fields
+    )
+
+
+def _canonicalize_bundle_monetary_value(value: object) -> object:
+    """Return plain Decimal identity text, preserving null/blank/invalid values.
+
+    This is deliberately comparison-only: it neither rounds nor mutates the
+    parser, database representation, persisted values, or display formatting.
+    Invalid values retain their existing value so upstream validation and the
+    fail-closed bundle comparison keep their current behavior.
+    """
+
+    if value is None or value == "":
+        return value
+    try:
+        amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return value
+    if not amount.is_finite():
+        return value
+    if amount == 0:
+        return "0"
+    return format(amount.normalize(), "f")
+
+
+def _committed_bundle_map(
+    rows: Iterable[tuple[str, ...]],
+    components: Iterable[tuple[str, ...]],
+    *,
+    persisted_platform: str,
+) -> dict[str, tuple[tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]], ...]]:
+    data_positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    component_positions = {
+        name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    batch_rows: dict[str, list[tuple[str, ...]]] = {}
+    batch_components: dict[str, list[tuple[str, ...]]] = {}
+    for row in rows:
+        if (
+            row[data_positions["commit_status"]] == "COMMITTED"
+            and row[data_positions["platform"]] == persisted_platform
+        ):
+            batch_rows.setdefault(row[data_positions["statement_batch_id"]], []).append(row)
+    for row in components:
+        if (
+            row[component_positions["commit_status"]] == "COMMITTED"
+            and row[component_positions["platform"]] == persisted_platform
+        ):
+            batch_components.setdefault(
+                row[component_positions["statement_batch_id"]], []
+            ).append(row)
+    result: dict[str, list[tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]]] = {}
+    for batch_id in batch_rows.keys() | batch_components.keys():
+        for order_id, bundle in _bundle_map(
+            batch_rows.get(batch_id, ()), batch_components.get(batch_id, ())
+        ).items():
+            result.setdefault(order_id, []).append(bundle)
+    return {order_id: tuple(bundles) for order_id, bundles in result.items()}
+
+
+def _bundle_shape(
+    bundle: tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]
+) -> tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]:
+    rows, components = bundle
+    row_shape = Counter((value[0], value[1], value[7]) for value, count in rows.items() for _ in range(count))
+    component_shape = Counter((value[0], value[1], value[2], value[3], value[4]) for value, count in components.items() for _ in range(count))
+    return row_shape, component_shape
+
+
+def _classify_adjustment_events(
+    incoming: Iterable[CanonicalOrderAdjustment],
+    committed: Iterable[CanonicalOrderAdjustment],
+) -> tuple[tuple[CanonicalOrderAdjustment, ...], int, int]:
+    existing_by_fingerprint = {
+        event.adjustment_event_fingerprint: event for event in committed
+    }
+    existing_by_identity: dict[tuple[str, str, str, date], set[str]] = {}
+    for event in committed:
+        key = (
+            event.platform, event.linked_order_id, event.adjustment_type,
+            event.adjustment_complete_date,
+        )
+        existing_by_identity.setdefault(key, set()).add(event.adjustment_event_fingerprint)
+    new: list[CanonicalOrderAdjustment] = []
+    skipped = 0
+    conflicts = 0
+    seen: set[str] = set()
+    for event in incoming:
+        fingerprint = event.adjustment_event_fingerprint
+        if fingerprint in seen or fingerprint in existing_by_fingerprint:
+            skipped += 1
+            continue
+        seen.add(fingerprint)
+        key = (
+            event.platform, event.linked_order_id, event.adjustment_type,
+            event.adjustment_complete_date,
+        )
+        if existing_by_identity.get(key):
+            conflicts += 1
+        else:
+            new.append(event)
+    return tuple(new), skipped, conflicts
+
+
+def _active_write_plan(
+    plan: StatementCommitPlan,
+    *,
+    new_order_ids: Iterable[str],
+    new_adjustments: tuple[CanonicalOrderAdjustment, ...],
+) -> StatementCommitPlan:
+    order_ids = set(new_order_ids)
+    adjustment_sequences = {event.statement_sequence_no for event in new_adjustments}
+    data_positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    component_positions = {
+        name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+    }
+    rows = tuple(
+        row for row in plan.rows
+        if (
+            row[data_positions["record_type"]] in {"ORDER", "SKU"}
+            and row[data_positions["order_id"]] in order_ids
+        ) or (
+            row[data_positions["record_type"]] == "ADJUSTMENT"
+            and row[data_positions["sequence_no"]] in adjustment_sequences
+        )
+    )
+    components = tuple(
+        row for row in plan.financial_component_rows
+        if row[component_positions["order_id"]] in order_ids
+    )
+    has_new_facts = bool(rows or new_adjustments)
+    return replace(
+        plan,
+        rows=rows,
+        financial_component_rows=components,
+        summary_rows=plan.summary_rows if has_new_facts else (),
+        order_adjustments=new_adjustments,
+        order_comparisons=tuple(
+            comparison for comparison in plan.order_comparisons
+            if comparison.order_id in order_ids
+        ),
+    )
 
 
 def validate_current_statement_state(

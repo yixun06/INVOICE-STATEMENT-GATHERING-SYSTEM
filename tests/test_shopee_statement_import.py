@@ -51,10 +51,19 @@ from src.invoice_app.services.import_result_adapters import (
 )
 from src.invoice_app.services.shopee_statement_persistence import (
     CommittedStatementReference,
+    StatementBatchAudit,
+    StatementCommitPreflight,
     StatementCommitState,
+    StatementCommitOutcome,
+    StatementWriteNotApplied,
+    StatementWriteFailureDiagnostic,
+    StatementWriteTargetDiagnostic,
+    prepare_full_order_existence_statement_commit_plan,
+    preview_active_statement_state,
 )
 from src.invoice_app.services.uat2_persistence_schema import STATEMENT_DATA_HEADERS
 from src.invoice_app.services.shopee_weekly_statement_service import (
+    CommittedOrderSettlementEvidence,
     NEEDS_REVIEW,
     stage_parsed_shopee_weekly_statement,
 )
@@ -276,12 +285,24 @@ class _Repository(InMemoryHistoricalInvoiceRepository):
 
 class _Writer:
     def __init__(
-        self, order=None, items=(_item(),), committed_statements=(), order_adjustments=()
+        self,
+        order=None,
+        items=(_item(),),
+        committed_statements=(),
+        order_adjustments=(),
+        committed_order_evidence=(),
+        committed_statement_rows=(),
+        committed_financial_component_rows=(),
     ):
         self.order = order
         self.items = tuple(items)
         self.committed_statements = tuple(committed_statements)
         self.order_adjustments = tuple(order_adjustments)
+        self.committed_order_evidence = tuple(committed_order_evidence)
+        self.committed_statement_rows = tuple(committed_statement_rows)
+        self.committed_financial_component_rows = tuple(
+            committed_financial_component_rows
+        )
         self.writes = 0
 
     def reload_commit_state(self):
@@ -291,6 +312,9 @@ class _Writer:
             committed_statements=self.committed_statements,
             items=self.items,
             order_adjustments=self.order_adjustments,
+            committed_order_evidence=self.committed_order_evidence,
+            committed_statement_rows=self.committed_statement_rows,
+            committed_financial_component_rows=self.committed_financial_component_rows,
         )
 
     def reload_active_commit_state(self):
@@ -298,6 +322,15 @@ class _Writer:
 
     def write_statement_batch(self, plan):
         self.writes += 1
+        self.committed_statement_rows = (*self.committed_statement_rows, *plan.rows)
+        self.committed_financial_component_rows = (
+            *self.committed_financial_component_rows,
+            *plan.financial_component_rows,
+        )
+        self.order_adjustments = (*self.order_adjustments, *plan.order_adjustments)
+
+    def preview_statement_batch(self, plan):
+        return preview_active_statement_state(plan, self.reload_active_commit_state())
 
 
 class _FullOrderCurrentRepository:
@@ -320,6 +353,8 @@ class _CurrentCanonicalWriter:
         self.order_adjustments = ()
         self.writes = 0
         self.plans = []
+        self.committed_statement_rows = ()
+        self.committed_financial_component_rows = ()
 
     def reload_commit_state(self):
         return StatementCommitState(
@@ -327,6 +362,8 @@ class _CurrentCanonicalWriter:
             committed_statements=self.committed_statements,
             items=self.items,
             order_adjustments=self.order_adjustments,
+            committed_statement_rows=self.committed_statement_rows,
+            committed_financial_component_rows=self.committed_financial_component_rows,
         )
 
     def reload_active_commit_state(self):
@@ -345,6 +382,15 @@ class _CurrentCanonicalWriter:
                 statement_period_to=plan.statement.statement_period_to,
             ),
         )
+        self.committed_statement_rows = (*self.committed_statement_rows, *plan.rows)
+        self.committed_financial_component_rows = (
+            *self.committed_financial_component_rows,
+            *plan.financial_component_rows,
+        )
+        self.order_adjustments = (*self.order_adjustments, *plan.order_adjustments)
+
+    def preview_statement_batch(self, plan):
+        return preview_active_statement_state(plan, self.reload_active_commit_state())
 
 
 def _review(
@@ -389,6 +435,35 @@ def _review(
         now=lambda: NOW,
     )
     return review, repository, writer
+
+
+def _two_order_statement() -> ParsedShopeeWeeklyStatement:
+    first = _statement()
+    order_one = first.order_rows[0]
+    sku_one = first.sku_rows[0]
+    order_two = replace(
+        order_one, order_id="ORDER-2", sequence_no="5", source_row_number=4
+    )
+    sku_two = replace(
+        sku_one,
+        order_id="ORDER-2",
+        sequence_no="6",
+        source_row_number=5,
+        product_id="PRODUCT-2",
+        product_name="Blue Tea",
+    )
+    total = (order_one.total_released_amount or Decimal("0.00")) + (
+        order_two.total_released_amount or Decimal("0.00")
+    )
+    return replace(
+        first,
+        file_hash="two-order-statement",
+        income_rows=(order_one, order_two, sku_one, sku_two),
+        summary_total_released=total,
+        summary_lines=(
+            replace(first.summary_lines[0], component_amount=total),
+        ),
+    )
 
 
 def _full_order_snapshot_from_items(
@@ -503,7 +578,7 @@ def test_unrelated_source_issue_stays_blocking_without_legacy_reconciliation(mon
         review=review,
     )
     assert review.reconciliation_v2 is None
-    assert presentation.reconciliation.available is True
+    assert presentation.reconciliation.available is False
     assert any(
         "Income row 742" in issue.reason
         for issue in presentation.validation.blocking_issues
@@ -515,10 +590,116 @@ def test_missing_order_coverage_blocks_the_whole_statement(monkeypatch):
 
     assert review.ready is False
     assert review.plan is None
-    assert review.blockers == ()
+    assert review.blockers == (
+        "Full Order Current order is missing for this market.",
+    )
     assert review.persistence_blockers[-1] == ADDITIONAL_EVIDENCE_REQUIRED
     assert review.reconciliation_v2 is None
     assert review.evidence_coverage.additional_evidence[0].order_id == "ORDER-1"
+
+
+def _review_with_prior_complete_order(
+    monkeypatch,
+    *,
+    statement: ParsedShopeeWeeklyStatement,
+    full_order_ids: tuple[str, ...],
+):
+    prior_statement = _statement()
+    prior_plan = prepare_full_order_existence_statement_commit_plan(
+        prior_statement,
+        audit=StatementBatchAudit("prior-batch", NOW, "admin", NOW),
+        full_order_ids=("ORDER-1",),
+        validation_passed=True,
+        persisted_platform="Shopee",
+        semantic_overlap_dedupe=True,
+    )
+    writer = _Writer(
+        order=None,
+        items=(),
+        committed_statement_rows=prior_plan.rows,
+        committed_financial_component_rows=prior_plan.financial_component_rows,
+        order_adjustments=prior_plan.order_adjustments,
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, **kwargs: stage_parsed_shopee_weekly_statement(
+            statement,
+            evaluate_legacy_order_reconciliation=False,
+        ),
+    )
+    repository = _FullOrderCurrentRepository(
+        _full_order_snapshot_from_items(full_order_ids, ())
+    )
+    return review_statement_upload(
+        b"mixed-statement",
+        source_filename="statement.xlsx",
+        batch_id="mixed-batch",
+        uploaded_by="admin",
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=repository,
+        now=lambda: NOW,
+    )
+
+
+def test_duplicate_without_full_order_is_skipped_and_new_with_full_order_is_eligible(
+    monkeypatch,
+):
+    review = _review_with_prior_complete_order(
+        monkeypatch,
+        statement=_two_order_statement(),
+        full_order_ids=("ORDER-2",),
+    )
+
+    assert review.commit_preflight is not None
+    assert review.commit_preflight.status == "MIXED"
+    assert review.commit_preflight.exact_duplicate_order_ids == ("ORDER-1",)
+    assert review.commit_preflight.new_order_ids == ("ORDER-2",)
+    assert review.evidence_coverage.statement_order_ids == ("ORDER-2",)
+    assert review.evidence_coverage.additional_evidence == ()
+    assert review.commit_ready is True
+    assert review.plan is not None
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    assert {
+        row[positions["order_id"]]
+        for row in review.plan.rows
+        if row[positions["record_type"]] in {"ORDER", "SKU"}
+    } == {"ORDER-2"}
+
+
+def test_duplicate_without_full_order_does_not_hide_new_missing_full_order(
+    monkeypatch,
+):
+    review = _review_with_prior_complete_order(
+        monkeypatch,
+        statement=_two_order_statement(),
+        full_order_ids=(),
+    )
+
+    assert review.commit_preflight is not None
+    assert review.commit_preflight.exact_duplicate_order_ids == ("ORDER-1",)
+    assert review.commit_preflight.new_order_ids == ("ORDER-2",)
+    assert tuple(
+        item.order_id for item in review.evidence_coverage.additional_evidence
+    ) == ("ORDER-2",)
+    assert review.plan is None
+    assert review.commit_ready is False
+
+
+def test_fully_duplicate_statement_needs_no_full_order_and_is_safe_noop(monkeypatch):
+    review = _review_with_prior_complete_order(
+        monkeypatch,
+        statement=_statement(),
+        full_order_ids=(),
+    )
+
+    assert review.commit_preflight is not None
+    assert review.commit_preflight.no_new_facts is True
+    assert review.commit_preflight.status == "ALREADY_IMPORTED"
+    assert review.evidence_coverage.statement_order_ids == ()
+    assert review.evidence_coverage.additional_evidence == ()
+    assert review.plan is None
+    assert review.blockers == ()
 
 
 def test_partial_coverage_does_not_run_downstream_reconciliation(monkeypatch):
@@ -652,11 +833,236 @@ def test_partial_coverage_adapter_keeps_statement_summary_and_hides_reconciliati
     summary = {item.label: item.value for item in result.source_summary.items}
 
     assert result.batch_status == "Not Ready"
-    assert len(result.validation.blocking_issues) == 1
-    assert result.reconciliation.available is False
-    assert result.reconciliation.status == "Full Order coverage required"
+    assert result.validation.blocking_issues == ()
+    assert result.reconciliation.available is True
+    assert result.reconciliation.status == "Available"
     assert summary["Statement Period"].startswith("10/08/2026")
     assert summary["Statement Period"].endswith("16/08/2026")
+
+
+@pytest.mark.parametrize("market_context", (SHOPEE_MY, SHOPEE_SG))
+def test_missing_order_existence_preflight_keeps_the_authoritative_rebuild_reason(
+    monkeypatch, market_context
+):
+    """A transient preflight failure must not become a generic dead Step 4."""
+
+    review, _, _ = _review(monkeypatch)
+    unavailable = replace(
+        review,
+        plan=None,
+        commit_preflight=None,
+        blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+        persistence_blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+    )
+
+    result = adapt_shopee_weekly_statement_import_result(
+        unavailable.stage,
+        batch_id=unavailable.batch_id,
+        review=unavailable,
+    )
+
+    assert unavailable.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+    assert result.reconciliation.available is False
+    assert (
+        result.reconciliation.source_specific_details["reason"]
+        == "STATEMENT_PREFLIGHT_UNAVAILABLE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "market"),
+    (("shopee_my", SHOPEE_MY), ("shopee_sg", SHOPEE_SG)),
+)
+def test_refresh_from_unavailable_reconcile_rebuilds_a_review_without_reupload(
+    tmp_path, monkeypatch, platform, market
+):
+    """Refresh keeps the staged source and restores the full Review path for both markets."""
+
+    review, _, _ = _review(monkeypatch)
+    if market is SHOPEE_SG:
+        review = replace(
+            review,
+            evidence_version=replace(
+                review.evidence_version,
+                full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                    market
+                ),
+            ),
+        )
+    unavailable = replace(
+        review,
+        plan=None,
+        commit_preflight=None,
+        blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+        persistence_blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+    )
+
+    def rebuild(_candidate):
+        replace_statement_review_after_refresh(data_import.st.session_state, review)
+        return True
+
+    monkeypatch.setattr(data_import, "_refresh_statement_review", rebuild)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": f"{platform}-refresh-reconcile-batch",
+        "data_import.active_platform": platform,
+        "active_import_market": market.key.value,
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 4,
+        "weekly_statement_workflow_step": 4,
+        "weekly_statement_stage": unavailable.stage,
+        "weekly_statement_review": unavailable,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    assert app.exception == []
+    rebuild_button = next(
+        button for button in app.button if button.label == "Rebuild reconciliation"
+    )
+    assert not rebuild_button.disabled
+
+    rebuild_button.click().run(timeout=20)
+    assert app.exception == []
+    continue_button = next(
+        button for button in app.button if button.label == "Continue to review & commit"
+    )
+    assert not continue_button.disabled
+
+    continue_button.click().run(timeout=20)
+    commit_button = next(button for button in app.button if button.label == "Commit Statement")
+    assert not commit_button.disabled
+
+
+@pytest.mark.parametrize(
+    ("platform", "market"),
+    (("shopee_my", SHOPEE_MY), ("shopee_sg", SHOPEE_SG)),
+)
+def test_stale_review_refresh_returns_to_reconcile_before_new_commit_plan(
+    tmp_path, monkeypatch, platform, market
+):
+    review, _, _ = _review(monkeypatch)
+    if market is SHOPEE_SG:
+        review = replace(
+            review,
+            evidence_version=replace(
+                review.evidence_version,
+                full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                    market
+                ),
+            ),
+        )
+
+    def rebuild(_candidate):
+        replace_statement_review_after_refresh(data_import.st.session_state, review)
+        return True
+
+    monkeypatch.setattr(data_import, "_refresh_statement_review", rebuild)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": f"{platform}-stale-refresh-batch",
+        "data_import.active_platform": platform,
+        "active_import_market": market.key.value,
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 5,
+        "weekly_statement_workflow_step": 5,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+        "weekly_statement_review_stale_reason": "Authoritative evidence changed.",
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    refresh = next(button for button in app.button if button.label == "Refresh validation")
+    refresh.click().run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state["data_import_step"] == 4
+    continue_button = next(
+        button for button in app.button if button.label == "Continue to review & commit"
+    )
+    assert not continue_button.disabled
+
+
+@pytest.mark.parametrize(
+    ("platform", "market"),
+    (("shopee_my", SHOPEE_MY), ("shopee_sg", SHOPEE_SG)),
+)
+def test_refreshed_reconcile_surfaces_conflict_and_never_enables_review(
+    tmp_path, monkeypatch, platform, market
+):
+    review, _, _ = _review(monkeypatch)
+    if market is SHOPEE_SG:
+        review = replace(
+            review,
+            evidence_version=replace(
+                review.evidence_version,
+                full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                    market
+                ),
+            ),
+        )
+    conflict_reason = "SETTLEMENT_EVIDENCE_CONFLICT:ORDER-1"
+    conflict = replace(
+        review,
+        plan=None,
+        blockers=(conflict_reason,),
+        persistence_blockers=(conflict_reason,),
+        commit_preflight=StatementCommitPreflight(
+            status="CONFLICT",
+            eligible=False,
+            blocker_codes=(conflict_reason,),
+            blocker_reasons=(conflict_reason,),
+            conflict_order_ids=("ORDER-1",),
+            statement_batch_id=review.batch_id,
+            statement_file_hash=review.stage.statement.file_hash,
+            source_filename=review.stage.source_filename,
+        ),
+    )
+    unavailable = replace(
+        review,
+        plan=None,
+        commit_preflight=None,
+        blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+        persistence_blockers=("STATEMENT_PREFLIGHT_UNAVAILABLE",),
+    )
+
+    def rebuild(_candidate):
+        replace_statement_review_after_refresh(data_import.st.session_state, conflict)
+        return True
+
+    monkeypatch.setattr(data_import, "_refresh_statement_review", rebuild)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": f"{platform}-refreshed-conflict-batch",
+        "data_import.active_platform": platform,
+        "active_import_market": market.key.value,
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 4,
+        "weekly_statement_workflow_step": 4,
+        "weekly_statement_stage": unavailable.stage,
+        "weekly_statement_review": unavailable,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    next(button for button in app.button if button.label == "Rebuild reconciliation").click().run(timeout=20)
+
+    assert app.exception == []
+    continue_button = next(
+        button for button in app.button if button.label == "Continue to review & commit"
+    )
+    assert continue_button.disabled
+    assert not any(button.label == "Commit Statement" for button in app.button)
 
 
 def test_partial_coverage_counts_exact_missing_normal_orders():
@@ -749,6 +1155,7 @@ def test_commit_ignores_legacy_invoice_state(monkeypatch):
     )
 
     assert attempt.committed is True
+    assert attempt.outcome is StatementCommitOutcome.COMMITTED
     assert writer.writes == 1
 
 
@@ -764,6 +1171,116 @@ def test_ready_statement_commit_reaches_existing_atomic_writer(monkeypatch):
 
     assert attempt.committed is True
     assert writer.writes == 1
+
+
+def test_statement_commit_emits_redacted_success_transition_checkpoints(monkeypatch):
+    review, repository, writer = _review(monkeypatch)
+    checkpoints: list[str] = []
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+        transition=checkpoints.append,
+    )
+
+    assert attempt.committed is True
+    assert writer.writes == 1
+    assert checkpoints == [
+        "service_entry",
+        "before_authoritative_preflight",
+        "after_authoritative_preflight",
+        "before_writer_call",
+        "after_writer_return",
+    ]
+
+
+def test_statement_commit_writer_failure_emits_no_success_checkpoint(monkeypatch):
+    review, repository, writer = _review(monkeypatch)
+
+    diagnostic = StatementWriteFailureDiagnostic(
+        category="HTTP_429_QUOTA",
+        exception_type="HttpError",
+        http_status=429,
+        api_reason="rateLimitExceeded",
+        message="Quota exhausted",
+        request_method="spreadsheets.values.batchUpdate",
+        operation_type="STATEMENT_VALUES_BATCH_UPDATE",
+        payload_bytes=123,
+        value_range_count=4,
+        total_planned_cells=456,
+        elapsed_milliseconds=7,
+        targets=(StatementWriteTargetDiagnostic("Statement_Data", 1, 40, 40),),
+    )
+
+    def reject_write(_plan):
+        raise StatementWriteNotApplied(
+            "controlled no-write failure", diagnostic=diagnostic
+        )
+
+    writer.write_statement_batch = reject_write
+    checkpoints: list[str] = []
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+        transition=checkpoints.append,
+    )
+
+    assert attempt.committed is False
+    assert attempt.reasons == ("WRITE_NOT_APPLIED",)
+    assert attempt.outcome is StatementCommitOutcome.WRITE_FAILED
+    assert attempt.write_failure_diagnostic is diagnostic
+    assert writer.writes == 0
+    assert checkpoints[-1] == "writer_not_applied"
+    assert "after_writer_return" not in checkpoints
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    (
+        ("CONFLICT", StatementCommitOutcome.CONFLICT),
+        ("INCOMPLETE_UNSAFE", StatementCommitOutcome.INCOMPLETE_UNSAFE),
+    ),
+)
+def test_locked_preflight_returns_its_authoritative_blocking_outcome(
+    monkeypatch,
+    status,
+    expected_outcome,
+):
+    review, repository, writer = _review(monkeypatch)
+    blocker = f"{status}: controlled authoritative preflight"
+    blocked = replace(
+        review,
+        plan=None,
+        blockers=(blocker,),
+        persistence_blockers=(blocker,),
+        commit_preflight=StatementCommitPreflight(
+            status=status,
+            eligible=False,
+            blocker_codes=(status,),
+            blocker_reasons=(blocker,),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.refresh_statement_review",
+        lambda *_args, **_kwargs: blocked,
+    )
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert attempt.outcome is expected_outcome
+    assert attempt.reasons == (blocker,)
+    assert writer.writes == 0
 
 
 def test_valid_weeks_keep_validate_and_fresh_precommit_ready_without_invoices(monkeypatch):
@@ -976,18 +1493,24 @@ def test_clean_full_order_current_statement_commit_writes_no_canonical_invoice_r
         full_order_repository=current_repository,
         now=lambda: NOW,
     )
+    duplicate_checkpoints: list[str] = []
     duplicate_attempt = commit_statement_review(
         duplicate,
         repository=repository,
         writer=writer,
         load_product_master=_master,
         full_order_repository=current_repository,
+        transition=duplicate_checkpoints.append,
     )
 
-    assert duplicate.stage.already_imported is True
-    assert duplicate_attempt.reasons == ("ALREADY_IMPORTED",)
+    assert duplicate.stage.already_imported is False
+    assert duplicate.commit_preflight is not None
+    assert duplicate.commit_preflight.no_new_facts is True
+    assert duplicate_attempt.reasons == ("ALREADY_IMPORTED", "NO_NEW_FACTS")
+    assert duplicate_attempt.outcome is StatementCommitOutcome.ALREADY_IMPORTED
     assert writer.writes == 1
     assert writer.orders == {}
+    assert duplicate_checkpoints == ["service_entry", "no_new_facts_noop"]
 
 
 def test_marked_full_order_item_commits_only_with_exact_nonzero_item_refund(
@@ -1306,6 +1829,68 @@ def test_data_import_statement_review_is_compact_and_commit_ready(
     assert "Reconciliation review complete — V2 found no business blockers." in {
         element.value for element in app.success
     }
+
+
+@pytest.mark.parametrize(
+    ("platform", "market"),
+    (("shopee_my", SHOPEE_MY), ("shopee_sg", SHOPEE_SG)),
+)
+def test_statement_review_step_survives_rerun_and_low_cursor_hydration(
+    tmp_path, monkeypatch, platform, market
+):
+    """MY and SG share the Review checkpoint; a rerun cannot silently lower it."""
+
+    review, _, _ = _review(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": f"{platform}-review-batch",
+        "data_import.active_platform": platform,
+        "active_import_market": market.key.value,
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 5,
+        "weekly_statement_workflow_step": 5,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    assert app.exception == []
+    assert app.session_state.filtered_state["data_import_step"] == 5
+    assert "Review & Commit" in {element.value for element in app.subheader}
+
+    # An ordinary rerun and an unrelated session interaction retain the same
+    # authoritative Review & Commit evidence.
+    app.run(timeout=20)
+    app.session_state["harmless_statement_widget_interaction"] = True
+    app.run(timeout=20)
+    assert app.session_state.filtered_state["data_import_step"] == 5
+
+    # Simulate a low-level active-batch/session hydration that restores only
+    # Validate. The checkpoint restores the highest valid completed step.
+    app.session_state["data_import_step"] = 3
+    app.run(timeout=20)
+    assert app.session_state.filtered_state["data_import_step"] == 5
+    assert any(
+        button.label == "Commit Statement" and not button.disabled
+        for button in app.button
+    )
+
+    # A genuine evidence invalidation remains at the Review destination, but
+    # its old plan is hidden and cannot be committed.
+    app.session_state["weekly_statement_review_stale_reason"] = (
+        "Full Order evidence changed after this review. Refresh validation before continuing."
+    )
+    app.run(timeout=20)
+    assert app.session_state.filtered_state["data_import_step"] == 5
+    assert any("Refresh required" in error.value for error in app.error)
+    assert any(
+        button.label == "Commit Statement" and button.disabled
+        for button in app.button
+    )
 
 
 def test_data_import_exact_statement_reupload_is_success_not_attention(
@@ -1776,6 +2361,7 @@ def test_product_master_change_after_review_blocks_commit_with_zero_write(monkey
 
     assert attempt.committed is False
     assert "STALE_REVIEW:PRODUCT_MASTER_SNAPSHOT_CHANGED" in attempt.reasons
+    assert attempt.outcome is StatementCommitOutcome.STALE_REVIEW
     assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" not in attempt.reasons
     assert writer.writes == 0
 
@@ -1805,7 +2391,27 @@ def test_statement_source_change_after_review_blocks_commit_with_zero_write(
 
     assert attempt.committed is False
     assert "STALE_REVIEW:STATEMENT_FILE_CHANGED" in attempt.reasons
+    assert attempt.outcome is StatementCommitOutcome.STALE_REVIEW
     assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" not in attempt.reasons
+    assert writer.writes == 0
+
+
+def test_settlement_committed_after_review_blocks_before_write(monkeypatch):
+    review, repository, writer = _review(monkeypatch)
+    assert review.plan is not None
+    writer.committed_statement_rows = review.plan.rows
+    writer.committed_financial_component_rows = review.plan.financial_component_rows
+    writer.order_adjustments = review.plan.order_adjustments
+
+    attempt = commit_statement_review(
+        review,
+        repository=repository,
+        writer=writer,
+        load_product_master=_master,
+    )
+
+    assert attempt.committed is False
+    assert "STALE_REVIEW:RECONCILIATION_RESULT_CHANGED" in attempt.reasons
     assert writer.writes == 0
 
 
@@ -2089,6 +2695,56 @@ def test_sg_current_proof_rule_advances_validate_reconcile_and_review(
     assert not commit.disabled
 
 
+def test_streamlit_duplicate_without_full_order_reaches_reconcile_and_only_new_blocks(
+    tmp_path, monkeypatch
+):
+    review = _review_with_prior_complete_order(
+        monkeypatch,
+        statement=_two_order_statement(),
+        full_order_ids=(),
+    )
+    assert review.commit_preflight is not None
+    assert review.commit_preflight.exact_duplicate_order_ids == ("ORDER-1",)
+    assert review.commit_preflight.new_order_ids == ("ORDER-2",)
+    monkeypatch.setattr(data_import, "_refresh_statement_review", lambda _review: True)
+    monkeypatch.chdir(tmp_path)
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        "batch_id": "mixed-duplicate-screenshot",
+        "data_import.active_platform": "shopee_sg",
+        "data_import.active_market": "shopee_sg",
+        "import_source_type": "Shopee Weekly Statement",
+        "data_import_step": 3,
+        "weekly_statement_stage": review.stage,
+        "weekly_statement_review": review,
+    }.items():
+        app.session_state[key] = value
+
+    app.run(timeout=20)
+    assert app.exception == []
+    validate_next = next(
+        button for button in app.button if button.label == "Continue to reconcile"
+    )
+    assert not validate_next.disabled
+    validate_next.click().run(timeout=20)
+
+    eligibility = next(
+        element.value
+        for element in app.dataframe
+        if "Status" in element.value.columns and "Exact duplicates" in element.value.columns
+    )
+    assert eligibility.iloc[0]["Status"] == "Mixed"
+    assert eligibility.iloc[0]["New orders"] == 1
+    assert eligibility.iloc[0]["Exact duplicates"] == 1
+    assert eligibility.iloc[0]["Conflicts"] == 0
+    assert any(
+        metric.label == "Need Full Order Evidence" and metric.value == "1"
+        for metric in app.metric
+    )
+
+
 def test_sg_settlement_conflict_is_visible_and_commit_is_disabled(tmp_path, monkeypatch):
     review, _, _ = _review(monkeypatch)
     assert review.evidence_version is not None
@@ -2106,6 +2762,17 @@ def test_sg_settlement_conflict_is_visible_and_commit_is_disabled(tmp_path, monk
         plan=None,
         blockers=(conflict,),
         persistence_blockers=(conflict,),
+        commit_preflight=StatementCommitPreflight(
+            status="CONFLICT",
+            eligible=False,
+            blocker_codes=("SETTLEMENT_EVIDENCE_CONFLICT:ORDER-1",),
+            blocker_reasons=(conflict,),
+            conflict_order_ids=("ORDER-1",),
+            statement_batch_id="sg-conflict-batch",
+            statement_file_hash=review.stage.statement.file_hash,
+            source_filename=review.stage.source_filename,
+            representative_source_rows=(("ORDER-1", 2),),
+        ),
         evidence_version=replace(
             review.evidence_version,
             rule_version="FULL_ORDER_EXISTENCE_V1",
@@ -2133,6 +2800,18 @@ def test_sg_settlement_conflict_is_visible_and_commit_is_disabled(tmp_path, monk
 
     assert app.exception == []
     assert any(conflict in error.value for error in app.error)
+    assert {"**Source / Full Order checks**", "**Commit eligibility**"} <= {
+        element.value for element in app.markdown
+    }
+    eligibility = next(
+        element.value
+        for element in app.dataframe
+        if "Status" in element.value.columns
+        and "Conflicts" in element.value.columns
+    )
+    assert eligibility.iloc[0]["Status"] == "Conflict"
+    assert eligibility.iloc[0]["Conflicts"] == 1
+    assert any(conflict in warning.value for warning in app.warning)
     commit = next(button for button in app.button if button.label == "Commit Statement")
     assert commit.disabled
 

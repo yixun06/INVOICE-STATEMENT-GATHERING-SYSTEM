@@ -40,9 +40,6 @@ from src.invoice_app.services.application_commit_lock import (
     APPLICATION_COMMIT_LOCK,
     ApplicationCommitLock,
 )
-from src.invoice_app.services.google_sheets_statement_writer import (
-    GoogleSheetsStatementWriter,
-)
 from src.invoice_app.services.market_context import MarketContext, SHOPEE_MY, resolve_market_context
 from src.invoice_app.services.product_price_master import ProductPriceMaster
 from src.invoice_app.services.shopee_statement_item_matching import (
@@ -55,10 +52,13 @@ from src.invoice_app.services.shopee_statement_reconciliation_v2 import (
     evaluate_statement_reconciliation,
 )
 from src.invoice_app.services.shopee_statement_persistence import (
+    ActiveStatementRepository,
     StatementBatchAudit,
     StatementCommitAttempt,
     StatementCommitBlocked,
+    StatementCommitOutcome,
     StatementCommitPlan,
+    StatementCommitPreflight,
     StatementWriteNotApplied,
     prepare_full_order_statement_commit_plan,
     prepare_full_order_existence_statement_commit_plan,
@@ -168,6 +168,7 @@ class StatementImportReview:
     # review/pre-commit validation; never serialized as business data.
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None
     active_gate: str = "V2"
+    commit_preflight: StatementCommitPreflight | None = None
 
     @property
     def ready(self) -> bool:
@@ -218,7 +219,7 @@ def review_statement_upload(
     source_filename: str,
     batch_id: str,
     uploaded_by: str,
-    writer: GoogleSheetsStatementWriter,
+    writer: ActiveStatementRepository,
     product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
@@ -239,8 +240,14 @@ def review_statement_upload(
     stage = stage_shopee_weekly_statement(
         source_bytes,
         source_filename=source_filename,
-        existing_statements=state.committed_statements,
-        existing_order_evidence=state.committed_order_evidence,
+        existing_statements=(
+            () if market_context.statement_order_existence_gate
+            else state.committed_statements
+        ),
+        existing_order_evidence=(
+            () if market_context.statement_order_existence_gate
+            else state.committed_order_evidence
+        ),
         evaluate_legacy_order_reconciliation=False,
         source_contract=market_context.statement_source_contract,
         semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
@@ -270,13 +277,14 @@ def review_statement_upload(
         evidence_coverage=evidence_coverage,
         market_context=market_context,
         full_order_repository=full_order_repository,
+        writer=writer,
     )
 
 
 def refresh_statement_review(
     review: StatementImportReview,
     *,
-    writer: GoogleSheetsStatementWriter,
+    writer: ActiveStatementRepository,
     product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
@@ -293,8 +301,14 @@ def refresh_statement_review(
     stage = stage_shopee_weekly_statement(
         review.source_bytes,
         source_filename=review.stage.source_filename,
-        existing_statements=state.committed_statements,
-        existing_order_evidence=state.committed_order_evidence,
+        existing_statements=(
+            () if market_context.statement_order_existence_gate
+            else state.committed_statements
+        ),
+        existing_order_evidence=(
+            () if market_context.statement_order_existence_gate
+            else state.committed_order_evidence
+        ),
         evaluate_legacy_order_reconciliation=False,
         source_contract=market_context.statement_source_contract,
         semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
@@ -324,19 +338,21 @@ def refresh_statement_review(
         evidence_coverage=evidence_coverage,
         market_context=market_context,
         full_order_repository=full_order_repository,
+        writer=writer,
     )
 
 
 def commit_statement_review(
     review: StatementImportReview,
     *,
-    writer: GoogleSheetsStatementWriter,
+    writer: ActiveStatementRepository,
     load_product_master: Callable[[], ProductPriceMaster],
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
     market_context: MarketContext = SHOPEE_MY,
     verified_artifact_repairs: Iterable[VerifiedArtifactRepair] = (),
     commit_lock: ApplicationCommitLock = APPLICATION_COMMIT_LOCK,
+    transition: Callable[[str], None] | None = None,
 ) -> StatementCommitAttempt:
     """Under one lock, rebuild the authoritative review and commit it.
 
@@ -345,10 +361,35 @@ def commit_statement_review(
     ignored for caller compatibility.
     """
 
+    def trace(checkpoint: str) -> None:
+        """Keep optional development tracing incapable of changing commit safety."""
+
+        if transition is None:
+            return
+        try:
+            transition(checkpoint)
+        except Exception:
+            pass
+
+    trace("service_entry")
     if review.stage.already_imported:
-        return StatementCommitAttempt(False, ("ALREADY_IMPORTED",))
+        trace("already_imported_noop")
+        return StatementCommitAttempt(
+            False, ("ALREADY_IMPORTED",), StatementCommitOutcome.ALREADY_IMPORTED
+        )
+    if (
+        review.commit_preflight is not None
+        and review.commit_preflight.no_new_facts
+    ):
+        trace("no_new_facts_noop")
+        return StatementCommitAttempt(
+            False,
+            ("ALREADY_IMPORTED", "NO_NEW_FACTS"),
+            StatementCommitOutcome.ALREADY_IMPORTED,
+        )
 
     if not review.commit_ready or review.source_bytes is None:
+        trace("review_not_ready")
         return StatementCommitAttempt(
             False,
             review.persistence_blockers
@@ -358,8 +399,10 @@ def commit_statement_review(
                 if review.source_bytes is None
                 else "STATEMENT_NOT_READY",
             ),
+            _commit_outcome_from_preflight(review.commit_preflight),
         )
     with commit_lock.acquire():
+        trace("before_authoritative_preflight")
         full_order_repository = full_order_repository or review.full_order_repository
         current_review = refresh_statement_review(
             review,
@@ -372,31 +415,65 @@ def commit_statement_review(
             market_context=market_context,
             verified_artifact_repairs=verified_artifact_repairs,
         )
+        trace("after_authoritative_preflight")
         changed = _changed_evidence(review.evidence_version, current_review.evidence_version)
         if changed:
+            trace("stale_review_blocked")
             return StatementCommitAttempt(
                 False,
                 tuple(f"STALE_REVIEW:{reason}" for reason in changed),
+                StatementCommitOutcome.STALE_REVIEW,
             )
         if not current_review.commit_ready or current_review.plan is None:
+            trace("current_review_not_ready")
             return StatementCommitAttempt(
                 False,
                 current_review.persistence_blockers
                 or current_review.blockers
                 or ("STATEMENT_NOT_READY",),
+                _commit_outcome_from_preflight(current_review.commit_preflight),
             )
 
         try:
+            trace("before_writer_call")
             writer.write_statement_batch(current_review.plan)
-        except StatementWriteNotApplied:
-            return StatementCommitAttempt(False, ("WRITE_NOT_APPLIED",))
-        return StatementCommitAttempt(True, ())
+        except StatementWriteNotApplied as error:
+            trace("writer_not_applied")
+            return StatementCommitAttempt(
+                False,
+                ("WRITE_NOT_APPLIED",),
+                StatementCommitOutcome.WRITE_FAILED,
+                write_failure_diagnostic=error.diagnostic,
+            )
+        except StatementCommitBlocked as error:
+            trace("writer_blocked")
+            return StatementCommitAttempt(
+                False, (str(error),), StatementCommitOutcome.BLOCKED
+            )
+        trace("after_writer_return")
+        return StatementCommitAttempt(True, (), StatementCommitOutcome.COMMITTED)
+
+
+def _commit_outcome_from_preflight(
+    preflight: StatementCommitPreflight | None,
+) -> StatementCommitOutcome:
+    """Map only the writer's authoritative classification to UI navigation."""
+
+    if preflight is None:
+        return StatementCommitOutcome.BLOCKED
+    if preflight.no_new_facts or preflight.status == "EXACT_DUPLICATE":
+        return StatementCommitOutcome.ALREADY_IMPORTED
+    if preflight.status == "CONFLICT":
+        return StatementCommitOutcome.CONFLICT
+    if preflight.status == "INCOMPLETE_UNSAFE":
+        return StatementCommitOutcome.INCOMPLETE_UNSAFE
+    return StatementCommitOutcome.BLOCKED
 
 
 def check_statement_review_currency(
     review: StatementImportReview,
     *,
-    writer: GoogleSheetsStatementWriter,
+    writer: ActiveStatementRepository,
     product_master: ProductPriceMaster | None,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     repository: object | None = None,
@@ -446,6 +523,7 @@ def _build_review(
     evidence_coverage: StatementEvidenceCoverage | None = None,
     market_context: MarketContext = SHOPEE_MY,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
+    writer: ActiveStatementRepository,
 ) -> StatementImportReview:
     statement = stage.statement
     empty_matches = StatementItemMatchBatch((), False)
@@ -468,6 +546,9 @@ def _build_review(
         )
 
     if stage.already_imported:
+        statement_order_ids = tuple(
+            dict.fromkeys(row.order_id for row in statement.order_rows if row.order_id)
+        )
         return StatementImportReview(
             batch_id=batch_id,
             uploaded_at=uploaded_at,
@@ -481,6 +562,18 @@ def _build_review(
             limitations=(),
             persistence_blockers=(),
             source_bytes=source_bytes,
+            commit_preflight=StatementCommitPreflight(
+                status="EXACT_DUPLICATE",
+                eligible=False,
+                blocker_codes=("ALREADY_IMPORTED",),
+                blocker_reasons=(
+                    "This Statement's settlement evidence is already committed; no second write is allowed.",
+                ),
+                exact_duplicate_order_ids=statement_order_ids,
+                statement_batch_id=batch_id,
+                statement_file_hash=statement.file_hash,
+                source_filename=statement.source_filename,
+            ),
         )
 
     full_order_blockers = tuple(full_order_blockers)
@@ -490,9 +583,9 @@ def _build_review(
     if (
         evidence_coverage is not None
         and not evidence_coverage.complete
+        and not market_context.statement_order_existence_gate
         and not stage.rejection_reasons
         and not stage.validation_issues
-        and stage.duplicate_status is None
     ):
         return StatementImportReview(
             batch_id=batch_id,
@@ -518,6 +611,19 @@ def _build_review(
                 "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
                 if market_context.statement_order_existence_gate else "V2"
             ),
+            commit_preflight=StatementCommitPreflight(
+                status="MISSING_FULL_ORDER",
+                eligible=False,
+                blocker_codes=(ADDITIONAL_EVIDENCE_REQUIRED,),
+                blocker_reasons=tuple(
+                    requirement.reason
+                    for requirement in evidence_coverage.additional_evidence[:10]
+                ),
+                new_order_ids=evidence_coverage.statement_order_ids,
+                statement_batch_id=batch_id,
+                statement_file_hash=statement.file_hash,
+                source_filename=statement.source_filename,
+            ),
         )
     if market_context.statement_order_existence_gate:
         return _build_order_existence_review(
@@ -531,6 +637,7 @@ def _build_review(
             market_context=market_context,
             full_order_repository=full_order_repository,
             now=now,
+            writer=writer,
         )
     if product_master is None:
         raise StatementCommitBlocked("Product Master is required by the configured Statement gate.")
@@ -636,20 +743,21 @@ def _build_order_existence_review(
     market_context: MarketContext,
     full_order_repository: ShopeeFullOrderCurrentRepository | None,
     now: Callable[[], datetime],
+    writer: ActiveStatementRepository,
 ) -> StatementImportReview:
     """Build the exact Current-order existence gate without legacy evidence."""
 
     statement = stage.statement
     assert statement is not None
-    blockers = [*stage.rejection_reasons, *full_order_blockers]
+    blockers = [*stage.rejection_reasons]
     blockers.extend(issue.message for issue in stage.validation_issues)
-    if stage.duplicate_status:
-        blockers.extend(stage.review_reasons)
     persistence_blockers = list(blockers)
     plan = None
-    if not blockers and evidence_coverage is not None and evidence_coverage.complete:
+    commit_preflight = None
+    filtered_coverage = evidence_coverage
+    if not blockers:
         try:
-            plan = prepare_full_order_existence_statement_commit_plan(
+            candidate_plan = prepare_full_order_existence_statement_commit_plan(
                 statement,
                 audit=StatementBatchAudit(
                     statement_batch_id=batch_id,
@@ -657,12 +765,38 @@ def _build_order_existence_review(
                     uploaded_by=uploaded_by,
                     committed_at=now(),
                 ),
-                full_order_ids=evidence_coverage.ready_from_full_order_order_ids,
+                full_order_ids=tuple(
+                    row.order_id for row in statement.order_rows if row.order_id
+                ),
                 validation_passed=True,
                 persisted_platform=market_context.persisted_platform,
                 semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
             )
+            commit_preflight = writer.preview_statement_batch(candidate_plan)
+            filtered_coverage = _coverage_for_order_ids(
+                evidence_coverage, commit_preflight.new_order_ids
+            )
+            if commit_preflight.eligible:
+                plan = commit_preflight.proposed_plan
+                missing = (
+                    filtered_coverage.additional_evidence
+                    if filtered_coverage is not None else ()
+                )
+                if missing:
+                    reasons = tuple(requirement.reason for requirement in missing)
+                    blockers.extend(reasons)
+                    persistence_blockers.extend(reasons)
+                    persistence_blockers.append(ADDITIONAL_EVIDENCE_REQUIRED)
+                    plan = None
+                elif commit_preflight.new_order_ids and full_order_blockers:
+                    blockers.extend(full_order_blockers)
+                    persistence_blockers.extend(full_order_blockers)
+                    plan = None
+            elif not commit_preflight.no_new_facts:
+                blockers.extend(commit_preflight.blocker_reasons)
+                persistence_blockers.extend(commit_preflight.blocker_reasons)
         except StatementCommitBlocked as error:
+            blockers.append(str(error))
             persistence_blockers.append(str(error))
     return StatementImportReview(
         batch_id=batch_id,
@@ -670,7 +804,9 @@ def _build_order_existence_review(
         uploaded_by=uploaded_by,
         stage=stage,
         reconciliation_v2=None,
-        evidence_version=_order_existence_evidence_version(statement, evidence_coverage),
+        evidence_version=_order_existence_evidence_version(
+            statement, filtered_coverage, commit_preflight
+        ),
         sku_matches=StatementItemMatchBatch((), False),
         plan=plan,
         blockers=tuple(dict.fromkeys(blockers)),
@@ -679,9 +815,35 @@ def _build_order_existence_review(
         ),
         persistence_blockers=tuple(dict.fromkeys(persistence_blockers)),
         source_bytes=source_bytes,
-        evidence_coverage=evidence_coverage,
+        evidence_coverage=filtered_coverage,
         full_order_repository=full_order_repository,
         active_gate="FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+        commit_preflight=commit_preflight,
+    )
+
+
+def _coverage_for_order_ids(
+    coverage: StatementEvidenceCoverage | None,
+    order_ids: Iterable[str],
+) -> StatementEvidenceCoverage | None:
+    if coverage is None:
+        return None
+    required = tuple(dict.fromkeys(str(order_id).strip() for order_id in order_ids if str(order_id).strip()))
+    required_set = set(required)
+    return StatementEvidenceCoverage(
+        statement_order_ids=required,
+        already_verified_order_ids=tuple(
+            order_id for order_id in coverage.already_verified_order_ids
+            if order_id in required_set
+        ),
+        ready_from_full_order_order_ids=tuple(
+            order_id for order_id in coverage.ready_from_full_order_order_ids
+            if order_id in required_set
+        ),
+        additional_evidence=tuple(
+            item for item in coverage.additional_evidence
+            if item.order_id in required_set
+        ),
     )
 
 
@@ -978,6 +1140,7 @@ def _v2_limitations(batch: StatementReconciliationBatch) -> tuple[str, ...]:
 def _order_existence_evidence_version(
     statement: ParsedShopeeWeeklyStatement,
     coverage: StatementEvidenceCoverage | None,
+    preflight: StatementCommitPreflight | None,
 ) -> StatementReviewEvidenceVersion:
     """Fingerprint only the evidence consumed by the simplified active gate."""
 
@@ -992,6 +1155,19 @@ def _order_existence_evidence_version(
         reconciliation_sha256=_stable_hash({
             "statement_order_ids": tuple(row.order_id for row in statement.order_rows),
             "covered_order_ids": covered,
+            "classification": (
+                {
+                    "status": preflight.status,
+                    "new": preflight.new_order_ids,
+                    "duplicate": preflight.exact_duplicate_order_ids,
+                    "conflict": preflight.conflict_order_ids,
+                    "unsafe": preflight.incomplete_unsafe_order_ids,
+                    "adjustment_new": preflight.proposed_adjustment_rows,
+                    "adjustment_skipped": preflight.skipped_adjustment_rows,
+                    "adjustment_conflicts": preflight.conflicting_adjustment_rows,
+                }
+                if preflight is not None else None
+            ),
         }),
     )
 
@@ -1026,9 +1202,9 @@ def _evidence_version(
 
 def _changed_evidence(
     previous: StatementReviewEvidenceVersion | None,
-    current: StatementReviewEvidenceVersion,
+    current: StatementReviewEvidenceVersion | None,
 ) -> tuple[str, ...]:
-    if previous is None:
+    if previous is None or current is None:
         return ("REVIEW_EVIDENCE_UNAVAILABLE",)
     changed: list[str] = []
     if current.statement_file_hash != previous.statement_file_hash:

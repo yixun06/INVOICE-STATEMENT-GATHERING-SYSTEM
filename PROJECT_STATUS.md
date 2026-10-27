@@ -15,6 +15,77 @@ data remains read-only comparison/audit evidence.
 
 ## Current System State
 
+### PYTHON_RUNTIME_DEPENDENCIES - VERIFIED / UNCHECKPOINTED
+
+- `requirements.txt` remains the sole dependency manifest and now explicitly
+  declares the direct runtime dependencies `altair`, `google-auth`,
+  `SQLAlchemy>=2,<3`, and `psycopg2-binary>=2.9,<3`. This preserves the
+  approved PostgreSQL dialect `postgresql+psycopg2`; no psycopg3 migration,
+  schema, repository, or business-data change occurred. Local launch uses the
+  project interpreter: `.\\.venv\\Scripts\\python.exe -m streamlit run app.py`.
+
+### POSTGRESQL_MIGRATION_PLAYBOOK - DOCUMENTED / NO CODE OR BUSINESS-DATA WRITE
+
+- The reusable migration playbook is now recorded in
+  `.agents/skills/invoicegather-scope/SKILL.md`. It separates storage parity
+  from reconstruction parity, requires canonicalization and overlap replay,
+  prohibits dual authority and hidden legacy fallback, and requires consumer,
+  dependency, schema, transaction, concurrency, and runtime-smoke checks.
+- The Statement incident index records confirmed MY examples: the Google
+  Sheets cell-capacity blocker, rejected dual-write, parity/readiness gap,
+  missing runtime/dependency declarations, `.venv` reproducibility, ORM/schema
+  drift, legacy consumers, concurrency protection, and 76 false
+  `EXACT_DUPLICATE` to `CONFLICT` classifications from fixed-scale Numeric
+  reconstruction. These remain historical examples, not universal rules.
+- Application/runtime code, schema, UAT2/Google Sheets data, and PostgreSQL
+  business data were not changed.
+
+### POSTGRES_MY_STATEMENT_POSTGRESQL - VERIFIED / LOCAL CHECKPOINT PENDING / NOT PUSHED
+
+- MY `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`,
+  and `Order_Adjustments` use the local Docker PostgreSQL repository through
+  the existing Data Import/financial-read/adjustment-read contracts. The
+  PostgreSQL selection is explicit, fails closed, does not dual-write, and
+  never falls back to a Google Sheets Statement tab. Full Order Current and
+  Product Master retain their approved existing authorities; Product Master is
+  explicitly retained on staff-editable Google Sheets.
+- Historical Google Sheets/PostgreSQL parity is verified: 18,381 Statement Data,
+  397,647 Financial Components, 448 Summary, and 20 Adjustments. Phase 2A
+  widened only incompatible local varchar columns to their ORM contracts, with
+  before/after row counts unchanged. No PostgreSQL business data was committed.
+- The MY repository reuses the active Full Order/complete-bundle preflight,
+  then performs a fresh `SERIALIZABLE` PostgreSQL preflight under a transaction
+  advisory lock, atomically writes all four domains, and verifies every expected
+  committed fact by authoritative readback. Unavailable/invalid local target or
+  credentials fail closed with no Sheets fallback. A forced four-domain
+  rollback control preserved counts exactly.
+- Transactional readback now shares
+  the classifier's comparison-only Decimal primitive for declared SQLAlchemy
+  `Numeric` columns only. Thus `12.9` and PostgreSQL `12.90` are the same fact,
+  while genuine numeric changes and every non-Numeric field remain fail-closed
+  exact comparisons. The verifier still requires each stable key and every
+  expected fact before transaction commit; no schema, Numeric precision, or
+  business rule changed.
+- The shared complete-bundle
+  classifier now gives classifier-bound monetary fields backend-neutral Decimal
+  identity only: insignificant scale and signed zero compare equal, while
+  NULL/blank, provenance, structure, and real numeric differences remain
+  distinct. PostgreSQL `Numeric(12,2)` storage and UI formatting are unchanged.
+  A read-only replay of the protected 1,195-order MY source against its 198
+  matching Statement rows / 4,203 components returned 1,119 NEW, 76 exact
+  duplicates, 0 conflicts, 0 incomplete/unsafe, and 0 adjustment conflicts.
+- MY Weekly Billing receives its three Statement datasets from PostgreSQL while
+  preserving its existing non-Statement source reads and projector. Focused
+  tests prove the MY Weekly Billing and reporting readers reject all Google
+  Sheets Statement-tab access; existing MY/SG Statement regressions still pass.
+  The required local runtime
+  credential variables must be configured before hosted use. The first real
+  PostgreSQL transaction proved `FULL_ROLLBACK_CONFIRMED` after its pre-COMMIT
+  readback mismatch; after the representation-boundary fix, a subsequent
+  authorized MY Commit succeeded and the same source reprocessed as
+  `ALREADY_IMPORTED` with no additional write. Deployment remains **NOT
+  VERIFIED**. This local checkpoint is explicitly **NOT PUSHED**.
+
 ### SHOPEE_SG_ANALYSIS_PHASE_A - IMPLEMENTED / TESTED / UNCHECKPOINTED
 
 - Shopee SG Live Analysis now uses only market-scoped Full Order Current,
@@ -482,10 +553,32 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Current Priorities
 
-1. Preserve and verify real UAT2 persistence/readback and guarded Statement behavior.
-2. Finance-test committed-period Weekly Billing outputs.
-3. Inspect real source/data contracts before future platform work; reuse shared Product Summary policy only where evidence supports it. Shopee SG precedes Lazada where the confirmed priority requires it.
-4. Keep Billing readiness, broader Analysis, storage optimization, and PostgreSQL separately scoped.
+### P0 - PostgreSQL migration foundation
+
+1. **CLOSED after this local checkpoint / not pushed:** Shopee MY Statement
+   PostgreSQL. Historical parity, runtime reader/writer, atomic transaction,
+   rollback safety, idempotency, successful real Commit, repeat-source no-op,
+   and migration lessons are verified.
+2. **Next:** Shopee SG Statement PostgreSQL via the shared architecture:
+   historical and reconstruction parity, duplicate/conflict replay, Numeric
+   normalization, atomic rollback/adjustments, forbidden legacy-Sheets access,
+   local smoke, and a local-only checkpoint.
+3. **Then:** market-isolated MY and SG Full Order Current PostgreSQL through a
+   shared repository, retaining identity, USOLF/unit price, NAV, resolved
+   seller SKU, resolve SKU, status, quantity, product subtotal, and provenance.
+4. **Then:** inventory remaining application-owned Sheets-backed runtime/history
+   data as `MIGRATE TO POSTGRESQL`, `SOURCE-ONLY / REMAIN GOOGLE SHEETS`, or
+   `LEGACY / DECOMMISSION INSTEAD OF MIGRATE`. Do not migrate obsolete data for
+   completeness. Product Master remains Google Sheets.
+
+### P1 - MY functional migration/cleanup
+
+1. Preserve MY-02B financial semantics until Product Owner decisions establish
+   Original Sales/Discount meanings and safe order-level component allocation.
+2. Continue separately authorized Analysis-reader and Payout Product Summary
+   work only after its legacy Invoice dependency migration has evidence.
+3. Preserve and verify stable daily Google Sheets operation while local
+   PostgreSQL migration advances; no automatic backend fallback or dual-write.
 
 ## Approved / Pending
 

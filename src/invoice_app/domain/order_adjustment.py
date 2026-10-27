@@ -147,7 +147,9 @@ def make_statement_adjustment(
         return None
     platform = _required_text(persisted_platform, "persisted_platform")
     description = _required_text(adjustment_description, "adjustment_description")
-    order_id = _required_text(linked_order_id, "linked_order_id")
+    # Native wallet/account adjustments may legitimately have no linked order.
+    # Preserve that absence; never fabricate an order identity.
+    order_id = _optional_text(linked_order_id) or ""
     return CanonicalOrderAdjustment(
         platform=platform,
         linked_order_id=order_id,

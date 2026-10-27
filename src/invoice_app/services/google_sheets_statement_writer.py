@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 import json
+import re
+from time import monotonic
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
@@ -39,11 +41,15 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitAttempt,
     StatementCommitBlocked,
     StatementCommitPlan,
+    StatementCommitPreflight,
     StatementCommitState,
     CommittedOrderSettlementEvidence,
     StatementWriteIntegrityError,
+    StatementWriteFailureDiagnostic,
     StatementWriteNotApplied,
-    validate_active_statement_state,
+    StatementWriteTargetDiagnostic,
+    prepare_full_order_existence_statement_commit_plan,
+    preview_active_statement_state,
     serialize_order_adjustment,
     validate_current_statement_state,
     write_statement_plan_if_current,
@@ -286,34 +292,108 @@ class GoogleSheetsStatementWriter:
                 "Google Sheets acknowledged the write but exact Statement and Invoice enrichment readback did not verify; manual recovery is required."
             )
 
+    def preview_statement_batch(self, plan: StatementCommitPlan) -> StatementCommitPreflight:
+        """Run the active writer preflight against a fresh snapshot without writing."""
+
+        _validate_plan_market_identity(plan, self._persisted_platform)
+        if plan.authority != "FULL_ORDER_CURRENT":
+            raise StatementCommitBlocked(
+                "Read-only commit preview is available only for the active Full Order Current contract."
+            )
+        preview, _data, _effective_plan = self._preflight_active_statement_batch(
+            plan, self._read_active_snapshot()
+        )
+        return preview
+
     def _write_active_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Persist Statement facts without reading or changing Invoice tables."""
 
         _validate_plan_market_identity(plan, self._persisted_platform)
         before = self._read_active_snapshot()
-        reasons = validate_active_statement_state(plan, before.commit_state)
-        if reasons:
+        preview, data, effective_plan = self._preflight_active_statement_batch(plan, before)
+        if not preview.eligible or data is None or effective_plan is None:
             raise StatementCommitBlocked(
-                "Fresh Statement writer preflight failed: " + ", ".join(reasons)
+                "Fresh Statement writer preflight failed: "
+                + ", ".join(
+                    preview.blocker_codes
+                    or preview.blocker_reasons
+                    or ("ALREADY_IMPORTED / NO_NEW_FACTS",)
+                )
             )
-        data = self._build_active_value_ranges(plan, before)
+        started = monotonic()
         try:
             self._gateway.batch_update_values(self._spreadsheet_id, data)
         except Exception as write_error:
-            verification = self._verify_active_after_write(plan, before)
+            verification = self._verify_active_after_write(effective_plan, before)
             if verification is StatementWriteVerification.ALL_APPLIED:
                 return
             if verification is StatementWriteVerification.NONE_APPLIED:
                 raise StatementWriteNotApplied(
-                    "The Google Sheets write was not applied; a fresh commit attempt is required."
+                    "The Google Sheets write was not applied; a fresh commit attempt is required.",
+                    diagnostic=_statement_write_failure_diagnostic(
+                        write_error, data, monotonic() - started
+                    ),
                 ) from write_error
             raise StatementWriteIntegrityError(
                 "The Google Sheets write outcome is mixed or unverifiable; manual recovery is required and automatic retry is forbidden."
             ) from write_error
-        if self._verify_active_after_write(plan, before) is not StatementWriteVerification.ALL_APPLIED:
+        if self._verify_active_after_write(effective_plan, before) is not StatementWriteVerification.ALL_APPLIED:
             raise StatementWriteIntegrityError(
                 "Google Sheets acknowledged the write but exact Statement readback did not verify; manual recovery is required."
             )
+
+    def _preflight_active_statement_batch(
+        self,
+        plan: StatementCommitPlan,
+        snapshot: _ActiveStatementSnapshot,
+    ) -> tuple[
+        StatementCommitPreflight,
+        tuple[Mapping[str, Any], ...] | None,
+        StatementCommitPlan | None,
+    ]:
+        """Share one fail-closed projection between Reconcile and Commit."""
+
+        source_plan = prepare_full_order_existence_statement_commit_plan(
+            plan.statement,
+            audit=plan.audit,
+            full_order_ids=tuple(
+                row.order_id for row in plan.statement.order_rows if row.order_id
+            ),
+            validation_passed=True,
+            persisted_platform=self._persisted_platform,
+            semantic_overlap_dedupe=True,
+        )
+        preview = preview_active_statement_state(source_plan, snapshot.commit_state)
+        if not preview.eligible:
+            return preview, None, preview.proposed_plan
+        effective_plan = preview.proposed_plan
+        if effective_plan is None:
+            return (
+                replace(
+                    preview,
+                    status="INCOMPLETE_UNSAFE",
+                    eligible=False,
+                    blocker_codes=("WRITE_SET_UNAVAILABLE",),
+                    blocker_reasons=("The classified Statement write set is unavailable.",),
+                ),
+                None,
+                None,
+            )
+        try:
+            data = self._build_active_value_ranges(effective_plan, snapshot)
+        except StatementCommitBlocked as error:
+            return (
+                replace(
+                    preview,
+                    status="CONFLICT",
+                    eligible=False,
+                    blocker_codes=("WRITER_IDENTITY_CONFLICT",),
+                    blocker_reasons=(str(error),),
+                ),
+                None,
+                None,
+            )
+        return preview, data, effective_plan
 
     def enrich_order_adjustment_pdf_evidence(
         self, event: CanonicalOrderAdjustment
@@ -430,6 +510,14 @@ class GoogleSheetsStatementWriter:
                     event
                     for event in adjustments
                     if event.platform == self._persisted_platform
+                ),
+                committed_statement_rows=tuple(
+                    tuple(_cell_string(value) for value in target.values)
+                    for target in statement_rows
+                ),
+                committed_financial_component_rows=tuple(
+                    tuple(_cell_string(value) for value in target.values)
+                    for target in financial_component_rows
                 ),
             ),
         )
@@ -658,7 +746,8 @@ class GoogleSheetsStatementWriter:
         """Build the append-only active Statement write without Invoice ranges."""
 
         _validate_incoming_statement_identities(plan, snapshot)
-        _validate_incoming_financial_component_identities(plan, snapshot)
+        if plan.financial_component_rows:
+            _validate_incoming_financial_component_identities(plan, snapshot)
         _validate_incoming_summary_identities(plan, snapshot)
         new_adjustment_rows = _new_order_adjustment_rows(plan, snapshot)
         data: list[Mapping[str, Any]] = [
@@ -669,18 +758,22 @@ class GoogleSheetsStatementWriter:
                 plan.rows,
             ),
             _value_range(
-                STATEMENT_FINANCIAL_COMPONENTS_TAB,
-                snapshot.financial_component_append_row_index,
-                0,
-                plan.financial_component_rows,
-            ),
-            _value_range(
                 STATEMENT_SUMMARY_TAB,
                 snapshot.summary_append_row_index,
                 0,
                 plan.summary_rows,
             ),
         ]
+        if plan.financial_component_rows:
+            data.insert(
+                1,
+                _value_range(
+                    STATEMENT_FINANCIAL_COMPONENTS_TAB,
+                    snapshot.financial_component_append_row_index,
+                    0,
+                    plan.financial_component_rows,
+                ),
+            )
         if new_adjustment_rows:
             data.append(
                 _value_range(
@@ -1081,9 +1174,7 @@ def _deserialize_order_adjustment(
             platform=_adjustment_required_text(
                 values["platform"], "platform", row_number
             ),
-            linked_order_id=_adjustment_required_text(
-                values["linked_order_id"], "linked_order_id", row_number
-            ),
+            linked_order_id=_optional_adjustment_text(values["linked_order_id"]) or "",
             adjustment_type=adjustment_type,
             adjustment_description=description,
             adjustment_reason=_optional_adjustment_text(values["adjustment_reason"]),
@@ -1406,6 +1497,132 @@ def values_batch_update_payload_size(
     )
 
 
+def _statement_write_failure_diagnostic(
+    error: BaseException,
+    data: Sequence[Mapping[str, Any]],
+    elapsed_seconds: float,
+) -> StatementWriteFailureDiagnostic:
+    """Capture only request shape plus sanitized root gateway failure metadata."""
+
+    root = _root_gateway_exception(error)
+    status = _gateway_http_status(root)
+    api_reason, api_message = _gateway_api_details(root)
+    message = _sanitize_gateway_message(api_message or str(root))
+    targets = tuple(_statement_write_target_diagnostic(value_range) for value_range in data)
+    return StatementWriteFailureDiagnostic(
+        category=_gateway_failure_category(root, status),
+        exception_type=type(root).__name__,
+        http_status=status,
+        api_reason=api_reason,
+        message=message,
+        request_method="spreadsheets.values.batchUpdate",
+        operation_type="STATEMENT_VALUES_BATCH_UPDATE",
+        payload_bytes=values_batch_update_payload_size(data),
+        value_range_count=len(data),
+        total_planned_cells=sum(target.cell_count for target in targets),
+        elapsed_milliseconds=max(0, round(elapsed_seconds * 1000)),
+        targets=targets,
+    )
+
+
+def _statement_write_target_diagnostic(
+    value_range: Mapping[str, Any],
+) -> StatementWriteTargetDiagnostic:
+    values = value_range.get("values")
+    rows = values if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) else ()
+    row_count = len(rows)
+    column_count = max(
+        (
+            len(row)
+            for row in rows
+            if isinstance(row, Sequence) and not isinstance(row, (str, bytes))
+        ),
+        default=0,
+    )
+    raw_range = str(value_range.get("range") or "unknown")
+    target = raw_range.split("!", 1)[0].strip("'").replace("''", "'")
+    return StatementWriteTargetDiagnostic(
+        target=target or "unknown",
+        row_count=row_count,
+        column_count=column_count,
+        cell_count=sum(
+            len(row)
+            for row in rows
+            if isinstance(row, Sequence) and not isinstance(row, (str, bytes))
+        ),
+        range_name=raw_range,
+    )
+
+
+def _root_gateway_exception(error: BaseException) -> BaseException:
+    current = error
+    seen: set[int] = set()
+    while current.__cause__ is not None and id(current) not in seen:
+        seen.add(id(current))
+        current = current.__cause__
+    return current
+
+
+def _gateway_http_status(error: BaseException) -> int | None:
+    response = getattr(error, "resp", None)
+    status = getattr(response, "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _gateway_api_details(error: BaseException) -> tuple[str | None, str | None]:
+    details = getattr(error, "error_details", None)
+    if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
+        content = getattr(error, "content", None)
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except (TypeError, ValueError):
+                parsed = None
+            details = ((parsed or {}).get("error") or {}).get("errors") if isinstance(parsed, Mapping) else ()
+            message = ((parsed or {}).get("error") or {}).get("message") if isinstance(parsed, Mapping) else None
+        else:
+            message = None
+    else:
+        message = None
+    reason = next(
+        (
+            str(detail.get("reason")).strip()
+            for detail in details or ()
+            if isinstance(detail, Mapping) and str(detail.get("reason") or "").strip()
+        ),
+        None,
+    )
+    return reason, str(message).strip() if isinstance(message, str) and message.strip() else None
+
+
+def _gateway_failure_category(error: BaseException, status: int | None) -> str:
+    if status in {400, 429, 500, 503}:
+        return f"HTTP_{status}_{ {400: 'BAD_REQUEST', 429: 'QUOTA', 500: 'INTERNAL', 503: 'UNAVAILABLE'}[status] }"
+    message = str(error).casefold()
+    if isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
+        return "REQUEST_TIMEOUT"
+    if isinstance(error, (ConnectionError, OSError)):
+        return "TRANSPORT_ERROR"
+    return "UNKNOWN_GATEWAY_EXCEPTION"
+
+
+def _sanitize_gateway_message(value: str) -> str:
+    message = " ".join(value.split()) or "No error message was provided."
+    message = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b(authorization|access[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|password)\b[\"']?\s*[:=]\s*(?:[\"'][^\"']*[\"']|[^\s,;}\]]+)",
+        r"\1=[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)([?&](?:key|token|access_token|api_key)=)[^&\s]+", r"\1[REDACTED]", message)
+    return message[:300]
+
+
 def _validate_group_protection(
     plan: StatementCommitPlan,
     snapshot: _WriterSnapshot,
@@ -1705,7 +1922,6 @@ def _classify_active_write_result(
     all_applied = (
         bool(expected_rows)
         and all(after_rows[row] == count for row, count in expected_rows.items())
-        and bool(expected_components)
         and all(
             after_components[row] == count
             for row, count in expected_components.items()

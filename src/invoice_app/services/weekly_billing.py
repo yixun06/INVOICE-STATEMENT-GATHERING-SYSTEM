@@ -46,6 +46,9 @@ from src.invoice_app.services.product_summary_identity import (
     product_summary_group_key,
     resolve_product_summary_identity,
 )
+from src.invoice_app.services.postgres_statement_repository import (
+    PostgresStatementRepository,
+)
 
 
 CENT = Decimal("0.01")
@@ -98,6 +101,49 @@ class GoogleSheetsWeeklyBillingReader:
             raise HistoricalInvoiceStorageError(
                 "Weekly Billing source snapshot read failed."
             ) from error
+        return build_weekly_billing_dataset(values)
+
+
+class PostgresMyWeeklyBillingReader:
+    """Keep legacy Invoice facts where they are while sourcing MY Statement facts only from PostgreSQL."""
+
+    def __init__(
+        self,
+        *,
+        spreadsheet_id: str,
+        gateway: WeeklyBillingGateway,
+        statement_repository: PostgresStatementRepository,
+    ) -> None:
+        if not spreadsheet_id.strip():
+            raise ValueError("spreadsheet_id must not be blank.")
+        self._spreadsheet_id = spreadsheet_id.strip()
+        self._gateway = gateway
+        self._statement_repository = statement_repository
+
+    def load_dataset(self) -> WeeklyBillingDataset:
+        """Read only retained Invoice tabs from Sheets; Statement tabs are PostgreSQL-only."""
+
+        try:
+            values = dict(self._gateway.read_tabs(
+                self._spreadsheet_id,
+                (INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB),
+            ))
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "Weekly Billing Invoice source snapshot read failed."
+            ) from error
+        statement_rows = self._statement_repository.weekly_statement_rows()
+        values[STATEMENT_DATA_TAB] = [list(STATEMENT_DATA_HEADERS)] + [
+            list(row) for row in statement_rows["statement_data"]
+        ]
+        values[STATEMENT_FINANCIAL_COMPONENTS_TAB] = [
+            list(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
+        ] + [list(row) for row in statement_rows["statement_financial_components"]]
+        values[STATEMENT_SUMMARY_TAB] = [list(STATEMENT_SUMMARY_HEADERS)] + [
+            list(row) for row in statement_rows["statement_summary"]
+        ]
         return build_weekly_billing_dataset(values)
 
 

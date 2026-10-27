@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 from openpyxl.utils.cell import range_boundaries
@@ -41,6 +43,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementBatchAudit,
     StatementCommitBlocked,
     ProtectedInvoiceItemStatementFields,
+    StatementWriteNotApplied,
     invoice_snapshot_sha256,
     prepare_statement_commit_plan,
     serialize_order_adjustment,
@@ -303,6 +306,91 @@ def _commit(gateway, plan, *, lock=None):
     )
 
 
+def _active_plan():
+    return replace(
+        _plan(),
+        authority="FULL_ORDER_CURRENT",
+        semantic_overlap_dedupe=True,
+        invoice_order_updates=(),
+        invoice_item_updates=(),
+        protected_invoice_items=(),
+        invoice_snapshot_sha256=None,
+        invoice_order_inserts=(),
+        invoice_item_inserts=(),
+    )
+
+
+class _SyntheticHttpError(RuntimeError):
+    def __init__(self, status: int, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.resp = SimpleNamespace(status=status)
+        self.content = json.dumps(
+            {"error": {"errors": [{"reason": reason}], "message": message}}
+        ).encode("utf-8")
+
+
+class _FailingActiveGateway(InMemoryStatementGateway):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self._error = error
+
+    def batch_update_values(self, _spreadsheet_id, data):
+        self.batch_calls.append(tuple(data))
+        try:
+            raise self._error
+        except BaseException as root:
+            from src.invoice_app.repositories.google_sheets_historical_invoice_repository import (
+                HistoricalInvoiceStorageError,
+            )
+
+            raise HistoricalInvoiceStorageError("gateway write failed") from root
+
+
+@pytest.mark.parametrize(
+    ("error", "category", "status", "reason", "redacted"),
+    (
+        (_SyntheticHttpError(400, "badRequest", "Bad request authorization=Bearer sensitive"), "HTTP_400_BAD_REQUEST", 400, "badRequest", True),
+        (_SyntheticHttpError(429, "rateLimitExceeded", "Quota exhausted"), "HTTP_429_QUOTA", 429, "rateLimitExceeded", False),
+        (_SyntheticHttpError(500, "backendError", "Internal backend failure"), "HTTP_500_INTERNAL", 500, "backendError", False),
+        (_SyntheticHttpError(503, "serviceUnavailable", "Service unavailable"), "HTTP_503_UNAVAILABLE", 503, "serviceUnavailable", False),
+        (TimeoutError("request timed out"), "REQUEST_TIMEOUT", None, None, False),
+        (OSError("connection reset"), "TRANSPORT_ERROR", None, None, False),
+    ),
+)
+def test_active_writer_preserves_sanitized_gateway_failure_diagnostic(
+    error, category, status, reason, redacted
+):
+    gateway = _FailingActiveGateway(error)
+    writer = GoogleSheetsStatementWriter(spreadsheet_id="synthetic-sheet", gateway=gateway)
+
+    with pytest.raises(StatementWriteNotApplied) as captured:
+        writer.write_statement_batch(_active_plan())
+
+    diagnostic = captured.value.diagnostic
+    assert diagnostic is not None
+    assert diagnostic.category == category
+    assert diagnostic.http_status == status
+    assert diagnostic.api_reason == reason
+    assert diagnostic.request_method == "spreadsheets.values.batchUpdate"
+    assert diagnostic.operation_type == "STATEMENT_VALUES_BATCH_UPDATE"
+    assert diagnostic.payload_bytes > 0
+    assert diagnostic.value_range_count == 3
+    assert diagnostic.total_planned_cells > 0
+    assert {target.target for target in diagnostic.targets} == {
+        STATEMENT_DATA_TAB,
+        STATEMENT_FINANCIAL_COMPONENTS_TAB,
+        STATEMENT_SUMMARY_TAB,
+    }
+    assert all(target.target in target.range_name for target in diagnostic.targets)
+    assert "sensitive" not in diagnostic.message
+    assert ("[REDACTED]" in diagnostic.message) is redacted
+    assert len(gateway.batch_calls) == 1
+    assert len(gateway.tabs[STATEMENT_DATA_TAB]) == 1
+    assert len(gateway.tabs[STATEMENT_FINANCIAL_COMPONENTS_TAB]) == 1
+    assert len(gateway.tabs[STATEMENT_SUMMARY_TAB]) == 1
+    assert len(gateway.tabs[ORDER_ADJUSTMENTS_TAB]) == 1
+
+
 def test_committed_financial_read_returns_only_native_statement_facts():
     gateway = InMemoryStatementGateway()
     writer = GoogleSheetsStatementWriter(spreadsheet_id="synthetic-sheet", gateway=gateway)
@@ -392,6 +480,40 @@ def test_active_full_order_plan_never_reads_or_writes_legacy_invoice_tabs():
     assert INVOICE_ORDERS_TAB not in written_tabs
     assert INVOICE_ITEMS_TAB not in written_tabs
     assert STATEMENT_DATA_TAB in written_tabs
+
+
+def test_active_writer_preview_is_read_only_and_reports_identity_conflict():
+    gateway = InMemoryStatementGateway()
+    plan = replace(
+        _plan(),
+        authority="FULL_ORDER_CURRENT",
+        semantic_overlap_dedupe=True,
+        invoice_order_updates=(),
+        invoice_item_updates=(),
+        protected_invoice_items=(),
+        invoice_snapshot_sha256=None,
+        invoice_order_inserts=(),
+        invoice_item_inserts=(),
+    )
+    writer = GoogleSheetsStatementWriter(
+        spreadsheet_id="synthetic-sheet", gateway=gateway
+    )
+
+    eligible = writer.preview_statement_batch(plan)
+
+    assert eligible.status == "NEW"
+    assert eligible.eligible is True
+    assert eligible.proposed_statement_rows == len(plan.rows)
+    assert gateway.batch_calls == []
+
+    gateway.tabs[STATEMENT_SUMMARY_TAB].append(list(plan.summary_rows[0]))
+    blocked = writer.preview_statement_batch(plan)
+
+    assert blocked.status == "CONFLICT"
+    assert blocked.eligible is False
+    assert blocked.blocker_codes == ("WRITER_IDENTITY_CONFLICT",)
+    assert "already contains planned stable identity" in blocked.blocker_reasons[0]
+    assert gateway.batch_calls == []
 
 
 def test_full_order_canonical_insert_and_statement_commit_share_one_atomic_batch():

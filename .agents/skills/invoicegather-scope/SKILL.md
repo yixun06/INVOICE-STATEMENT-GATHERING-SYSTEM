@@ -170,6 +170,27 @@ rules. It preserves the source models and immutable evidence ledgers.
   classification. Do not invent a Full Order income equality comparison:
   `Total Amount` and `Grand Total` are explicitly rejected as independent
   settlement-income sources.
+- Reconcile and Review must expose a read-only preview of the same authoritative
+  writer preflight that Commit repeats against a fresh snapshot. Classify
+  each complete order evidence bundle as `NEW`, `EXACT_DUPLICATE`, `CONFLICT`,
+  or `INCOMPLETE_UNSAFE`. The atomic comparison/write unit is the ORDER row,
+  all native SKU rows, all financial-component rows, refund evidence, and
+  provenance; repeated child rows are compared as multisets. Mixed sources may
+  skip complete exact duplicates and write only complete new bundles. Apply
+  the Full Order existence gate only to `NEW` orders. Classify adjustments
+  independently, preserve unlinked adjustments, and never orphan child facts.
+  A fully duplicate source with no new adjustment is the safe no-op
+  `ALREADY_IMPORTED / NO_NEW_FACTS`. Keep source control totals distinct from
+  the filtered new-facts write set. Commit must reload and re-run the shared
+  classifier/write-plan builder under the application lock; material evidence
+  drift invalidates or safely recomputes the plan. Google Sheets is not a
+  database transaction, so retain staged write, exact readback, and recovery
+  guarantees without claiming cross-sheet transactional atomicity.
+- For classifier-bound Statement money only, numeric `Decimal` equality is
+  authoritative: insignificant decimal scale and signed zero are not evidence
+  differences (`0` = `0.00`, `107.4` = `107.40`). Preserve NULL and blank
+  semantics, all non-monetary provenance, and every genuine numeric difference;
+  canonicalization is comparison-only and must not change storage or display.
 - Native MY and SG Statements use one market-aware source contract. The source
   contract may map market-specific worksheet/header/component spellings (for
   example SG `Total Released Amount (S$)`, GST components, BCRS, and no
@@ -1962,13 +1983,13 @@ billing export requires 100% required Invoice-source coverage.
 
 ## UAT2 interim persistence — Confirmed
 
-For UAT2, Google Sheets remains the temporary application persistence layer and
-must never be replaced or written by the limited PostgreSQL phase. The limited
-Product Owner-authorized local Docker PostgreSQL + SQLAlchemy one-way migration
-and verification exception is defined in section 14; it is not an application
-repository cutover, dual-write, or production deployment. Use a new dedicated
-InvoiceGather UAT2 data spreadsheet; never use the Product Master spreadsheet
-as this database.
+For UAT2, Google Sheets remains the temporary application persistence layer
+except for the narrowly authorized MY Statement runtime in section 14. That
+phase routes MY Statement read/write operations to the verified local Docker
+PostgreSQL target only; it is not an authorization for Full Order Current,
+Product Master, SG, dual-write, Google Sheets fallback, production deployment,
+or Google Sheets replacement. Use a new dedicated InvoiceGather UAT2 data
+spreadsheet; never use the Product Master spreadsheet as this database.
 
 Canonical source-fact tabs are:
 
@@ -2145,10 +2166,10 @@ verification, (8) SKU refund reconciliation, (9) consolidated projection,
 (13) UAT2 polish. Each phase requires focused tests, full regression, diff
 review, sensitive scan, and its own safe commit/push.
 
-UAT2 excludes PostgreSQL application cutover, production deployment, dual-write,
-or replacement of Google Sheets. The bounded local Docker PostgreSQL +
-SQLAlchemy one-way migration and verification exception in section 14 is
-authorized. UAT2 also excludes bank reconciliation/receipt confirmation;
+UAT2 excludes PostgreSQL application cutover except for the bounded MY
+Statement-only runtime cutover in section 14; it still excludes production
+deployment, dual-write, and replacement of Google Sheets. UAT2 also excludes
+bank reconciliation/receipt confirmation;
 automatic CN accounting; reopening completed transactions; refund-quantity
 inference; fuzzy matching; automatic source overwrite; Lazada/ZENXIN Weekly
 Billing; replacing Product Master authority; major unrelated UI redesign; and
@@ -3681,10 +3702,15 @@ The exact formula/classification is not yet locked. Ask before implementing the 
 
 # 14. Long-Term Production Database Direction — Post-UAT2
 
-`POSTGRESQL_FOUNDATION_READY` is the durable Product Owner-approved stop point
-for the completed local foundation. Google Sheets remains the production
-application source of truth and the read-only source used for this local
-verification path:
+`POSTGRESQL_FOUNDATION_READY` remains the verified local foundation. The
+Product Owner's long-term authority strategy is now progressive migration of
+application-owned runtime and history data to PostgreSQL for both Shopee MY
+and Shopee SG, one bounded domain at a time. Product Master is the explicit
+exception: it remains the staff-editable Google Sheets authority. A future
+snapshot/sync of Product Master needs separate approval and must not silently
+change that authority.
+
+The current migration environment is local Docker PostgreSQL only:
 
 ```text
 Google Sheets (read-only source)
@@ -3702,12 +3728,128 @@ existing `src/invoice_app/pg_orm/` and `scripts/sync_sheets_to_postgres.py`
 are completed foundation artifacts; they do not make the application use
 PostgreSQL.
 
-No further PostgreSQL work is authorized without a new Product Owner decision.
-In particular, repository integration, an application PostgreSQL backend,
-shadow/dual write, hybrid or full cutover, production PostgreSQL deployment,
-Google Sheets replacement/removal, Google Sheets writes, and the
-company-server-versus-cloud hosting decision are deferred. Do not turn the
-local foundation into an application persistence path by implication.
+Each migrated domain has exactly one explicitly selected runtime authority:
+the approved Google Sheets configuration or the approved PostgreSQL
+configuration. PostgreSQL never dual-writes to Sheets and never falls back to
+Sheets on error; an unavailable PostgreSQL target fails closed. The stable
+Google Sheets repositories and writers remain available for daily operations
+until a later Product Owner decommission decision. Do not remove them merely
+because a PostgreSQL implementation exists.
+
+Shopee MY Statement is the first completed PostgreSQL runtime domain. Its
+`Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`, and
+`Order_Adjustments` use the existing active Statement preflight and
+complete-bundle rules, a fresh `SERIALIZABLE` transaction with an advisory
+lock, and authoritative pre-COMMIT readback. Historical parity was verified at
+18,381 / 397,647 / 448 / 20 rows. The first real transaction verified full
+rollback on a readback-representation mismatch; the narrow Numeric comparison
+fix then preserved full-field verification. A subsequent authorized real MY
+commit succeeded and reprocessing the same source returned `ALREADY_IMPORTED`
+without an additional write.
+
+Current migration order is: (1) close/checkpoint MY Statement locally without
+push, (2) migrate SG Statement through the same shared architecture and full
+acceptance playbook, (3) migrate market-isolated MY and SG Full Order Current
+through one shared repository, then (4) inventory remaining application-owned
+runtime/history data as migrate, source-only Sheets, or legacy/decommission.
+The next Full Order repository must retain market isolation, order/item facts,
+USOLF/unit price, NAV, resolved seller SKU, resolve SKU, status, quantity,
+product subtotal, and required provenance. Product Master remains separate on
+Google Sheets.
+
+Company-server/Tailscale Docker staging/deployment, production PostgreSQL,
+Google Sheets replacement/removal, Google Sheets business writes, and the
+company-server-versus-cloud decision remain deferred. Local PostgreSQL
+checkpoints are allowed for verified domains but are not pushed until a later
+Product Owner authorization.
+
+### 14.0.1 PostgreSQL Migration Playbook — Product Owner confirmed
+
+This guidance applies to every future InvoiceGather backend migration, not
+only MY Statement. It does not authorize a cutover, dual-write, schema
+migration, or business-data write.
+
+#### Reusable migration lessons
+
+- Data parity is necessary but insufficient: counts, business keys, values,
+  aggregates, NULL counts, and provenance can match while runtime semantics
+  differ. PostgreSQL `Numeric(12,2)` may reconstruct source `0` and `107.4` as
+  `0.00` and `107.40`; those values are correct, but exact-string bundle
+  comparison can falsely produce conflicts.
+- Verify physical stored-data parity and repository/domain reconstruction parity
+  as separate acceptance gates.
+- Canonicalize backend-neutral values at classifier/equality boundaries:
+  Decimal scale, NULL versus blank, signed zero, date/datetime and timezone,
+  booleans, numeric/text identifiers, and domain-approved whitespace/casing.
+  Preserve business meaning and fail closed on genuine differences.
+- Treat write representation parity and transactional-readback representation
+  parity as separate checks. A typed database may preserve a monetary fact while
+  changing its lexical scale; full-field readback must compare declared Numeric
+  columns with the approved Decimal primitive and retain exact equality for
+  every non-Numeric field. Never bypass a readback mismatch or weaken its
+  transaction-before-commit boundary.
+- Replay known historical overlap before cutover. Expected
+  `EXACT_DUPLICATE`, `NEW`, `CONFLICT`, and `INCOMPLETE_UNSAFE` classifications
+  must remain stable; a known duplicate becoming conflict is a regression.
+- A migrated domain has exactly one runtime read authority and one write
+  authority. No dual-write, hidden fallback, or legacy runtime access is
+  allowed; backend failure fails closed.
+- Add a forbidden-legacy-backend test/fake that raises on any migrated runtime
+  read or write, and inventory every active consumer before cutover: import,
+  reconciliation, preflight, readback, projections, analysis, reporting,
+  billing, and provenance lookup.
+- Treat dependency readiness as part of acceptance: authoritative manifest,
+  project virtual environment, DB driver, ORM, credentials, clean install,
+  `pip check`, and import/runtime smoke.
+- Compare ORM declarations with physical width, type, nullability, and
+  constraints before enabling writes. Existing data fitting a narrower column
+  does not prove future runtime safety.
+- Evaluate transactions, isolation, unique constraints, and row/advisory locks
+  at the database level where justified. The Statement reference uses a
+  `SERIALIZABLE` transaction, PostgreSQL advisory transaction lock, and unique
+  constraints; this is a reference pattern, not an automatic rule for every
+  domain.
+- Adapt failure semantics to the target backend: Sheets requires uncertain
+  result handling and authoritative readback, while PostgreSQL provides ACID
+  commit/rollback. Preserve business guarantees without copying mechanics.
+
+#### Minimum future migration acceptance checklist
+
+1. Count, business-key, exact-value, financial-aggregate, NULL/blank,
+   provenance, and multiset parity.
+2. Representative reconstruction parity and backend-neutral canonicalization.
+3. Known duplicate, conflict, and incomplete/unsafe replay.
+4. Transactional rollback, concurrency, and forbidden-legacy-access tests.
+5. Complete consumer inventory, dependency/runtime readiness, and controlled
+   real runtime smoke.
+6. Post-cutover proof that the old backend is unchanged and no longer accessed.
+
+#### Statement-specific historical incident index
+
+Confirmed MY Statement migration examples, not universal requirements:
+
+- Google Sheets 20-million-cell capacity was a hard blocker; the authorized
+  attempt was read back as zero-write and was not retried or split.
+- Long-term dual-write was rejected; the approved direction is one authority.
+- Parity verification completed, but parity alone did not prove runtime
+  repository readiness.
+- Missing runtime repository/writer integration and direct SQLAlchemy/psycopg2
+  declarations were exposed; system Python versus project `.venv` also harmed
+  reproducibility.
+- Physical varchar widths diverged from ORM declarations and required explicit
+  alignment before runtime writes.
+- Legacy consumers, including Weekly Billing, had to be cut over and barred
+  from Google Sheets Statement-tab access.
+- Runtime financial writes require database transaction/concurrency protection;
+  the Statement implementation uses `SERIALIZABLE` plus an advisory lock.
+- Fixed-scale Numeric reconstruction caused 76 known `EXACT_DUPLICATE` orders
+  to appear as `CONFLICT` under exact-string comparison, requiring shared
+  backend-neutral monetary canonicalization.
+- The first real MY PostgreSQL Statement Commit then exposed the same failure at
+  the transactional verifier: a row existed but source `12.9` / `0` read back
+  as `12.90` / `0.00`. The verified transaction rolled back; readback now uses
+  that same Decimal primitive only for declared Numeric columns, preserving
+  exact non-Numeric fact comparison and pre-COMMIT failure semantics.
 
 The production database engine direction is now confirmed:
 
@@ -4343,8 +4485,8 @@ Shipment Confirmation proves actual shipment
 For the current delivery, follow the UAT2 implementation order above. This
 roadmap must not be read as permission for PostgreSQL application cutover,
 dual-write, production deployment, or replacement of Google Sheets during
-UAT2. The limited local one-way migration/verification authorization is the
-explicit exception described in section 14.
+UAT2. The MY Statement-only local PostgreSQL runtime exception in section 14
+is the sole current application-cutover exception.
 
 Use the following sequence by default to reduce refactor/rework cost. A task prompt may intentionally work on an isolated later concern.
 

@@ -231,7 +231,6 @@ def test_source_driven_adjustment_typing_preserves_raw_rows_and_builds_canonical
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
-        ("linked_order_id", "", "linked_order_id is required"),
         ("adjustment_complete_date", None, "required date or amount"),
         ("adjustment_amount", None, "required date or amount"),
     ),
@@ -246,6 +245,19 @@ def test_generic_adjustment_keeps_required_statement_evidence_fail_closed(field,
 
     with pytest.raises(StatementCommitBlocked, match=message):
         _plan(statement=statement)
+
+
+def test_generic_unlinked_adjustment_is_preserved_as_source_evidence():
+    adjustment = replace(
+        _statement().adjustments[0],
+        adjustment_type="New source description",
+        linked_order_id="",
+    )
+
+    plan = _plan(statement=replace(_statement(), adjustments=(adjustment,)))
+
+    assert len(plan.order_adjustments) == 1
+    assert plan.order_adjustments[0].linked_order_id == ""
 
 
 def test_adjustment_evidence_never_rewrites_original_invoice_business_facts():

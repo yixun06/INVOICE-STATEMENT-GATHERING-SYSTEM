@@ -67,14 +67,14 @@ no quantity-match claim is made.
 1. Create a virtual environment.
 2. Install dependencies:
 
-   ```bash
-   pip install -r requirements.txt
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
 
 3. Start the app:
 
-   ```bash
-   streamlit run app.py
+   ```powershell
+   .\.venv\Scripts\python.exe -m streamlit run app.py
    ```
 
 

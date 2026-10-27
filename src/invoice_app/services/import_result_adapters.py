@@ -790,24 +790,13 @@ def _adapt_order_existence_statement_review(
     validation = ValidationResult(
         blocking_issues=tuple(
             ValidationIssue(
-                layer="statement_full_order_coverage",
-                severity="error",
-                blocking=True,
-                reason=requirement.reason,
-                affected_item=requirement.order_id,
-                evidence={"order_id": requirement.order_id},
-                suggested_action="Sync the exact order to this market's Full Order Current first.",
-            )
-            for requirement in missing
-        ) + tuple(
-            ValidationIssue(
                 layer="statement_validation",
                 severity="error",
                 blocking=True,
                 reason=reason,
                 affected_item=stage.source_filename,
             )
-            for reason in review.blockers
+            for reason in (*stage.rejection_reasons, *(issue.message for issue in stage.validation_issues))
         ),
         warnings=tuple(
             ValidationIssue(
@@ -821,14 +810,35 @@ def _adapt_order_existence_statement_review(
         ),
     )
     covered_count = len(coverage.ready_from_full_order_order_ids) if coverage else 0
+    preflight = review.commit_preflight
     summary = (
         SummaryItem("Statement Orders", len(statement.order_rows)),
+        SummaryItem("New", len(preflight.new_order_ids) if preflight else 0),
+        SummaryItem(
+            "Already Imported / Skipped",
+            len(preflight.exact_duplicate_order_ids) if preflight else 0,
+        ),
+        SummaryItem(
+            "Conflicts / Unsafe",
+            (
+                len(preflight.conflict_order_ids)
+                + len(preflight.incomplete_unsafe_order_ids)
+                if preflight else 0
+            ),
+        ),
         SummaryItem("Full Order covered", covered_count),
         SummaryItem("Full Order missing", len(missing)),
         SummaryItem("Total Released", statement.summary_total_released),
         SummaryItem("Adjustment Total", statement.adjustment_control_total),
     )
     ready = review.commit_ready
+    reconciliation_unavailable_reason = None
+    if preflight is None:
+        reconciliation_unavailable_reason = (
+            tuple(dict.fromkeys(blockers))[0]
+            if blockers
+            else "The current reconciliation preflight is unavailable. Rebuild reconciliation from the staged Statement."
+        )
     return ImportResult(
         source_type=SHOPEE_WEEKLY_STATEMENT,
         batch_status="Ready to Commit" if ready else "Not Ready",
@@ -845,8 +855,14 @@ def _adapt_order_existence_statement_review(
         ),
         validation=validation,
         reconciliation=ReconciliationResult(
-            available=not missing and source_error is None,
-            status="Available" if not missing and source_error is None else "Full Order coverage required",
+            available=preflight is not None and source_error is None,
+            status=(
+                "Already Imported / No New Facts"
+                if preflight is not None and preflight.no_new_facts
+                else "Available"
+                if preflight is not None and source_error is None
+                else "Not Available"
+            ),
             summary=summary,
             exceptions=tuple(
                 ReconciliationException(
@@ -855,6 +871,15 @@ def _adapt_order_existence_statement_review(
                     evidence={"reason": requirement.reason},
                 )
                 for requirement in missing
+            ) + tuple(
+                ReconciliationException(
+                    status="Settlement evidence conflict or unsafe",
+                    affected_item=order_id,
+                )
+                for order_id in (
+                    (*preflight.conflict_order_ids, *preflight.incomplete_unsafe_order_ids)
+                    if preflight else ()
+                )
             ),
             source_specific_details={
                 "stage": stage,
@@ -863,11 +888,16 @@ def _adapt_order_existence_statement_review(
                 "statement_evidence_coverage": coverage,
                 "statement_source_error": source_error,
                 "active_gate": "FULL_ORDER_CURRENT_ORDER_EXISTENCE",
+                "reason": reconciliation_unavailable_reason,
             },
         ),
         commit_readiness=CommitReadiness(
             ready=ready,
-            status="Ready to Commit" if ready else "Not Ready",
+            status=(
+                "Already Imported / No New Facts"
+                if preflight is not None and preflight.no_new_facts
+                else "Ready to Commit" if ready else "Not Ready"
+            ),
             reasons=tuple(dict.fromkeys(blockers)) or (() if ready else ("Statement is not ready.",)),
             database_commit_available=ready,
         ),

@@ -141,21 +141,23 @@ def test_generic_adjustment_fingerprint_is_stable_and_separates_real_event_facts
     assert len(repository.read_by_linked_order_id("26082480BKAV7A")) == 4
 
 
-def test_generic_adjustment_keeps_linked_order_id_required():
-    with pytest.raises(ValueError, match="linked_order_id is required"):
-        make_statement_adjustment(
-            linked_order_id="",
-            adjustment_description="Return Refund Adjustment/Compensation",
-            adjustment_reason="Separate source reason",
-            adjustment_complete_date=date(2026, 9, 2),
-            adjustment_amount=Decimal("137.24"),
-            payout_completed_date=date(2026, 9, 3),
-            statement_batch_id="batch-generic",
-            statement_sequence_no="8",
-            statement_source_filename="statement-generic.xlsx",
-            statement_file_hash="statement-generic",
-            first_observed_at=NOW,
-        )
+def test_generic_adjustment_preserves_missing_native_order_link():
+    event = make_statement_adjustment(
+        linked_order_id="",
+        adjustment_description="Return Refund Adjustment/Compensation",
+        adjustment_reason="Separate source reason",
+        adjustment_complete_date=date(2026, 9, 2),
+        adjustment_amount=Decimal("137.24"),
+        payout_completed_date=date(2026, 9, 3),
+        statement_batch_id="batch-generic",
+        statement_sequence_no="8",
+        statement_source_filename="statement-generic.xlsx",
+        statement_file_hash="statement-generic",
+        first_observed_at=NOW,
+    )
+
+    assert event is not None
+    assert event.linked_order_id == ""
 
 
 def _pdf_entry(*, amount="-43.61", complete_date="06/08/2026"):

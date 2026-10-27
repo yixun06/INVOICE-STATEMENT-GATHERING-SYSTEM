@@ -30,6 +30,9 @@ from src.invoice_app.services.uat2_persistence_schema import (
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
 )
+from src.invoice_app.services.postgres_statement_repository import (
+    PostgresStatementRepository,
+)
 from src.invoice_app.repositories.shopee_full_order_current_repository import (
     deserialize_full_order_current_snapshot,
 )
@@ -207,6 +210,47 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
             raise HistoricalInvoiceStorageError(
                 "Consolidated Product Summary source snapshot read failed."
             ) from error
+        return build_cross_platform_reporting_snapshot(values)
+
+
+class PostgresMyCrossPlatformProductSummaryReader:
+    """MY reporting reader with PostgreSQL-only Statement date authority.
+
+    The remaining reporting sources deliberately retain their existing backends;
+    this adapter replaces only the active MY Statement_Data tab read.
+    """
+
+    def __init__(
+        self,
+        *,
+        spreadsheet_id: str,
+        gateway: CrossPlatformReportingGateway,
+        statement_repository: PostgresStatementRepository,
+    ) -> None:
+        if not spreadsheet_id.strip():
+            raise ValueError("spreadsheet_id must not be blank.")
+        self._spreadsheet_id = spreadsheet_id.strip()
+        self._gateway = gateway
+        self._statement_repository = statement_repository
+
+    def load_snapshot(self) -> CrossPlatformReportingSnapshot:
+        non_statement_tabs = (
+            INVOICE_ORDERS_TAB,
+            INVOICE_ITEMS_TAB,
+            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
+            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+        )
+        try:
+            values = dict(self._gateway.read_tabs(self._spreadsheet_id, non_statement_tabs))
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "Consolidated Product Summary source snapshot read failed."
+            ) from error
+        values[STATEMENT_DATA_TAB] = [list(STATEMENT_DATA_HEADERS)] + [
+            list(row) for row in self._statement_repository.reporting_statement_data_rows()
+        ]
         return build_cross_platform_reporting_snapshot(values)
 
 
