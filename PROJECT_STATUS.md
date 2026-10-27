@@ -40,7 +40,7 @@ data remains read-only comparison/audit evidence.
 - Application/runtime code, schema, UAT2/Google Sheets data, and PostgreSQL
   business data were not changed.
 
-### POSTGRES_MY_STATEMENT_POSTGRESQL - VERIFIED / LOCAL CHECKPOINT PENDING / NOT PUSHED
+### POSTGRES_MY_STATEMENT_POSTGRESQL - CLOSED / LOCAL CHECKPOINTED / NOT PUSHED
 
 - MY `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`,
   and `Order_Adjustments` use the local Docker PostgreSQL repository through
@@ -83,8 +83,10 @@ data remains read-only comparison/audit evidence.
   PostgreSQL transaction proved `FULL_ROLLBACK_CONFIRMED` after its pre-COMMIT
   readback mismatch; after the representation-boundary fix, a subsequent
   authorized MY Commit succeeded and the same source reprocessed as
-  `ALREADY_IMPORTED` with no additional write. Deployment remains **NOT
-  VERIFIED**. This local checkpoint is explicitly **NOT PUSHED**.
+  `ALREADY_IMPORTED` with no additional write. Local checkpoint:
+  `3b1244429abd787a69e12816edf89830b55ec0e2`
+  (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
+  **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
 
 ### SHOPEE_SG_ANALYSIS_PHASE_A - IMPLEMENTED / TESTED / UNCHECKPOINTED
 
