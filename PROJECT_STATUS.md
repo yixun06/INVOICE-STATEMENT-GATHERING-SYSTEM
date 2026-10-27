@@ -88,7 +88,7 @@ data remains read-only comparison/audit evidence.
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
 
-### POSTGRES_SG_STATEMENT_POSTGRESQL - IMPLEMENTED / TESTED / REPLAY VERIFIED / LOCAL CHECKPOINT PENDING
+### POSTGRES_SG_STATEMENT_POSTGRESQL - IMPLEMENTED / TESTED / REPLAY VERIFIED / LOCAL CHECKPOINTED / NOT PUSHED
 
 - SG `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`,
   and `Order_Adjustments` now use the shared market-scoped PostgreSQL
@@ -630,6 +630,20 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-27; Task: Shopee SG Statement PostgreSQL runtime cutover;
+  State: IMPLEMENTED / TESTED / HISTORICAL REPLAY VERIFIED / LOCAL CHECKPOINTED
+  / NOT PUSHED. Outcome: `56e9e8982b472fe663229bdb6d7c2de6988ef6e3`
+  routes the explicit SG PostgreSQL Statement backend through the shared
+  market-scoped repository for active import/reconcile/review/Commit/readback,
+  financial components, adjustments, and SG Analysis Phase A. Full Order
+  Current and Product Master remain Google Sheets; explicit stable
+  `google_sheets` is preserved but never used as fallback. Verification: 114
+  focused active-path tests passed (29 intentional guarded skips); 10 local SG
+  PostgreSQL transaction/rollback/concurrency tests passed; SG counts restored
+  to 5,606 / 123,033 / 68 / 17 and MY remains isolated. Temporary local test
+  facts were removed; Google Sheets writes, PostgreSQL business-data writes,
+  schema changes, and deployment: 0 / NOT VERIFIED. A real NEW SG Statement
+  Commit was not performed and requires separate Product Owner authorization.
 - Date: 2026-10-25; Task: align Shopee SG Consolidated Product Summary status rules; State: IMPLEMENTED / TESTED / COMMITTED / PUSHED; Outcome: removed the SG-only Order Created status branch and routed MY and SG through one exact existing normalized predicate. `To Ship` / `To ship` and `Cancelled` are excluded for both markets; `Canceled` and unknown statuses preserve MY's existing inclusion behavior. The date picker and Order Created Summary now consume the same shared eligible rowset for both markets. Fresh SG read-only verification remains 8,173 Current orders / 10,886 items, 89 dates (2026-07-01 through 2026-09-30), 10,395 eligible items, 317 unique NAV/SKU/USOLF groups, zero duplicate groups, and zero non-SG source rows; live SG has no affected `To Ship` / `To ship` / `Canceled` orders, so totals are unchanged. Verification: 30 focused Summary service/UI tests and `py_compile` passed. UAT2/schema/business write delta: 0. Git: isolated `fix: align shopee sg product summary status rules` checkpoint pushed to `feature/uat2-invoice-persistence-integration`. Deployment: NOT VERIFIED. Next: continue the separately scoped SG reporting work.
 
 - Date: 2026-10-24; Task: Shopee MY any-period Statement integration and active test-contract cleanup; State: IMPLEMENTED / TESTED / COMMITTED / PUSHED; Outcome: MY adopted the SG-style market-scoped Full Order Current existence gate and semantic overlap dedupe, with a shared committed Statement financial read boundary; active tests no longer require Invoice/PDF, Product Master, SKU allocation, or calendar-period gates. 14 explicitly retired V2/Product Master/Invoice-PDF tests remain archived. Verification: 118 focused MY/SG Statement tests passed and 14 archived tests skipped; py_compile and staged diff check passed. Git: `c7908deaaa520794e78e40b4f765c3d5ed2a83b1` pushed to `feature/uat2-invoice-persistence-integration`; UAT2 write delta 0; schema delta 0; deployment NOT VERIFIED. Next: migrate a report surface only after separate Product Owner authorization.
