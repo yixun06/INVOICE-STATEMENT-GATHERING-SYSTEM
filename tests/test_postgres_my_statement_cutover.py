@@ -37,6 +37,9 @@ from src.invoice_app.services.uat2_data_settings import UAT2DataSettings
 from src.invoice_app.services.cross_platform_product_summary import (
     PostgresMyCrossPlatformProductSummaryReader,
 )
+from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    FullOrderCurrentSnapshot,
+)
 from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_HEADERS,
     INVOICE_ITEMS_TAB,
@@ -102,7 +105,11 @@ def test_postgres_statement_runtime_rejects_unknown_market() -> None:
 class ForbiddenLegacyStatementSheets:
     """A fake that turns any MY Statement Sheets request into a test failure."""
 
+    def __init__(self) -> None:
+        self.requested_tabs: list[tuple[str, ...]] = []
+
     def read_tabs(self, _spreadsheet_id: str, tabs: tuple[str, ...]):
+        self.requested_tabs.append(tabs)
         assert STATEMENT_DATA_TAB not in tabs
         assert STATEMENT_FINANCIAL_COMPONENTS_TAB not in tabs
         assert STATEMENT_SUMMARY_TAB not in tabs
@@ -141,6 +148,11 @@ class _PostgresStatementRows:
         return ()
 
 
+class _EmptyPostgresFullOrderRows:
+    def read_snapshot(self) -> FullOrderCurrentSnapshot:
+        return FullOrderCurrentSnapshot((), ())
+
+
 def test_weekly_billing_never_requests_legacy_statement_sheets() -> None:
     reader = PostgresMyWeeklyBillingReader(
         spreadsheet_id="my-sheet",
@@ -154,15 +166,18 @@ def test_weekly_billing_never_requests_legacy_statement_sheets() -> None:
 
 
 def test_reporting_reader_never_requests_legacy_statement_sheets() -> None:
+    gateway = ForbiddenLegacyStatementSheets()
     reader = PostgresMyCrossPlatformProductSummaryReader(
         spreadsheet_id="my-sheet",
-        gateway=ForbiddenLegacyStatementSheets(),
+        gateway=gateway,
         statement_repository=_PostgresStatementRows(),  # type: ignore[arg-type]
+        full_order_repository=_EmptyPostgresFullOrderRows(),
     )
 
     snapshot = reader.load_snapshot()
 
     assert snapshot.eligible_items == ()
+    assert gateway.requested_tabs == [(INVOICE_ORDERS_TAB, INVOICE_ITEMS_TAB)]
 
 
 def _local_postgres_repository_or_skip() -> PostgresStatementRepository:

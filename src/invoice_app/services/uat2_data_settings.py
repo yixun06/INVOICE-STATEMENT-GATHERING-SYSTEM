@@ -18,6 +18,9 @@ from src.invoice_app.repositories.google_sheets_historical_invoice_repository im
 from src.invoice_app.repositories.shopee_full_order_current_repository import (
     ShopeeFullOrderCurrentRepository,
 )
+from src.invoice_app.repositories.postgres_full_order_current_repository import (
+    PostgresFullOrderCurrentRepository,
+)
 from src.invoice_app.services.google_sheets_statement_writer import (
     GoogleSheetsStatementWriter,
 )
@@ -52,6 +55,8 @@ from src.invoice_app.services.market_context import (
 DEFAULT_UAT2_DATA_SPREADSHEET_ID = "1sZHYrmL9KuxhIdlZUN-EIy5tedmlbY62fOPxP22hsF8"
 POSTGRES_STATEMENT_BACKEND = "postgresql"
 GOOGLE_SHEETS_STATEMENT_BACKEND = "google_sheets"
+POSTGRES_FULL_ORDER_BACKEND = "postgresql"
+GOOGLE_SHEETS_FULL_ORDER_BACKEND = "google_sheets"
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,7 @@ class UAT2DataSettings:
     cache_ttl_seconds: float = 45.0
     market_context: MarketContext = SHOPEE_MY
     statement_backend: str = POSTGRES_STATEMENT_BACKEND
+    full_order_backend: str = GOOGLE_SHEETS_FULL_ORDER_BACKEND
 
     def create_repository(self) -> GoogleSheetsHistoricalInvoiceRepository:
         context = resolve_market_context(self.market_context)
@@ -85,9 +91,17 @@ class UAT2DataSettings:
             cache_ttl_seconds=self.cache_ttl_seconds,
         )
 
-    def create_full_order_current_repository(self) -> ShopeeFullOrderCurrentRepository:
-        """Bind Full Order current data to this market's explicit spreadsheet."""
+    def create_full_order_current_repository(
+        self,
+    ) -> ShopeeFullOrderCurrentRepository | PostgresFullOrderCurrentRepository:
+        """Create the explicitly selected Full Order backend for one market."""
         context = resolve_market_context(self.market_context)
+        backend = self._full_order_backend(context)
+        if backend == POSTGRES_FULL_ORDER_BACKEND:
+            return PostgresFullOrderCurrentRepository(
+                engine=PostgresRuntimeConfig.from_environment().engine(),
+                market_context=context,
+            )
         if context.key not in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
             raise MarketConfigurationUnavailable(
                 f"{context.display_name} Full Order current persistence is unavailable."
@@ -103,6 +117,19 @@ class UAT2DataSettings:
             spreadsheet_id=self.google_spreadsheet_id,
             gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
         )
+
+    def _full_order_backend(self, context: MarketContext) -> str:
+        backend = self.full_order_backend.strip().casefold()
+        if backend not in {POSTGRES_FULL_ORDER_BACKEND, GOOGLE_SHEETS_FULL_ORDER_BACKEND}:
+            raise MarketConfigurationUnavailable(
+                f"{context.display_name} Full Order backend is unsupported: "
+                f"{self.full_order_backend!r}."
+            )
+        if context.key is MarketKey.SHOPEE_SG and backend == POSTGRES_FULL_ORDER_BACKEND:
+            raise MarketConfigurationUnavailable(
+                "Shopee SG PostgreSQL Full Order runtime is not approved."
+            )
+        return backend
 
     def create_statement_writer(self) -> GoogleSheetsStatementWriter | PostgresStatementRepository:
         context = resolve_market_context(self.market_context)
@@ -191,6 +218,7 @@ class UAT2DataSettings:
                     engine=PostgresRuntimeConfig.from_environment().engine(),
                     persisted_platform=context.persisted_platform,
                 ),
+                full_order_repository=self.create_full_order_current_repository(),
             )
         return GoogleSheetsCrossPlatformProductSummaryReader(
             spreadsheet_id=self.google_spreadsheet_id,
@@ -237,6 +265,9 @@ def configured_uat2_data_settings(
             "google_credentials_path": os.getenv("INV_UAT2_GOOGLE_CREDENTIALS_PATH", ""),
             "cache_ttl_seconds": os.getenv("INV_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
             "statement_backend": POSTGRES_STATEMENT_BACKEND,
+            "full_order_backend": os.getenv(
+                "INV_SHOPEE_MY_FULL_ORDER_BACKEND", GOOGLE_SHEETS_FULL_ORDER_BACKEND
+            ),
         }
         configured = _configured_uat2_secret_mapping()
     elif resolved.key is MarketKey.SHOPEE_SG:
@@ -246,6 +277,9 @@ def configured_uat2_data_settings(
             "cache_ttl_seconds": os.getenv("INV_SHOPEE_SG_UAT2_DATA_CACHE_TTL_SECONDS", "45"),
             "statement_backend": os.getenv(
                 "INV_SHOPEE_SG_STATEMENT_BACKEND", POSTGRES_STATEMENT_BACKEND
+            ),
+            "full_order_backend": os.getenv(
+                "INV_SHOPEE_SG_FULL_ORDER_BACKEND", GOOGLE_SHEETS_FULL_ORDER_BACKEND
             ),
         }
         configured = _configured_market_uat2_secret_mapping(resolved)
@@ -272,6 +306,7 @@ def configured_uat2_data_settings(
         cache_ttl_seconds=ttl,
         market_context=resolved,
         statement_backend=values["statement_backend"].strip(),
+        full_order_backend=values["full_order_backend"].strip(),
     )
 
 

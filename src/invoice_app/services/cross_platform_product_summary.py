@@ -25,7 +25,9 @@ from src.invoice_app.services.uat2_persistence_schema import (
     INVOICE_ITEMS_TAB,
     INVOICE_ORDERS_HEADERS,
     INVOICE_ORDERS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS,
     SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
+    SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_DATA_TAB,
@@ -34,6 +36,9 @@ from src.invoice_app.services.postgres_statement_repository import (
     PostgresStatementRepository,
 )
 from src.invoice_app.repositories.shopee_full_order_current_repository import (
+    FullOrderCurrentSnapshot,
+    _serialize_item,
+    _serialize_order,
     deserialize_full_order_current_snapshot,
 )
 from src.invoice_app.services.product_summary_identity import (
@@ -80,6 +85,12 @@ class CrossPlatformReportingGateway(Protocol):
     def read_tabs(
         self, spreadsheet_id: str, tabs: Sequence[str]
     ) -> Mapping[str, Sequence[Sequence[Any]]]: ...
+
+
+class FullOrderCurrentReader(Protocol):
+    """Explicit Current source; PostgreSQL selection never falls back to Sheets."""
+
+    def read_snapshot(self) -> FullOrderCurrentSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -214,10 +225,10 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
 
 
 class PostgresMyCrossPlatformProductSummaryReader:
-    """MY reporting reader with PostgreSQL-only Statement date authority.
+    """MY reporting reader with PostgreSQL Statement and Full Order authorities.
 
-    The remaining reporting sources deliberately retain their existing backends;
-    this adapter replaces only the active MY Statement_Data tab read.
+    Invoice-backed financial rows retain their separately approved source while
+    Current order facts are always read through the explicitly selected backend.
     """
 
     def __init__(
@@ -226,19 +237,19 @@ class PostgresMyCrossPlatformProductSummaryReader:
         spreadsheet_id: str,
         gateway: CrossPlatformReportingGateway,
         statement_repository: PostgresStatementRepository,
+        full_order_repository: FullOrderCurrentReader,
     ) -> None:
         if not spreadsheet_id.strip():
             raise ValueError("spreadsheet_id must not be blank.")
         self._spreadsheet_id = spreadsheet_id.strip()
         self._gateway = gateway
         self._statement_repository = statement_repository
+        self._full_order_repository = full_order_repository
 
     def load_snapshot(self) -> CrossPlatformReportingSnapshot:
         non_statement_tabs = (
             INVOICE_ORDERS_TAB,
             INVOICE_ITEMS_TAB,
-            SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
-            SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB,
         )
         try:
             values = dict(self._gateway.read_tabs(self._spreadsheet_id, non_statement_tabs))
@@ -248,6 +259,22 @@ class PostgresMyCrossPlatformProductSummaryReader:
             raise HistoricalInvoiceStorageError(
                 "Consolidated Product Summary source snapshot read failed."
             ) from error
+        try:
+            current = self._full_order_repository.read_snapshot()
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "Consolidated Product Summary Full Order Current read failed."
+            ) from error
+        values[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB] = [
+            list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
+            *[list(_serialize_order(row)) for row in current.orders],
+        ]
+        values[SHOPEE_FULL_ORDER_CURRENT_ITEMS_TAB] = [
+            list(SHOPEE_FULL_ORDER_CURRENT_ITEMS_HEADERS),
+            *[list(_serialize_item(row)) for row in current.items],
+        ]
         values[STATEMENT_DATA_TAB] = [list(STATEMENT_DATA_HEADERS)] + [
             list(row) for row in self._statement_repository.reporting_statement_data_rows()
         ]

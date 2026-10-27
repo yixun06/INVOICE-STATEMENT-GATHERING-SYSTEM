@@ -281,6 +281,10 @@ data remains read-only comparison/audit evidence.
 - An initial verification-code mismatch failed closed and rolled back every pending row insert; the issue was only tuple serialization in the `resolve_sku` digest. The corrected migration then committed successfully. A full real rerun reported `affected=0` for every table while repeating all verification checks, proving no duplicates and no rewrites for an unchanged source snapshot.
 - DBeaver connection is confirmed against the same target: host `127.0.0.1`, port `5433`, database `invoicegather`, and the Docker-configured database user; the password remains external to source control. Local PostgreSQL schema/data writes occurred only for this authorized migration. Repository integration, an application PostgreSQL backend, shadow/dual write, hybrid/full cutoff, production deployment, Google Sheets replacement, and company-server-versus-cloud hosting remain deferred pending a new Product Owner decision. Checkpoint: `feat: establish verified postgres foundation` on `feature/uat2-invoice-persistence-integration`; deployment: **NOT AUTHORIZED**.
 
+- **MY Full Order PostgreSQL real-source runtime smoke — PARTIAL / CUTOVER BLOCKED (2026-10-27):** the Product Owner supplied `Order.all.order_creation_date.20260927_20261027.xlsx` (SHA-256 `314e99df…bd750f19`), which parsed as 2,629 MY Orders / 3,711 Items with zero PM issues. The explicit MY-only PostgreSQL Full Order backend atomically processed 460 NEW, 771 UPDATED, and 1,398 UNCHANGED Orders (661 inserted and 1,953 updated Item rows), with transaction-internal reconstruction readback. PostgreSQL now has 14,916 Orders / 22,466 Items; Sheets business-key parity is exact, and Statement counts remain 26,722 / 578,653 / 548 / 46 with SG still absent. A same-source replay reported 0 NEW / 0 UPDATED / 2,629 UNCHANGED. The Statement Full Order gate (8,557 committed MY ORDER identities), Full Order-backed date authority, and financial Product Summary grouping all replay correctly through PostgreSQL without Full Order Sheets reads. Cutover remains blocked because four pre-existing `resolve_sku` values differ from Sheets (`8717496900999` in PostgreSQL versus `5004182` in Sheets); none is present in the supplied source, so this task must not overwrite them from a Sheets fallback or mix the separate Compact Barcode workstream. No Google Sheets write, SG migration, Statement write, schema change, Git checkpoint, or deployment occurred. Required next action: separately authorize/provide the authoritative resolution for those four historical `resolve_sku` facts, then rerun final parity acceptance.
+
+- **MY Full Order PostgreSQL runtime - LOCALLY VERIFIED (2026-10-27):** This supersedes the preceding partial/blocker status. The Product Owner approved current Google Sheets Full Order as authoritative for four historical `resolve_sku` values. A serializable exact-key PostgreSQL transaction corrected only `(shopee_my, 2606169B4UWA26, 3)`, `(shopee_my, 2606250FQ35NGU, 10)`, `(shopee_my, 2609046406GEH9, 0)`, and `(shopee_my, 260908ET48YAJV, 3)` from `8717496900999` to `5004182`, with locked-row readback proving all other columns unchanged. Final parity is 14,916 / 14,916 Orders and 22,466 / 22,466 Items, with no missing, extra, or business-field mismatches. Reconstruction, the 8,557-identity Statement Full Order gate, Analysis date authority, and Order Created Product Summary (20,950 items / Qty 31,768 / 429 groups) pass through the explicit MY PostgreSQL backend. The supplied source replays as 0 NEW / 0 UPDATED / 2,629 UNCHANGED. Statement remains 26,722 / 578,653 / 548 / 46 and SG Full Order remains 0 / 0. PostgreSQL selection provides Full Order reads/writes without Sheets fallback; Product Master Sheets remains read-only and explicit `google_sheets` remains separately available. Google Sheets writes, Statement writes, SG migration, schema changes, push, and deployment: 0.
+
 ### SHOPEE_MY_FULL_ORDER_USOLF_MIGRATION_CLOSED - FINAL ACCEPTANCE PASS / UNSTAGED
 
 - Product Owner decision is closed: Shopee MY Full Order / All Order persists `Shopee_FullOrder_Current_Items.unit_price` from `UNIT PRICE USOLF` on the same deterministic Product Master row as NAV. For a conflicting MY Seller-SKU / Parent-SKU family, exact normalized source Variation may uniquely disambiguate that same Parent family; no fuzzy match or first-row selection is permitted. Shopee SG Full Order separately resolves exact normalized Product Name + Variation first, with Seller SKU only as exact-candidate disambiguation; NAV, `UNIT PRICE USOLF`, and `resolve_sku` come from that same SG Product Master row, with no `Price SGD` or MY fallback. Canonical Invoice/PDF, Statement, Weekly Billing, and schema semantics remain unchanged.
@@ -629,6 +633,44 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-27; Task: authorize and complete MY Full Order PostgreSQL
+  `resolve_sku` parity correction; State: LOCALLY VERIFIED / CHECKPOINT PENDING.
+  Outcome: Product Owner approved current Google Sheets Full Order as the
+  authority for exactly four historical MY keys. A serializable, locked,
+  PostgreSQL-only transaction changed only their `resolve_sku` values from
+  `8717496900999` to `5004182` and verified every unrelated field before
+  commit. Final Sheets/PostgreSQL key and business-field parity is 14,916
+  Orders / 22,466 Items with zero differences. Reconstruction, Statement Full
+  Order coverage (8,557 / 0 missing), Order Created Product Summary (20,950
+  items / Qty 31,768 / 429 groups), and Analysis date authority passed through
+  the selected PostgreSQL backend. The supplied real source replayed as 0 NEW
+  / 0 UPDATED / 2,629 UNCHANGED. Statement stayed 26,722 / 578,653 / 548 / 46;
+  SG stayed 0 / 0. Google Sheets writes: 0; PostgreSQL Full Order writes: 4
+  approved item-column corrections only; Statement/SG/schema writes: 0. Git
+  stage/commit/push: pending / 0; deployment: NOT VERIFIED. Next: selective
+  local checkpoint of the completed MY Full Order PostgreSQL runtime work.
+
+- Date: 2026-10-27; Task: MY Full Order PostgreSQL real-delta runtime-write
+  smoke; State: IMPLEMENTED / TESTED / PARTIAL ACCEPTANCE. Outcome: the
+  supplied real MY source `Order.all.order_creation_date.20260927_20261027.xlsx`
+  parsed as 2,629 Orders / 3,711 Items with zero Product Master issues and was
+  processed by the local application's explicit MY PostgreSQL backend. The
+  atomic first run committed 460 NEW, 771 UPDATED, and 1,398 UNCHANGED Orders;
+  661 Item identities were inserted and 1,953 existing Item rows updated, with
+  no deletion path. Transaction readback passed; PostgreSQL reached 14,916
+  Orders / 22,466 Items. A second identical run returned 0 NEW / 0 UPDATED /
+  2,629 UNCHANGED. Sheets/PG keys, Full Order business fields except
+  `resolve_sku`, Statement gate coverage (8,557 committed MY ORDER identities),
+  Analysis dates, and Product Summary quantity/amount/NAV/Seller-SKU grouping
+  matched. Four pre-existing `resolve_sku` values remain different and are not
+  in the supplied source, so no Sheets fallback or unrelated Barcode update was
+  applied; final cutover acceptance is BLOCKED pending their separately
+  authorized authority. Verification: 59 focused tests passed, 8 intentional
+  integration skips, `py_compile`, and `git diff --check`. Google Sheets
+  writes: 0; PostgreSQL Full Order business-data writes: 460 Orders / 661 new
+  Items plus 771 Orders / 1,953 Items updated; Statement/SG/schema writes: 0;
+  Git stage/commit/push: 0; deployment: NOT VERIFIED.
 
 - Date: 2026-10-27; Task: Shopee SG Statement PostgreSQL runtime cutover;
   State: IMPLEMENTED / TESTED / HISTORICAL REPLAY VERIFIED / LOCAL CHECKPOINTED
