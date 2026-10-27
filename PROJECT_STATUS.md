@@ -650,6 +650,8 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   approved item-column corrections only; Statement/SG/schema writes: 0. Git
   stage/commit/push: pending / 0; deployment: NOT VERIFIED. Next: selective
   local checkpoint of the completed MY Full Order PostgreSQL runtime work.
+  Local feature checkpoint: `c7be1e0b6900e4f8cccdefb8d47391328d437fb5`
+  (`feat: verify my full order postgres runtime`); push/deployment: NOT PUSHED / NOT VERIFIED.
 
 - Date: 2026-10-27; Task: MY Full Order PostgreSQL real-delta runtime-write
   smoke; State: IMPLEMENTED / TESTED / PARTIAL ACCEPTANCE. Outcome: the
