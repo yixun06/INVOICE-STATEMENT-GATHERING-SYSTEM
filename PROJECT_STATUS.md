@@ -656,7 +656,8 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   Statement and MY/SG Full Order; Product Master intentionally remains
   read-only Google Sheets. Verification: PostgreSQL read-only counts and
   provenance; business/schema/Google Sheets writes: 0; deployment: NOT
-  VERIFIED; Git push: 0. Next: inventory the remaining active runtime and
+  VERIFIED; local checkpoint: `15516deb2a66b716273998b8034b85ad93ed7942`
+  (`docs: record sg full order postgres verification`); Git push: 0. Next: inventory the remaining active runtime and
   legacy dependencies before authorizing another migration domain.
 
 - Date: 2026-10-28; Task: finalize MY/SG Full Order PostgreSQL default
