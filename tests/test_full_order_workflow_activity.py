@@ -7,6 +7,11 @@ from src.invoice_app.services.workflow_navigation import (
     begin_workflow_activity,
     end_workflow_activity,
 )
+from src.invoice_app.services.market_context import (
+    MarketConfigurationUnavailable,
+    SHOPEE_MY,
+    SHOPEE_SG,
+)
 from src.invoice_app.ui import data_import
 
 
@@ -122,6 +127,71 @@ def test_full_order_sync_clears_activity_and_surfaces_the_real_sync_error(monkey
     assert fake.errors == [
         "Full Order sync failed before safe completion: underlying sync failure"
     ]
+
+
+def test_full_order_postgres_configuration_fails_before_product_master_loading(monkeypatch):
+    parsed = SimpleNamespace(market=SHOPEE_MY)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        data_import,
+        "inspect_shopee_full_order_upload",
+        lambda *_args, **_kwargs: (b"source", parsed),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "configured_uat2_data_settings",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            create_full_order_current_repository=lambda: (_ for _ in ()).throw(
+                MarketConfigurationUnavailable("Full Order PostgreSQL configuration is missing")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda *_args, **_kwargs: calls.append("product-master"),
+    )
+
+    with pytest.raises(MarketConfigurationUnavailable, match="PostgreSQL configuration"):
+        data_import._review_full_order_source(b"source", "source.xlsx", SHOPEE_MY)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("context", (SHOPEE_MY, SHOPEE_SG))
+def test_full_order_postgres_repository_allows_product_master_loading(
+    monkeypatch, context
+):
+    parsed = SimpleNamespace(market=context)
+    calls: list[str] = []
+    expected = object()
+
+    monkeypatch.setattr(
+        data_import,
+        "inspect_shopee_full_order_upload",
+        lambda *_args, **_kwargs: (b"source", parsed),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "configured_uat2_data_settings",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            create_full_order_current_repository=lambda: calls.append("postgres-repository") or object()
+        ),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda *_args, **_kwargs: calls.append("product-master") or (object(), "sheets"),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "review_shopee_full_order_upload",
+        lambda *_args, **_kwargs: expected,
+    )
+
+    assert data_import._review_full_order_source(b"source", "source.xlsx", context) is expected
+    assert calls == ["postgres-repository", "product-master"]
 
 
 def test_existing_activity_allowlist_is_preserved_and_rejects_unknown_names():

@@ -194,6 +194,7 @@ def test_sg_statement_writer_routes_to_its_explicit_destination_while_monthly_an
         google_service_account={"type": "service_account"},
         market_context=SHOPEE_SG,
         statement_backend="google_sheets",
+        full_order_backend="google_sheets",
     )
 
     canonical = settings.create_repository()

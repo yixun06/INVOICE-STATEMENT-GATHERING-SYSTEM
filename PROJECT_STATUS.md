@@ -594,10 +594,18 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 2. **Current local checkpoint:** Shopee SG Statement PostgreSQL runtime is
    implemented and replay-verified; a separate Product Owner authorization is
    required for a genuinely NEW live SG Statement Commit.
-3. **Next:** market-isolated MY and SG Full Order Current PostgreSQL through a
-   shared repository, retaining identity, USOLF/unit price, NAV, resolved
-   seller SKU, resolve SKU, status, quantity, product subtotal, and provenance.
-4. **Then:** inventory remaining application-owned Sheets-backed runtime/history
+3. **Cross-domain prerequisite closed:** identical MY/SG Order IDs are now
+   regression-proven to stay isolated through `MarketContext`; Statement keeps
+   `platform` and Full Order keeps canonical `market`, with no raw-column join.
+4. **MY locally verified; SG locally migrated / runtime-read verified:** MY
+   Full Order Current PostgreSQL parity, reconstruction, runtime routing,
+   real-source idempotency, and consumer replays are complete with no Sheets
+   fallback under the explicit PostgreSQL backend. SG historical Current parity
+   is 10,297 Orders / 13,701 Items with zero key or persisted-field variance;
+   explicit SG PostgreSQL reads now use the same market-bound repository and
+   have no Full Order Sheets fallback. A genuine SG runtime source replay is
+   still pending successful current Product Master preflight.
+5. **Then:** inventory remaining application-owned Sheets-backed runtime/history
    data as `MIGRATE TO POSTGRESQL`, `SOURCE-ONLY / REMAIN GOOGLE SHEETS`, or
    `LEGACY / DECOMMISSION INSTEAD OF MIGRATE`. Do not migrate obsolete data for
    completeness. Product Master remains Google Sheets.
@@ -633,6 +641,44 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-28; Task: finalize MY/SG Full Order PostgreSQL default
+  authority; State: IMPLEMENTED / TESTED / LOCAL CHECKPOINTED / NO
+  BUSINESS WRITE. Outcome: both MY and SG now resolve an absent Full Order
+  backend selector to PostgreSQL, matching Statement. Explicit `postgresql`
+  remains PostgreSQL; explicit `google_sheets` is the only legacy Full Order
+  route; blank/unknown selectors fail closed. PostgreSQL configuration is
+  validated before a Full Order repository or Product Master is constructed;
+  missing user/password and invalid port produce a safe blocking error with no
+  Google Full Order fallback. Product Master remains its approved read-only
+  Google Sheets source. Statement behavior is unchanged. Verification: 70
+  focused tests passed / 8 guarded skips; `py_compile` and `git diff --check`
+  passed. Google Sheets, PostgreSQL business, Statement, Product Master,
+  schema, and deployment writes: 0. Git push: 0. Next: Product Owner may run
+  the separately authorized SG Full Order runtime smoke.
+
+- Date: 2026-10-27; Task: Shopee SG Full Order Current PostgreSQL historical
+  migration and runtime-read cutover; State: HISTORICAL PARITY VERIFIED /
+  RUNTIME WRITE SMOKE PENDING. Outcome: the configured dedicated SG Full Order
+  Google Sheets source (`Shopee_FullOrder_Current_Orders` / `_Items`) was
+  unambiguous at 10,297 Orders / 13,701 Items (`shopee_sg`). The initially
+  empty local PostgreSQL SG scope now has exactly those counts. Key parity,
+  all persisted-field parity (including Decimal, blank/NULL representation,
+  provenance, NAV, USOLF/unit price, and resolve_sku), and keyed
+  reconstruction parity are zero-difference. The shared repository now
+  accepts only explicit MY/SG MarketContext; SG PostgreSQL mode has no Full
+  Order Sheets fallback while the explicit Google backend remains available.
+  SG Statement PostgreSQL has 2,417 committed ORDER identities, all covered;
+  MY Full Order stayed 14,916 / 22,466 and Statement tables stayed
+  26,722 / 578,653 / 548 / 46. Direct Order-Created Product Summary parity is
+  13,033 items / Qty 18,417 / S$168,327.81 / 331 groups. Product Master remains
+  Google Sheets only. A locally present genuine September SG source was invoked
+  for preflight, but the live Product Master request did not complete within
+  the bounded local runner, so no source-driven PostgreSQL write was attempted.
+  Google Sheets, Statement, Product Master, schema, and deployment writes: 0;
+  PostgreSQL Full Order historical write: 10,297 Orders / 13,701 Items; push:
+  0. Next: retry only the read-only SG Product Master preflight, then perform
+  the separately verified source runtime replay if it is clean.
 
 - Date: 2026-10-27; Task: authorize and complete MY Full Order PostgreSQL
   `resolve_sku` parity correction; State: LOCALLY VERIFIED / CHECKPOINT PENDING.

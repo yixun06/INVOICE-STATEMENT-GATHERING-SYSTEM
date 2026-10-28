@@ -81,6 +81,7 @@ def test_my_statement_factory_is_postgres_not_google(monkeypatch: pytest.MonkeyP
     settings = UAT2DataSettings(
         google_spreadsheet_id="my-sheet",
         google_service_account={"type": "service_account"},
+        full_order_backend="postgresql",
     )
     assert isinstance(settings.create_statement_writer(), PostgresStatementRepository)
     assert isinstance(

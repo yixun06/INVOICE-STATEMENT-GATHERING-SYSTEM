@@ -3736,6 +3736,15 @@ Google Sheets repositories and writers remain available for daily operations
 until a later Product Owner decommission decision. Do not remove them merely
 because a PostgreSQL implementation exists.
 
+Full Order PostgreSQL is the default runtime authority for both MY and SG.
+An absent `INV_SHOPEE_MY_FULL_ORDER_BACKEND` or
+`INV_SHOPEE_SG_FULL_ORDER_BACKEND` resolves to `postgresql`; the only legacy
+route is an explicit `google_sheets` override. Any other selector fails closed.
+Under `postgresql`, connection configuration is validated before Product Master
+processing or Full Order repository construction; missing or invalid PostgreSQL
+settings fail closed with no Google Sheets Full Order read, write, fallback, or
+dual-write. Product Master remains its approved read-only Google Sheets source.
+
 Shopee MY Statement is the first completed PostgreSQL runtime domain. Its
 `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`, and
 `Order_Adjustments` use the existing active Statement preflight and
@@ -3751,8 +3760,12 @@ Shopee SG Statement uses the same market-scoped PostgreSQL repository when
 the explicit SG Statement backend is `postgresql`. Its four Statement domains
 are read and written only through PostgreSQL; SG uses its own deterministic
 transaction advisory-lock namespace and never falls back to, unions with, or
-directly reads a legacy SG Statement Sheet in that mode. Full Order Current
-and Product Master remain their approved Google Sheets authorities. The stable
+directly reads a legacy SG Statement Sheet in that mode. After independently
+verified historical parity, SG Full Order Current likewise uses the shared
+market-bound PostgreSQL repository by default (or with an explicit
+`INV_SHOPEE_SG_FULL_ORDER_BACKEND=postgresql` selector); it has no Google
+Sheets fallback or dual-write. Product Master remains its
+approved read-only Google Sheets authority. The stable
 SG Google Sheets Statement writer remains available only when the explicit
 `google_sheets` backend is selected; it is not an automatic fallback. Historical
 parity is verified at 5,606 / 123,033 / 68 / 17 rows. The runtime cutover is

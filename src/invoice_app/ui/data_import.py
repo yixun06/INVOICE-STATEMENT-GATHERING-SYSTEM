@@ -938,13 +938,17 @@ def _review_full_order_source(
             source_bytes=source_bytes, parsed=parsed, current_market=context
         )
     settings = configured_uat2_data_settings(context, require_explicit_context=True)
+    # Select and validate the configured persistence authority before any
+    # Product Master work. PostgreSQL mode must fail here, never after a
+    # Google Sheets fallback has processed an otherwise valid source.
+    repository = settings.create_full_order_current_repository()
     master, _source_label = load_configured_product_price_master(context)
     return review_shopee_full_order_upload(
         source,
         source_filename=source_filename,
         market=context,
         product_master=master,
-        repository=settings.create_full_order_current_repository(),
+        repository=repository,
     )
 
 

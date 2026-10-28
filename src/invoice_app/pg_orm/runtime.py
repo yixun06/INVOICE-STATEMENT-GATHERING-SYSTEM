@@ -28,13 +28,15 @@ class PostgresRuntimeConfig:
     password: str
 
     @classmethod
-    def from_environment(cls) -> "PostgresRuntimeConfig":
+    def from_environment(
+        cls, *, consumer: str = "Statement"
+    ) -> "PostgresRuntimeConfig":
         user = os.environ.get("INVOICEGATHER_PG_USER", "")
         password = os.environ.get("INVOICEGATHER_PG_PASSWORD", "")
         if not user or not password:
             raise PostgresRuntimeUnavailable(
                 "INVOICEGATHER_PG_USER and INVOICEGATHER_PG_PASSWORD are required; "
-                "PostgreSQL Statement access never falls back to Google Sheets."
+                f"PostgreSQL {consumer} access never falls back to Google Sheets."
             )
         try:
             port = int(os.environ.get("INVOICEGATHER_PG_PORT", "5433"))
@@ -49,17 +51,17 @@ class PostgresRuntimeConfig:
             user=user,
             password=password,
         )
-        config.assert_authorized_target()
+        config.assert_authorized_target(consumer=consumer)
         return config
 
-    def assert_authorized_target(self) -> None:
+    def assert_authorized_target(self, *, consumer: str = "Statement") -> None:
         if self.host not in {"127.0.0.1", "localhost", "::1"}:
             raise PostgresRuntimeUnavailable(
-                f"Refusing non-local PostgreSQL Statement target: {self.host!r}."
+                f"Refusing non-local PostgreSQL {consumer} target: {self.host!r}."
             )
         if self.port != 5433 or self.database != "invoicegather":
             raise PostgresRuntimeUnavailable(
-                "Refusing unapproved PostgreSQL Statement target; expected "
+                f"Refusing unapproved PostgreSQL {consumer} target; expected "
                 "localhost:5433/invoicegather."
             )
 

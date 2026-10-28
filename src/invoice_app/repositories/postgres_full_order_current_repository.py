@@ -1,4 +1,4 @@
-"""Fail-closed PostgreSQL runtime repository for Shopee MY Full Order Current."""
+"""Fail-closed PostgreSQL runtime repository for Shopee Full Order Current."""
 
 from __future__ import annotations
 
@@ -40,11 +40,10 @@ from src.invoice_app.services.shopee_full_order_adapter import (
 
 
 class PostgresFullOrderCurrentRepository:
-    """MY-only Current persistence with no Sheets fallback or dual write.
+    """Market-bound Current persistence with no Sheets fallback or dual write.
 
     The Google Sheets repository remains the separately selected legacy backend.
-    This repository deliberately owns only ``shopee_my`` until SG runtime
-    migration receives separate approval.
+    Each repository instance owns one explicitly approved Shopee market.
     """
 
     def __init__(
@@ -55,9 +54,9 @@ class PostgresFullOrderCurrentRepository:
         commit_lock: ApplicationCommitLock = APPLICATION_COMMIT_LOCK,
     ) -> None:
         context = resolve_market_context(market_context)
-        if context.key is not MarketKey.SHOPEE_MY:
+        if context.key not in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
             raise HistoricalInvoiceStorageError(
-                "PostgreSQL Full Order runtime is approved for Shopee MY only."
+                "PostgreSQL Full Order runtime requires an explicit Shopee MY or Shopee SG market."
             )
         self._engine = engine
         self._market = context.key.value
@@ -84,7 +83,7 @@ class PostgresFullOrderCurrentRepository:
         return _classify(batch, self.read_snapshot())
 
     def sync(self, batch: FullOrderCurrentBatch) -> FullOrderSyncResult:
-        """Atomically insert/update one verified MY source and verify readback."""
+        """Atomically insert/update one verified market source and verify readback."""
 
         self._assert_syncable(batch)
         with self._commit_lock.acquire(), self._engine.begin() as connection:
@@ -108,7 +107,7 @@ class PostgresFullOrderCurrentRepository:
             return result
 
     def sync_missing_only(self, batch: FullOrderCurrentBatch) -> FullOrderSyncResult:
-        """Safely add verified missing MY orders without replacing existing facts."""
+        """Safely add verified missing market orders without replacing existing facts."""
 
         self._assert_syncable(batch)
         with self._commit_lock.acquire(), self._engine.begin() as connection:
@@ -157,7 +156,7 @@ class PostgresFullOrderCurrentRepository:
         order_keys = {(row.market, row.order_id) for row in orders}
         if any((row.market, row.order_id) not in order_keys for row in items):
             raise HistoricalInvoiceStorageError(
-                "PostgreSQL Full Order Current contains an item without its MY order."
+                "PostgreSQL Full Order Current contains an item without its market order."
             )
         return FullOrderCurrentSnapshot(orders=orders, items=items)
 
@@ -175,6 +174,8 @@ class PostgresFullOrderCurrentRepository:
         }
         existing_orders = {(row.market, row.order_id) for row in before.orders}
         existing_items = _identity_set(before.items)
+        new_orders: list[dict[str, object]] = []
+        new_items: list[dict[str, object]] = []
         for order in expected.orders:
             identity = (order.market, order.order_id)
             if identity not in changed:
@@ -187,7 +188,7 @@ class PostgresFullOrderCurrentRepository:
                     .values(**values)
                 )
             else:
-                connection.execute(insert(PgOrder).values(**values))
+                new_orders.append(values)
         for item in expected.items:
             order_identity = (item.market, item.order_id)
             identity = (item.market, item.order_id, item.item_index)
@@ -205,7 +206,11 @@ class PostgresFullOrderCurrentRepository:
                     .values(**values)
                 )
             else:
-                connection.execute(insert(PgItem).values(**values))
+                new_items.append(values)
+        if new_orders:
+            connection.execute(insert(PgOrder), new_orders)
+        if new_items:
+            connection.execute(insert(PgItem), new_items)
 
     def _assert_syncable(self, batch: FullOrderCurrentBatch) -> None:
         if not batch.syncable:
@@ -218,7 +223,7 @@ class PostgresFullOrderCurrentRepository:
         markets = {row.market for row in batch.orders} | {row.market for row in batch.items}
         if markets != {self._market}:
             raise HistoricalInvoiceStorageError(
-                "PostgreSQL Full Order runtime refuses a batch outside its MY market boundary."
+                "PostgreSQL Full Order runtime refuses a batch outside its configured market boundary."
             )
 
 
