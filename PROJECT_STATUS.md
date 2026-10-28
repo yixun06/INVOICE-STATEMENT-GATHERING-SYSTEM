@@ -120,6 +120,23 @@ data remains read-only comparison/audit evidence.
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
 
+### SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED / VERIFIED
+
+- Shopee SG Analysis now uses `OrderFinancialProjection` for all order-row
+  authority: Full Order status/date plus Statement payout/released/settlement
+  and native financial/refund components. Its retained Full Order snapshot is
+  item-only for quantity and product subtotal. The independent market-locked
+  adjustment reader remains solely for the global timeline, including unlinked
+  events; it does not alter released amount or create a derived net formula.
+- Market identity remains `shopee_sg` / `Shopee SG`; there is no Invoice or
+  Google Sheets Invoice runtime read/fallback, no product-level fee allocation,
+  and native component rows are preserved without multiplication. The shared
+  `HistoricalInvoiceStorageError` exception type is not a data dependency.
+- Focused SG Analysis plus OrderFinancialProjection regressions passed (11
+  tests); changed modules compile and diff checks pass. Code checkpoint
+  `72855d2` (`feat: complete sg analysis projection cutover`) contains only
+  the SG service wiring and focused regression. Business/schema writes: 0.
+  Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
 ### CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED / REAL LOCALHOST SMOKE VERIFIED
 
 - Payout Product Summary now selects only `PASSED` + `COMMITTED` Statement
@@ -720,6 +737,18 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-28; Task: close Shopee SG Analysis OrderFinancialProjection
+  cutover; State: `SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED /
+  VERIFIED`. Outcome: SG order-row date/status, payout/released/settlement, and
+  native financial/refund components now all consume the canonical projection;
+  Full Order items remain the sole quantity/subtotal source. The independent
+  market-locked adjustment timeline retains linked and unlinked events
+  separately and never changes released amount. Verification: 11 focused SG
+  Analysis/projection tests passed; `py_compile`, diff check, and staged secret
+  scan passed. Code checkpoint: `72855d2` (`feat: complete sg analysis
+  projection cutover`). Business write delta: 0; schema delta: 0; push: **NOT
+  PUSHED**; deployment: **NOT VERIFIED**.
 
 - Date: 2026-10-28; Task: close OrderFinancialProjection authority boundary;
   State: `ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED`.
