@@ -16,27 +16,19 @@ from src.invoice_app.repositories.shopee_full_order_current_repository import (
 )
 from src.invoice_app.services.market_context import SHOPEE_SG
 from src.invoice_app.services.shopee_order_adjustment_read import (
-    CommittedOrderAdjustmentReader,
     read_committed_order_adjustments,
 )
-from src.invoice_app.services.shopee_statement_financial_read import (
-    CommittedStatementFinancialReader,
-    StatementFinancialReadResult,
-    StatementFinancialRecord,
-    StatementFinancialRecordState,
-    read_committed_statement_financials,
+from src.invoice_app.services.shopee_order_financial_projection import (
+    OrderFinancialProjection,
+    OrderFinancialProjectionState,
+    OrderFinancialProjectionStatementReader,
+    read_order_financial_projections,
 )
-
-
 ZERO_MONEY = Decimal("0.00")
 
 
-class SgAnalysisStatementReader(
-    CommittedStatementFinancialReader,
-    CommittedOrderAdjustmentReader,
-    Protocol,
-):
-    """The two read-only Statement facets required by SG Analysis."""
+class SgAnalysisStatementReader(OrderFinancialProjectionStatementReader, Protocol):
+    """Read-only Statement facets consumed through the financial projection."""
 
 
 class SgAnalysisDateBasis(str, Enum):
@@ -63,7 +55,7 @@ class SgAnalysisOrderRow:
     payout_completed_date: date | None
     quantity: int
     product_subtotal: Decimal
-    settlement_state: StatementFinancialRecordState
+    settlement_state: OrderFinancialProjectionState
     released_amount: Decimal | None
 
 
@@ -76,7 +68,7 @@ class SgComponentTotal:
 @dataclass(frozen=True)
 class ShopeeSgAnalysisSnapshot:
     current: FullOrderCurrentSnapshot
-    financial: StatementFinancialReadResult
+    projections: tuple[OrderFinancialProjection, ...]
     adjustments: tuple[CanonicalOrderAdjustment, ...]
 
     def available_dates(self, basis: SgAnalysisDateBasis) -> tuple[date, ...]:
@@ -86,9 +78,9 @@ class ShopeeSgAnalysisSnapshot:
                 if order.market == SHOPEE_SG.key.value
             }))
         return tuple(sorted({
-            record.payout_completed_date for record in self.financial.records
-            if record.state is StatementFinancialRecordState.AVAILABLE
-            and record.payout_completed_date is not None
+            projection.payout_completed_date for projection in self.projections
+            if projection.settlement_state is OrderFinancialProjectionState.AVAILABLE
+            and projection.payout_completed_date is not None
         }))
 
 
@@ -97,7 +89,7 @@ class ShopeeSgAnalysis:
     filters: SgAnalysisFilters
     rows: tuple[SgAnalysisOrderRow, ...]
     adjustments: tuple[CanonicalOrderAdjustment, ...]
-    financial_records: tuple[StatementFinancialRecord, ...] = ()
+    financial_records: tuple[OrderFinancialProjection, ...] = ()
 
     @property
     def order_count(self) -> int:
@@ -113,13 +105,13 @@ class ShopeeSgAnalysis:
 
     @property
     def settled_order_count(self) -> int:
-        return sum(row.settlement_state is StatementFinancialRecordState.AVAILABLE for row in self.rows)
+        return sum(row.settlement_state is OrderFinancialProjectionState.AVAILABLE for row in self.rows)
 
     @property
     def released_amount(self) -> Decimal:
         return sum((row.released_amount or ZERO_MONEY for row in self.rows), ZERO_MONEY)
 
-    def financial_record(self, order_id: str) -> StatementFinancialRecord | None:
+    def financial_record(self, order_id: str) -> OrderFinancialProjection | None:
         normalized = _normalized_order_id(order_id)
         return next(
             (record for record in self.financial_records if record.order_id == normalized),
@@ -151,7 +143,7 @@ def load_shopee_sg_analysis_snapshot(
     """Load the SG authorities through their existing market-locked readers."""
 
     current = full_order_repository.read_snapshot()
-    financial = read_committed_statement_financials(
+    projections = read_order_financial_projections(
         market_context=SHOPEE_SG,
         full_order_repository=full_order_repository,
         statement_reader=statement_reader,
@@ -160,7 +152,7 @@ def load_shopee_sg_analysis_snapshot(
         market_context=SHOPEE_SG,
         statement_reader=statement_reader,
     )
-    return ShopeeSgAnalysisSnapshot(current, financial, adjustments.events)
+    return ShopeeSgAnalysisSnapshot(current, projections, adjustments.events)
 
 
 def build_shopee_sg_analysis(
@@ -184,9 +176,8 @@ def build_shopee_sg_analysis(
         subtotals[order_id] += item.product_subtotal
 
     financial = {
-        _normalized_order_id(record.order_id): record
-        for record in snapshot.financial.records
-        if record.state is not StatementFinancialRecordState.UNMATCHED_FULL_ORDER
+        _normalized_order_id(projection.order_id): projection
+        for projection in snapshot.projections
     }
     if filters.date_basis is SgAnalysisDateBasis.ORDER_CREATED:
         candidates = (
@@ -195,25 +186,29 @@ def build_shopee_sg_analysis(
         )
     else:
         candidates = (
-            order_id for order_id, record in financial.items()
-            if record.state is StatementFinancialRecordState.AVAILABLE
-            and record.payout_completed_date is not None
-            and filters.from_date <= record.payout_completed_date <= filters.to_date
+            order_id for order_id, projection in financial.items()
+            if projection.settlement_state is OrderFinancialProjectionState.AVAILABLE
+            and projection.payout_completed_date is not None
+            and filters.from_date <= projection.payout_completed_date <= filters.to_date
         )
 
     rows = []
     for order_id in sorted(candidates):
         order = orders[order_id]
-        record = financial.get(order_id)
+        projection = financial.get(order_id)
         rows.append(SgAnalysisOrderRow(
             order_id=order_id,
             order_status=order.order_status,
             order_created_date=order.order_created_date,
-            payout_completed_date=None if record is None else record.payout_completed_date,
+            payout_completed_date=None if projection is None else projection.payout_completed_date,
             quantity=quantities[order_id],
             product_subtotal=subtotals[order_id],
-            settlement_state=(StatementFinancialRecordState.MISSING_STATEMENT if record is None else record.state),
-            released_amount=None if record is None else record.released_amount,
+            settlement_state=(
+                OrderFinancialProjectionState.MISSING_STATEMENT
+                if projection is None
+                else projection.settlement_state
+            ),
+            released_amount=None if projection is None else projection.released_amount,
         ))
     return ShopeeSgAnalysis(
         filters,

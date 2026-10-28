@@ -1,9 +1,8 @@
-"""Read-only Full Order + committed Statement financial projection.
+"""Read-only committed Statement financial facts for one market.
 
-This is deliberately a projection, not a second persistence or reconciliation
-engine.  It joins exact market/order identities after Statement rows have
-already passed the native import and commit workflow.  It never consults the
-legacy Invoice/PDF tables and never allocates order-level money to items.
+This reader is deliberately Statement-only.  It reads no Full Order, product,
+or Invoice authority; callers that need cross-authority order composition own
+that explicit join at their projection boundary.
 """
 
 from __future__ import annotations
@@ -14,32 +13,22 @@ from decimal import Decimal
 from enum import Enum
 from typing import Iterable, Protocol
 
-from src.invoice_app.repositories.shopee_full_order_current_repository import (
-    FullOrderCurrentSnapshot,
-    ShopeeFullOrderCurrentRepository,
-)
 from src.invoice_app.services.google_sheets_statement_writer import (
     CommittedStatementFinancialComponentFact,
     CommittedStatementFinancialFacts,
     CommittedStatementOrderFact,
 )
 from src.invoice_app.services.market_context import MarketContext, resolve_market_context
-from src.invoice_app.services.shopee_full_order_adapter import FullOrderCurrentOrder
 
 
 class StatementFinancialReadError(RuntimeError):
-    """The authoritative Full Order/Statement projection is unsafe to read."""
-
-
-class StatementFinancialDateBasis(str, Enum):
-    ORDER_CREATED = "ORDER_CREATED"
-    PAYOUT_COMPLETED = "PAYOUT_COMPLETED"
+    """Committed Statement financial evidence cannot be safely read."""
 
 
 class StatementFinancialRecordState(str, Enum):
+    """Statement-evidence state; cross-authority projections add missing-order state."""
+
     AVAILABLE = "AVAILABLE"
-    MISSING_STATEMENT = "MISSING_STATEMENT"
-    UNMATCHED_FULL_ORDER = "UNMATCHED_FULL_ORDER"
     DUPLICATE_STATEMENT = "DUPLICATE_STATEMENT"
     CONFLICTING_STATEMENT = "CONFLICTING_STATEMENT"
 
@@ -53,11 +42,10 @@ class CommittedStatementFinancialReader(Protocol):
 
 @dataclass(frozen=True)
 class StatementFinancialRecord:
-    """One exact MY/SG order identity with explicit financial-evidence state."""
+    """Committed native Statement evidence for one exact market/order identity."""
 
     market: str
     order_id: str
-    order_created_date: date | None
     state: StatementFinancialRecordState
     payout_completed_date: date | None
     released_amount: Decimal | None
@@ -69,7 +57,7 @@ class StatementFinancialRecord:
 
 @dataclass(frozen=True)
 class StatementFinancialReadResult:
-    """Bounded market-isolated projection plus unlinked adjustment components."""
+    """Market-isolated committed Statement facts plus unlinked components."""
 
     market: str
     records: tuple[StatementFinancialRecord, ...]
@@ -79,37 +67,17 @@ class StatementFinancialReadResult:
 def read_committed_statement_financials(
     *,
     market_context: MarketContext,
-    full_order_repository: ShopeeFullOrderCurrentRepository,
     statement_reader: CommittedStatementFinancialReader,
     order_ids: Iterable[str] = (),
-    date_basis: StatementFinancialDateBasis | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
 ) -> StatementFinancialReadResult:
-    """Return only committed Statement evidence joined to Full Order Current.
-
-    ``order_ids`` remains bounded by caller intent.  A date interval is an
-    optional additional filter and requires one explicit basis.  Duplicate and
-    conflicting committed ORDER evidence is surfaced as state rather than
-    silently merged; raw component source rows remain available for audit.
-    """
+    """Return committed native Statement facts only, without Full Order access."""
 
     context = resolve_market_context(market_context)
     if statement_reader.persisted_platform != context.persisted_platform:
         raise StatementFinancialReadError(
-            "Statement reader market does not match the requested Full Order market."
+            "Statement reader market does not match the requested market context."
         )
-    if (from_date is None) != (to_date is None):
-        raise ValueError("Both from_date and to_date are required for a financial date range.")
-    if from_date is not None and to_date is not None:
-        if date_basis is None:
-            raise ValueError("date_basis is required when filtering a financial date range.")
-        if from_date > to_date:
-            raise ValueError("from_date must not be after to_date.")
-
     requested = {_normalized_order_id(value) for value in order_ids if _normalized_order_id(value)}
-    current = full_order_repository.read_snapshot()
-    orders = _orders_for_market(current, context.key.value)
     facts = statement_reader.read_committed_financial_facts()
     by_order: dict[str, list[CommittedStatementOrderFact]] = {}
     for fact in facts.order_facts:
@@ -122,33 +90,32 @@ def read_committed_statement_financials(
         else:
             components_by_order.setdefault(_normalized_order_id(component.order_id), []).append(component)
 
-    identities = requested or (set(orders) | set(by_order))
     records = []
-    for order_id in sorted(identities):
-        order = orders.get(order_id)
+    for order_id in sorted(requested or set(by_order)):
         order_facts = tuple(by_order.get(order_id, ()))
+        if not order_facts:
+            continue
         components = tuple(components_by_order.get(order_id, ()))
-        state, resolved = _resolve_order_evidence(order, order_facts)
-        record = StatementFinancialRecord(
-            market=context.key.value,
-            order_id=order_id,
-            order_created_date=None if order is None else order.order_created_date,
-            state=state,
-            payout_completed_date=None if resolved is None else resolved.payout_completed_date,
-            released_amount=None if resolved is None else resolved.total_released_amount,
-            statement_product_price=(
-                None if resolved is None else resolved.statement_product_price
-            ),
-            order_facts=order_facts,
-            financial_components=components,
-            refund_components=tuple(
-                component
-                for component in components
-                if component.component_name.strip().casefold() == "refund amount"
-            ),
+        state, resolved = _resolve_statement_evidence(order_facts)
+        records.append(
+            StatementFinancialRecord(
+                market=context.key.value,
+                order_id=order_id,
+                state=state,
+                payout_completed_date=None if resolved is None else resolved.payout_completed_date,
+                released_amount=None if resolved is None else resolved.total_released_amount,
+                statement_product_price=(
+                    None if resolved is None else resolved.statement_product_price
+                ),
+                order_facts=order_facts,
+                financial_components=components,
+                refund_components=tuple(
+                    component
+                    for component in components
+                    if component.component_name.strip().casefold() == "refund amount"
+                ),
+            )
         )
-        if _matches_date_range(record, date_basis, from_date, to_date):
-            records.append(record)
     return StatementFinancialReadResult(
         market=context.key.value,
         records=tuple(records),
@@ -156,30 +123,9 @@ def read_committed_statement_financials(
     )
 
 
-def _orders_for_market(
-    snapshot: FullOrderCurrentSnapshot, market: str
-) -> dict[str, FullOrderCurrentOrder]:
-    result: dict[str, FullOrderCurrentOrder] = {}
-    for order in snapshot.orders:
-        if order.market != market:
-            continue
-        order_id = _normalized_order_id(order.order_id)
-        if order_id in result:
-            raise StatementFinancialReadError(
-                f"Full Order Current duplicates the market/order identity {market}/{order_id}."
-            )
-        result[order_id] = order
-    return result
-
-
-def _resolve_order_evidence(
-    order: FullOrderCurrentOrder | None,
+def _resolve_statement_evidence(
     facts: tuple[CommittedStatementOrderFact, ...],
 ) -> tuple[StatementFinancialRecordState, CommittedStatementOrderFact | None]:
-    if order is None:
-        return StatementFinancialRecordState.UNMATCHED_FULL_ORDER, None
-    if not facts:
-        return StatementFinancialRecordState.MISSING_STATEMENT, None
     if len(facts) == 1:
         return StatementFinancialRecordState.AVAILABLE, facts[0]
     stable_values = {
@@ -189,22 +135,6 @@ def _resolve_order_evidence(
     if len(stable_values) == 1:
         return StatementFinancialRecordState.DUPLICATE_STATEMENT, None
     return StatementFinancialRecordState.CONFLICTING_STATEMENT, None
-
-
-def _matches_date_range(
-    record: StatementFinancialRecord,
-    date_basis: StatementFinancialDateBasis | None,
-    from_date: date | None,
-    to_date: date | None,
-) -> bool:
-    if from_date is None or to_date is None:
-        return True
-    value = (
-        record.order_created_date
-        if date_basis is StatementFinancialDateBasis.ORDER_CREATED
-        else record.payout_completed_date
-    )
-    return value is not None and from_date <= value <= to_date
 
 
 def _normalized_order_id(value: object) -> str:

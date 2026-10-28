@@ -135,6 +135,12 @@ def test_sg_analysis_uses_only_full_order_for_order_created_and_only_statement_f
     assert all(row.order_created_date != date(2026, 8, 1) for row in order_created.rows)
 
 
+def test_sg_analysis_delegates_cross_authority_composition_to_order_financial_projection():
+    source = (Path(__file__).resolve().parents[1] / "src" / "invoice_app" / "services" / "shopee_sg_analysis.py").read_text(encoding="utf-8")
+    assert "read_order_financial_projections(" in source
+    assert "read_committed_statement_financials(" not in source
+
+
 def test_sg_component_rows_and_adjustments_are_preserved_separately_from_released_amount():
     report = build_shopee_sg_analysis(_snapshot(), SgAnalysisFilters(
         SgAnalysisDateBasis.PAYOUT, date(2026, 9, 7), date(2026, 9, 7)))
