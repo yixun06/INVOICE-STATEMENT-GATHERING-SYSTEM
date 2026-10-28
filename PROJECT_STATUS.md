@@ -591,20 +591,21 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
    PostgreSQL. Historical parity, runtime reader/writer, atomic transaction,
    rollback safety, idempotency, successful real Commit, repeat-source no-op,
    and migration lessons are verified.
-2. **Current local checkpoint:** Shopee SG Statement PostgreSQL runtime is
-   implemented and replay-verified; a separate Product Owner authorization is
-   required for a genuinely NEW live SG Statement Commit.
+2. **CLOSED LOCALLY / runtime authority:** Shopee SG Statement PostgreSQL
+   runtime is implemented and replay-verified. A separately authorized,
+   genuinely NEW live SG Statement Commit remains pending; that operational
+   smoke is distinct from the completed runtime migration.
 3. **Cross-domain prerequisite closed:** identical MY/SG Order IDs are now
    regression-proven to stay isolated through `MarketContext`; Statement keeps
    `platform` and Full Order keeps canonical `market`, with no raw-column join.
-4. **MY locally verified; SG locally migrated / runtime-read verified:** MY
-   Full Order Current PostgreSQL parity, reconstruction, runtime routing,
-   real-source idempotency, and consumer replays are complete with no Sheets
-   fallback under the explicit PostgreSQL backend. SG historical Current parity
-   is 10,297 Orders / 13,701 Items with zero key or persisted-field variance;
-   explicit SG PostgreSQL reads now use the same market-bound repository and
-   have no Full Order Sheets fallback. A genuine SG runtime source replay is
-   still pending successful current Product Master preflight.
+4. **CLOSED LOCALLY / Full Order runtime authority:** MY Full Order Current
+   PostgreSQL parity, reconstruction, runtime routing, real-source idempotency,
+   and consumer replays are complete with no Sheets fallback. The Product Owner
+   has now verified a genuine SG Full Order local-app runtime write to
+   PostgreSQL. Current read-only counts are MY 14,916 Orders / 22,466 Items and
+   SG 10,563 Orders / 14,127 Items; the SG increase from its 10,297 / 13,701
+   historical baseline is the verified runtime source. Exact second-source
+   replay evidence was not recorded. Product Master remains Google Sheets only.
 5. **Then:** inventory remaining application-owned Sheets-backed runtime/history
    data as `MIGRATE TO POSTGRESQL`, `SOURCE-ONLY / REMAIN GOOGLE SHEETS`, or
    `LEGACY / DECOMMISSION INSTEAD OF MIGRATE`. Do not migrate obsolete data for
@@ -641,6 +642,22 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-28; Task: checkpoint Product Owner-verified Shopee SG Full
+  Order PostgreSQL runtime smoke; State: VERIFIED / CLOSED LOCALLY / LOCAL
+  CHECKPOINTED. Outcome: Product Owner completed a genuine local-app SG
+  Full Order upload and confirmed PostgreSQL as the actual write target with no
+  Google Sheets fallback. Read-only local PostgreSQL verification found SG
+  Full Order 10,563 Orders / 14,127 Items, including 274 Orders from latest
+  source `Order.all.order_creation_date.20261020_20261025.xlsx`; MY remains
+  14,916 / 22,466 and Statement remains 26,722 / 578,653 / 548 / 46. Exact
+  second-source replay/idempotency evidence is not recorded. The first core
+  local PostgreSQL runtime-authority milestone is therefore closed for MY/SG
+  Statement and MY/SG Full Order; Product Master intentionally remains
+  read-only Google Sheets. Verification: PostgreSQL read-only counts and
+  provenance; business/schema/Google Sheets writes: 0; deployment: NOT
+  VERIFIED; Git push: 0. Next: inventory the remaining active runtime and
+  legacy dependencies before authorizing another migration domain.
 
 - Date: 2026-10-28; Task: finalize MY/SG Full Order PostgreSQL default
   authority; State: IMPLEMENTED / TESTED / LOCAL CHECKPOINTED / NO

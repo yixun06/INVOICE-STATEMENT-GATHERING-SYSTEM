@@ -3773,15 +3773,15 @@ verified by local transaction/rollback controls and historical duplicate replay;
 a genuinely NEW live SG Statement Commit requires separate Product Owner
 authorization and remains pending.
 
-Current migration order is: (1) close/checkpoint the MY and SG Statement
-runtime cutovers locally without push, (2) migrate market-isolated MY and SG
-Full Order Current through one shared repository, then (3) inventory remaining
+The first core local PostgreSQL runtime-authority milestone is closed:
+Statement MY, Statement SG, Full Order MY, and Full Order SG use their
+market-bound PostgreSQL repositories by default and fail closed without a
+Google Sheets fallback. The Product Owner has verified the genuine SG Full
+Order runtime write locally; an exact second-source replay was not recorded.
+Product Master intentionally remains its separate, read-only Google Sheets
+authority. The next migration action is to inventory remaining
 application-owned runtime/history data as migrate, source-only Sheets, or
-legacy/decommission.
-The next Full Order repository must retain market isolation, order/item facts,
-USOLF/unit price, NAV, resolved seller SKU, resolve SKU, status, quantity,
-product subtotal, and required provenance. Product Master remains separate on
-Google Sheets.
+legacy/decommission; do not migrate obsolete data merely for completeness.
 
 Company-server/Tailscale Docker staging/deployment, production PostgreSQL,
 Google Sheets replacement/removal, Google Sheets business writes, and the
