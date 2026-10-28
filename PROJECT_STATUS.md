@@ -88,6 +88,45 @@ data remains read-only comparison/audit evidence.
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
 
+### CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED / REAL LOCALHOST SMOKE VERIFIED
+
+- Payout Product Summary now selects only `PASSED` + `COMMITTED` Statement
+  `ORDER` rows from the market-bound PostgreSQL Statement repository, keyed by
+  `MarketContext` and `payout_completed_date`. The selected exact
+  `(market, order_id)` values resolve through the corresponding PostgreSQL Full
+  Order snapshot; Full Order provides all item/product facts and the existing
+  product-summary engine performs the same direct subtotal calculation as
+  Order-Created mode.
+- Payout mode has zero runtime Invoice/PDF dependency: it does not construct or
+  read a legacy Invoice gateway, `Invoice_Orders`, `Invoice_Items`, or Google
+  Sheets Invoice tabs. Statement SKU rows, Financial Components, and
+  Adjustments are not used or allocated to product rows. A payout-selected
+  order missing its Full Order order or items fails explicitly; no fallback is
+  permitted.
+- MY and SG real localhost PostgreSQL runtime smoke passed. Displayed Payout
+  Product Summary data matched direct PostgreSQL inspection; MY and SG
+  physical Statement platform to `MarketContext` routing and corresponding
+  Full Order market isolation remain fail-closed. No Google Sheets or legacy
+  Invoice fallback was observed. Invoice_Orders reads: 0; Invoice_Items reads:
+  0; Google Sheets Invoice-tab reads: 0. Product Master is intentionally
+  unchanged. Deployment remains **NOT VERIFIED**.
+
+### ORDER_CREATED_PRODUCT_SUMMARY_FULL_ORDER_ONLY - CLOSED / REAL LOCALHOST SMOKE VERIFIED
+
+- `Order Created Date` Consolidated Product Summary now selects a dedicated,
+  market-bound PostgreSQL Full Order snapshot before its date filters, table,
+  export, and Compact Barcode inputs are built. It does not construct or read
+  a legacy Invoice gateway, `Invoice_Orders`, `Invoice_Items`, Google Sheets
+  Invoice tabs, or Statement data. The Full Order boundary fails closed if a
+  market-bound repository returns another market.
+- Payout-date Product Summary is now the adjacent canonical PostgreSQL
+  Statement-order-selection plus Full Order-item reader. Product Master,
+  Billing, Analysis, persistence, and schema behavior remain unchanged.
+- MY and SG real localhost PostgreSQL runtime smoke passed. MY's retained
+  reference result is 429 products and 31,768 quantity. No fallback to Google
+  Sheets or legacy Invoice data was observed. Deployment remains **NOT
+  VERIFIED**.
+
 ### POSTGRES_SG_STATEMENT_POSTGRESQL - IMPLEMENTED / TESTED / REPLAY VERIFIED / LOCAL CHECKPOINTED / NOT PUSHED
 
 - SG Statement dynamic zero `SERVICE_FEE_DETAIL` overlap handling is **CLOSED /
@@ -339,10 +378,12 @@ data remains read-only comparison/audit evidence.
 - Full Order consecutive-upload lifecycle is now explicit: after a completed sync, `Upload another Full Order` clears only the staged Full Order review, PM-refresh/mismatch/sync presentation, active batch ID, and Full Order uploader widget before returning to Upload; it preserves the selected SG market and Full Order source mode. A stale Full Order step at Validate or later without a typed review is normalized back to Upload, so the stepper cannot claim Upload `Completed` while the validation page has no review.
 - Post-sync Full Order state now renders the verified sync result before consulting the staged review. A review cleared after a successful sync therefore remains an explicit success state with `Upload another Full Order`, while failed or partial syncs (which never set the result) remain non-success states.
 
-### CONSOLIDATED_PRODUCT_SUMMARY_MIGRATION_CLOSED - VERIFIED / CHECKPOINT AUTHORIZED
+### CONSOLIDATED_PRODUCT_SUMMARY_LEGACY_GOOGLE_SHEETS_MIGRATION - HISTORICAL / SUPERSEDED
 
 - Baseline checkpoint: `7fecdc555967877fe520a9a101480ac3cd70ea6e` (`feat: finalize full order statement workflow`). Full Order integration is successful and closed.
-- `Order Created Date` is finalized as `Shopee_FullOrder_Current_Orders` / `Shopee_FullOrder_Current_Items` only: explicit Cancelled/Canceled rows are excluded; legitimate non-cancelled facts retain Full Order quantity, unit price, gross original sales, and direct `product_subtotal` amount. `Payout Date` remains canonical `Invoice_Orders` / `Invoice_Items` only.
+- This historical Google Sheets checkpoint pre-dates the PostgreSQL Product
+  Summary cutover. Its former Payout-Date `Invoice_Orders` / `Invoice_Items`
+  contract is superseded and must not be read as an active runtime rule.
 - Refund semantics are finalized as gross/original purchase reporting: `26100849V7RC9P` retains the target Current item at Qty 2 / RM23.22. Statement remains the financial/refund authority; no returned quantity is inferred.
 - September validation is closed: Full Order gross product subtotal RM88,525.85 less confirmed refunds RM263.70 equals ERP staging net RM88,262.15; no known SKU, quantity, price, or missing-order discrepancy remains.
 - May historical genuine-All-Order missing-only backfill is completed and accepted by the Product Owner. Existing Current rows are retained, historical data does not overwrite newer Current facts, and `UPDATED = 0` remains the contract.
@@ -630,19 +671,16 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Approved / Pending
 
-- **PRODUCT OWNER CONFIRMED / DOCUMENTED / IMPLEMENTATION PENDING:** Shopee MY
+- **PRODUCT OWNER CONFIRMED / CLOSED / REAL LOCALHOST SMOKE VERIFIED:** Shopee MY
   and SG active order/settlement flow is `Full Order Current + Product Master`
-  for operational/order-created product facts and `Statement + Full Order
-  Current + Product Master` for settlement facts, joined exactly by
+  for operational/product facts and `Statement + Full Order Current + Product
+  Master` for settlement facts and Payout Product Summary, joined exactly by
   `(market, order_id)`. PDF/`Invoice_Orders`/`Invoice_Items` are preserved
-  legacy audit evidence only for Statement: missing PDF/Invoice coverage is not
-  an active Statement reconciliation or readiness blocker. Payout Product
-  Summary migration is pending; its current implementation remains canonical
-  `Invoice_Orders` + `Invoice_Items`. Its approved target is Statement for
-  payout population/date, Full Order Current for product facts, and Product
-  Master for NAV/USOLF. MY and SG remain strictly market-isolated with no
-  cross-market fallback. No application, schema, Product Master, UAT2, or
-  business-data change is included in this documentation-only decision.
+  legacy audit evidence only: missing PDF/Invoice coverage is not an active
+  Statement or Product Summary blocker. Payout uses Statement for payout
+  population/date and Full Order Current for all product facts; the same direct
+  Full Order product calculation serves both date modes. MY and SG remain
+  strictly market-isolated with no cross-market fallback.
 - **APPROVED / PENDING IMPLEMENTATION:** billing readiness gate and later Billing Summary/Analysis layers beyond current committed-data reports.
 - **APPROVED / IMPLEMENTED CURRENT:** `D:\download material\september all orderid.xlsx` is the Shopee MY Full Order Current source. The completed / escrow-paid September workbook is retained only as the 2,049-Order / 2,845-Item settlement golden/regression subset and must not redefine Current coverage. Current is a mutable MY operational snapshot with no mandatory upload cadence; it never overwrites the Statement-proved canonical Invoice or Statement tables.
 - **DEFERRED:** Cross adapters beyond committed Shopee scope; Product ID-to-Seller-SKU mapping; bank receipt reconciliation; final underpayment classification; revised Statement replacement/versioning; PostgreSQL production cutover/storage redesign beyond the authorized local initial migration.
@@ -650,6 +688,26 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-28; Task: close Consolidated Product Summary PostgreSQL
+  cutover; State: `CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED /
+  REAL LOCALHOST SMOKE VERIFIED`. Outcome: both Order-Created and Payout
+  Product Summary migrations are closed. MY and SG Order-Created PostgreSQL
+  runtime smoke passed; MY's retained reference is 429 products / 31,768
+  quantity. MY and SG Payout PostgreSQL runtime smoke passed and displayed
+  report rows matched direct PostgreSQL inspection. Order Created selects Full
+  Order PostgreSQL orders; Payout selects committed market-scoped Statement
+  ORDER IDs; Full Order PostgreSQL Items supply product facts; both use the
+  same aggregation engine. Observed legacy Product Summary runtime reads are
+  `Invoice_Orders=0`, `Invoice_Items=0`, and Google Sheets Invoice tabs=0.
+  Product Master remains unchanged. Verification: 84 focused Product
+  Summary/market-isolation/forbidden-legacy-reader/barcode/cutover tests
+  passed with 8 expected guarded skips; `py_compile` and staged diff check
+  passed; staged secret scan found no literal secret. Git feature checkpoint:
+  `2afb18b455df439f7feb71dbe4400b5ea53060a1`
+  (`feat: cut over consolidated product summary to postgres`); no push;
+  PostgreSQL, Google Sheets, schema, and business-data write delta: 0;
+  deployment: NOT VERIFIED.
 
 - Date: 2026-10-28; Task: checkpoint Product Owner-verified Shopee SG Full
   Order PostgreSQL runtime smoke; State: VERIFIED / CLOSED LOCALLY / LOCAL
