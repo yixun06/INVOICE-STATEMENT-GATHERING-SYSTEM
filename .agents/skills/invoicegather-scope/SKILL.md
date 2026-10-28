@@ -47,11 +47,12 @@ source-safety, Statement, and historical rationale.
 This is the authoritative active-flow architecture for Shopee MY and Shopee
 SG.  It supersedes every conflicting older requirement that makes an Invoice
 PDF, `Invoice_Orders`, or `Invoice_Items` a prerequisite for active Statement
-reconciliation or Statement readiness. The approved Payout Product Summary
-target is separate and remains pending migration: its current implementation
-still reads canonical `Invoice_Orders` + `Invoice_Items`. Older Invoice/PDF
-coverage and Invoice-to-Statement wording remains historical audit context for
-the active Statement path only; it must not be used as an active Statement
+reconciliation or Statement readiness. Consolidated Product Summary now uses
+the market-bound PostgreSQL Full Order runtime for all product/item facts:
+Order Created mode selects by Full Order date and Payout mode selects exact
+market-scoped committed Statement `ORDER` evidence before loading those same
+Full Order items. Older Invoice/PDF coverage and Invoice-to-Statement wording
+remains historical audit context only; it must not be used as an active
 acceptance or blocking rule.
 
 ```text
@@ -62,7 +63,7 @@ Statement + Full Order Current + market-scoped Product Master
         -> settlement reconciliation
 
 Statement + Full Order Current + market-scoped Product Master
-        -> approved future Payout Product Summary target (migration pending)
+        -> Payout Product Summary
 ```
 
 ### Source authority and join — Locked
@@ -93,12 +94,12 @@ Statement + Full Order Current + market-scoped Product Master
 
 - **Order Created Product Summary** is built from Full Order Current and the
   same resolved Product Master evidence.
-- **Payout Product Summary target (migration pending):** Statement determines
-  payout period and order population, Full Order Current supplies
-  product/variation/quantity/subtotal, and Product Master supplies NAV and
-  `UNIT PRICE USOLF`. The current Payout Product Summary implementation remains
-  canonical `Invoice_Orders` + `Invoice_Items`; do not describe the target as
-  implemented or use it as the current Payout acceptance contract.
+- **Payout Product Summary:** Statement determines the payout period and exact
+  market-scoped committed `ORDER` population; Full Order Current supplies every
+  product/variation/quantity/subtotal fact; and Product Master supplies the
+  already persisted NAV and `UNIT PRICE USOLF` evidence. It uses the same
+  Full Order item calculation as Order Created mode. Statement components and
+  adjustments stay order-level and are never allocated to product rows.
 - **Statement reconciliation** is Statement plus Full Order Current.  PDF
   Invoice coverage is not required.
 - After accepted order-level reconciliation, Statement financial-component rows
@@ -555,23 +556,25 @@ exports, or any write path.
 
 ## Current Consolidated Product Summary — Locked
 
-Consolidated Product Summary is an implemented, **live read-only database-backed
-report**. `Order Created Date` rows are directly sourced from Full Order Current;
-the current Payout Product Summary product/financial calculation still reads
-canonical `Invoice_Orders` and `Invoice_Items`, but its payout-date eligibility
-comes only from committed `Statement_Data` `ORDER` rows joined by normalized
-`(market, order_id)`. It is not a current-session All Products view, does not
-have its own reporting table, and must make no UAT2/schema write merely to
-render or export.
+Consolidated Product Summary is **CLOSED / REAL LOCALHOST SMOKE VERIFIED** as
+an implemented, live read-only PostgreSQL database-backed report. Both date
+modes use Full Order Current for product
+facts and the same product-summary calculation. `Order Created Date` selects
+eligible Full Order orders by `order_created_date`; `Payout Date` selects only
+committed Statement `ORDER` evidence by `payout_completed_date`, then resolves
+those exact `(market, order_id)` values through Full Order Current. A selected
+Statement order lacking Full Order coverage fails explicitly; there is no
+Invoice/PDF or Statement-SKU fallback. It is not a current-session All Products
+view, does not have its own reporting table, and must make no UAT2/schema write
+merely to render or export.
 
 The current adapter reads one logical committed snapshot per render:
 
 ```text
-committed Invoice_Orders + Invoice_Items
--> selected date-type eligibility
--> Platform / Order Created Date or Payout Date filters
--> persisted promotion allocation
--> canonical Product Summary consolidation
+Order Created Date -> Full Order Orders date selection
+Payout Date -> committed Statement ORDER date selection
+-> exact market-scoped Full Order Orders / Items
+-> shared canonical Product Summary consolidation
 -> one final rowset
 -> dashboard + table + barcode-table PDF
 ```

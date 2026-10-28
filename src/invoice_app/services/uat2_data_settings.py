@@ -219,12 +219,15 @@ class UAT2DataSettings:
         if context.key in {MarketKey.SHOPEE_MY, MarketKey.SHOPEE_SG}:
             return PostgresMyCrossPlatformProductSummaryReader(
                 spreadsheet_id=self.google_spreadsheet_id,
-                gateway=GoogleApiHistoricalInvoiceGateway(self._credentials_source()),
+                legacy_gateway_factory=lambda: GoogleApiHistoricalInvoiceGateway(
+                    self._credentials_source()
+                ),
                 statement_repository=PostgresStatementRepository(
                     engine=PostgresRuntimeConfig.from_environment().engine(),
                     persisted_platform=context.persisted_platform,
                 ),
                 full_order_repository=self.create_full_order_current_repository(),
+                market_context=context,
             )
         return GoogleSheetsCrossPlatformProductSummaryReader(
             spreadsheet_id=self.google_spreadsheet_id,

@@ -63,12 +63,25 @@ _ALL_DATES_RANGE = "All dates"
 @st.cache_data(ttl=45, show_spinner=False)
 def _load_cross_platform_reporting_snapshot(
     platform: str,
+    date_type: CrossPlatformDateType = CrossPlatformDateType.ORDER_CREATED,
 ) -> CrossPlatformReportingSnapshot:
-    return (
+    reader = (
         configured_uat2_data_settings(resolve_market_context(platform))
         .create_cross_platform_product_summary_reader()
-        .load_snapshot()
     )
+    if date_type is CrossPlatformDateType.ORDER_CREATED:
+        load_order_created_snapshot = getattr(reader, "load_order_created_snapshot", None)
+        if not callable(load_order_created_snapshot):
+            raise CrossPlatformProductSummaryError(
+                "Order Created Product Summary requires the PostgreSQL Full Order reader."
+            )
+        return load_order_created_snapshot()
+    load_payout_snapshot = getattr(reader, "load_payout_snapshot", None)
+    if not callable(load_payout_snapshot):
+        raise CrossPlatformProductSummaryError(
+            "Payout Product Summary requires the PostgreSQL Statement and Full Order readers."
+        )
+    return load_payout_snapshot()
 
 
 def clear_cross_platform_reporting_snapshot_cache() -> None:
@@ -95,7 +108,11 @@ def render_cross_platform_product_summary(
         return
 
     try:
-        source = snapshot if snapshot is not None else _load_cross_platform_reporting_snapshot(platform)
+        source = (
+            snapshot
+            if snapshot is not None
+            else _load_cross_platform_reporting_snapshot(platform, date_type)
+        )
     except (HistoricalInvoiceStorageError, CrossPlatformProductSummaryError) as error:
         st.error(f"Consolidated Product Summary is unavailable: {error}")
         return

@@ -90,6 +90,26 @@ def test_my_statement_factory_is_postgres_not_google(monkeypatch: pytest.MonkeyP
     )
 
 
+def test_order_created_product_summary_factory_defers_google_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Full Order-only reader must be constructible without Invoice access."""
+
+    monkeypatch.setenv("INVOICEGATHER_PG_USER", "test-user")
+    monkeypatch.setenv("INVOICEGATHER_PG_PASSWORD", "test-password")
+    settings = UAT2DataSettings(
+        google_spreadsheet_id="my-sheet",
+        google_credentials_path=None,
+        google_service_account=None,
+        full_order_backend="postgresql",
+    )
+
+    assert isinstance(
+        settings.create_cross_platform_product_summary_reader(),
+        PostgresMyCrossPlatformProductSummaryReader,
+    )
+
+
 def test_postgres_statement_runtime_accepts_explicit_sg_market() -> None:
     repository = PostgresStatementRepository(  # type: ignore[arg-type]
         engine=object(), persisted_platform="Shopee SG"

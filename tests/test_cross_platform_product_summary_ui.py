@@ -527,6 +527,7 @@ cross_ui.render_cross_platform_product_summary(CrossPlatformReportingSnapshot(()
 
 def test_consolidated_summary_sg_loader_uses_only_the_sg_market_context(monkeypatch):
     from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
         CrossPlatformReportingSnapshot,
     )
     from src.invoice_app.services.market_context import SHOPEE_SG
@@ -534,9 +535,18 @@ def test_consolidated_summary_sg_loader_uses_only_the_sg_market_context(monkeypa
 
     snapshot = CrossPlatformReportingSnapshot(())
     contexts = []
+    calls = []
 
     class Reader:
         def load_snapshot(self):
+            raise AssertionError("Product Summary must not use the legacy snapshot loader.")
+
+        def load_payout_snapshot(self):
+            calls.append("payout")
+            return snapshot
+
+        def load_order_created_snapshot(self):
+            calls.append("order_created")
             return snapshot
 
     class Settings:
@@ -551,7 +561,14 @@ def test_consolidated_summary_sg_loader_uses_only_the_sg_market_context(monkeypa
     cross_ui._load_cross_platform_reporting_snapshot.clear()
 
     assert cross_ui._load_cross_platform_reporting_snapshot("Shopee SG") is snapshot
-    assert contexts == [SHOPEE_SG]
+    assert (
+        cross_ui._load_cross_platform_reporting_snapshot(
+            "Shopee SG", CrossPlatformDateType.PAYOUT
+        )
+        is snapshot
+    )
+    assert contexts == [SHOPEE_SG, SHOPEE_SG]
+    assert calls == ["order_created", "payout"]
 
 
 def test_cross_platform_filters_use_the_component_calendar_instead_of_native_date_inputs():

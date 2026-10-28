@@ -210,6 +210,367 @@ def test_live_reader_keeps_committed_shopee_rows_for_the_selected_date_type():
     ]
 
 
+@pytest.mark.parametrize(
+    ("market", "platform", "currency"),
+    (
+        ("shopee_my", "Shopee MY", "MYR"),
+        ("shopee_sg", "Shopee SG", "SGD"),
+    ),
+)
+def test_order_created_postgres_reader_uses_only_its_market_full_order_snapshot(
+    market, platform, currency
+):
+    """Order-Created reporting must not even touch legacy Invoice/Statement readers."""
+
+    from datetime import datetime, timezone
+
+    from src.invoice_app.repositories.shopee_full_order_current_repository import (
+        FullOrderCurrentSnapshot,
+    )
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        PostgresMyCrossPlatformProductSummaryReader,
+        build_cross_platform_product_summary,
+    )
+    from src.invoice_app.services.market_context import resolve_market_context
+    from src.invoice_app.services.shopee_full_order_adapter import (
+        FullOrderCurrentItem,
+        FullOrderCurrentOrder,
+    )
+
+    class ForbiddenLegacyGateway:
+        requested_tabs = []
+
+        def read_tabs(self, *_args, **_kwargs):
+            raise AssertionError("Order-Created reporting must not read Invoice tabs.")
+
+    class ForbiddenStatementRepository:
+        def reporting_statement_data_rows(self):
+            raise AssertionError("Order-Created reporting must not read Statement rows.")
+
+    class FullOrderRepository:
+        calls = 0
+
+        def read_snapshot(self):
+            self.calls += 1
+            return FullOrderCurrentSnapshot(
+                orders=(
+                    FullOrderCurrentOrder(
+                        market=market,
+                        order_id="SAME-ID",
+                        order_status="Completed",
+                        order_created_date=date(2026, 9, 1),
+                        source_file="current.xlsx",
+                        snapshot_hash="a" * 64,
+                        last_synced_at=datetime(2026, 10, 28, tzinfo=timezone.utc),
+                    ),
+                ),
+                items=(
+                    FullOrderCurrentItem(
+                        market=market,
+                        order_id="SAME-ID",
+                        item_index=0,
+                        source_parent_sku="PARENT",
+                        source_seller_sku="SOURCE-SKU",
+                        resolved_seller_sku="RESOLVED-SKU",
+                        nav="NAV-1",
+                        product_name="Full Order Product",
+                        variation="Variant",
+                        quantity=2,
+                        unit_price=Decimal("7.50"),
+                        product_subtotal=Decimal("14.00"),
+                        return_refund_status="",
+                        resolve_sku="RESOLVE-SKU",
+                    ),
+                ),
+            )
+
+    gateway = ForbiddenLegacyGateway()
+    full_order_repository = FullOrderRepository()
+    reader = PostgresMyCrossPlatformProductSummaryReader(
+        spreadsheet_id="legacy-source-is-for-payout-only",
+        gateway=gateway,
+        statement_repository=ForbiddenStatementRepository(),
+        full_order_repository=full_order_repository,
+        market_context=resolve_market_context(market),
+    )
+
+    snapshot = reader.load_order_created_snapshot()
+    summary = build_cross_platform_product_summary(
+        snapshot,
+        platform=platform,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 9, 1),
+        to_date=date(2026, 9, 1),
+    )
+
+    assert gateway.requested_tabs == []
+    assert full_order_repository.calls == 1
+    assert snapshot.eligible_items == ()
+    assert [(item.platform, item.order_id, item.resolve_sku) for item in summary.source_items] == [
+        ("Shopee" if market == "shopee_my" else "Shopee SG", "SAME-ID", "RESOLVE-SKU")
+    ]
+    assert [
+        (row.sku_code, row.nav, row.quantity, row.unit_price, row.amount)
+        for row in summary.product_rows
+    ] == [("RESOLVED-SKU", "NAV-1", 2, Decimal("7.50"), Decimal("14.00"))]
+    assert summary.currency_code == currency
+
+
+def test_order_created_postgres_reader_fails_closed_on_cross_market_full_order_rows():
+    from datetime import datetime, timezone
+
+    from src.invoice_app.repositories.shopee_full_order_current_repository import (
+        FullOrderCurrentSnapshot,
+    )
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
+        PostgresMyCrossPlatformProductSummaryReader,
+    )
+    from src.invoice_app.services.shopee_full_order_adapter import FullOrderCurrentOrder
+
+    class CrossMarketFullOrderRepository:
+        def read_snapshot(self):
+            return FullOrderCurrentSnapshot(
+                orders=(
+                    FullOrderCurrentOrder(
+                        market="shopee_sg",
+                        order_id="SAME-ID",
+                        order_status="Completed",
+                        order_created_date=date(2026, 9, 1),
+                        source_file="current.xlsx",
+                        snapshot_hash="a" * 64,
+                        last_synced_at=datetime(2026, 10, 28, tzinfo=timezone.utc),
+                    ),
+                ),
+                items=(),
+            )
+
+    reader = PostgresMyCrossPlatformProductSummaryReader(
+        spreadsheet_id="legacy-source-is-for-payout-only",
+        statement_repository=object(),  # type: ignore[arg-type]
+        full_order_repository=CrossMarketFullOrderRepository(),
+    )
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="market boundary"):
+        reader.load_order_created_snapshot()
+
+
+@pytest.mark.parametrize(
+    ("market", "platform", "persisted_platform"),
+    (
+        ("shopee_my", "Shopee MY", "Shopee"),
+        ("shopee_sg", "Shopee SG", "Shopee SG"),
+    ),
+)
+def test_payout_postgres_reader_selects_statement_orders_then_reuses_full_order_summary(
+    market, platform, persisted_platform
+):
+    """Payout mode changes only order selection; product facts stay Full Order."""
+
+    from datetime import datetime, timezone
+
+    from src.invoice_app.repositories.shopee_full_order_current_repository import (
+        FullOrderCurrentSnapshot,
+    )
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformDateType,
+        PostgresMyCrossPlatformProductSummaryReader,
+        build_cross_platform_product_summary,
+    )
+    from src.invoice_app.services.market_context import resolve_market_context
+    from src.invoice_app.services.shopee_full_order_adapter import (
+        FullOrderCurrentItem,
+        FullOrderCurrentOrder,
+    )
+
+    class ForbiddenLegacyGateway:
+        requested_tabs = []
+
+        def read_tabs(self, *_args, **_kwargs):
+            raise AssertionError("Payout Product Summary must not read Invoice tabs.")
+
+    class StatementRepository:
+        calls = 0
+
+        def reporting_statement_data_rows(self):
+            self.calls += 1
+            return (
+                tuple(
+                    _sheet_row(
+                        STATEMENT_DATA_HEADERS,
+                        record_type="ORDER",
+                        platform=persisted_platform,
+                        validation_status="PASSED",
+                        commit_status="COMMITTED",
+                        order_id="SAME-ID",
+                        payout_completed_date="2026-09-08",
+                    )
+                ),
+                tuple(
+                    _sheet_row(
+                        STATEMENT_DATA_HEADERS,
+                        record_type="SKU",
+                        platform=persisted_platform,
+                        validation_status="PASSED",
+                        commit_status="COMMITTED",
+                        order_id="SAME-ID",
+                        payout_completed_date="2026-09-08",
+                    )
+                ),
+            )
+
+    class FullOrderRepository:
+        calls = 0
+
+        def read_snapshot(self):
+            self.calls += 1
+            return FullOrderCurrentSnapshot(
+                orders=(
+                    FullOrderCurrentOrder(
+                        market=market,
+                        order_id="SAME-ID",
+                        order_status="Completed",
+                        order_created_date=date(2026, 9, 1),
+                        source_file="current.xlsx",
+                        snapshot_hash="a" * 64,
+                        last_synced_at=datetime(2026, 10, 28, tzinfo=timezone.utc),
+                    ),
+                ),
+                items=(
+                    FullOrderCurrentItem(
+                        market=market,
+                        order_id="SAME-ID",
+                        item_index=0,
+                        source_parent_sku="PARENT",
+                        source_seller_sku="SOURCE-SKU",
+                        resolved_seller_sku="RESOLVED-SKU",
+                        nav="NAV-1",
+                        product_name="Full Order Product",
+                        variation="Variant",
+                        quantity=2,
+                        unit_price=Decimal("7.50"),
+                        product_subtotal=Decimal("14.00"),
+                        return_refund_status="",
+                        resolve_sku="RESOLVE-SKU",
+                    ),
+                ),
+            )
+
+    gateway = ForbiddenLegacyGateway()
+    statement_repository = StatementRepository()
+    full_order_repository = FullOrderRepository()
+    reader = PostgresMyCrossPlatformProductSummaryReader(
+        spreadsheet_id="legacy-source-is-not-a-product-summary-authority",
+        gateway=gateway,
+        statement_repository=statement_repository,
+        full_order_repository=full_order_repository,
+        market_context=resolve_market_context(market),
+    )
+
+    payout = build_cross_platform_product_summary(
+        reader.load_payout_snapshot(),
+        platform=platform,
+        date_type=CrossPlatformDateType.PAYOUT,
+        from_date=date(2026, 9, 8),
+        to_date=date(2026, 9, 8),
+    )
+    created = build_cross_platform_product_summary(
+        reader.load_order_created_snapshot(),
+        platform=platform,
+        date_type=CrossPlatformDateType.ORDER_CREATED,
+        from_date=date(2026, 9, 1),
+        to_date=date(2026, 9, 1),
+    )
+
+    assert gateway.requested_tabs == []
+    assert statement_repository.calls == 1
+    assert full_order_repository.calls == 2
+    assert [(item.order_id, item.payout_completed_date) for item in payout.source_items] == [
+        ("SAME-ID", date(2026, 9, 8))
+    ]
+    assert payout.product_rows == created.product_rows
+    assert payout.source_items[0].resolve_sku == "RESOLVE-SKU"
+
+
+def test_payout_postgres_reader_fails_closed_for_missing_full_order_coverage():
+    from src.invoice_app.repositories.shopee_full_order_current_repository import (
+        FullOrderCurrentSnapshot,
+    )
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
+        PostgresMyCrossPlatformProductSummaryReader,
+    )
+
+    class StatementRepository:
+        def reporting_statement_data_rows(self):
+            return (
+                tuple(
+                    _sheet_row(
+                        STATEMENT_DATA_HEADERS,
+                        record_type="ORDER",
+                        platform="Shopee",
+                        validation_status="PASSED",
+                        commit_status="COMMITTED",
+                        order_id="MISSING-FULL-ORDER",
+                        payout_completed_date="2026-09-08",
+                    )
+                ),
+            )
+
+    class EmptyFullOrderRepository:
+        def read_snapshot(self):
+            return FullOrderCurrentSnapshot((), ())
+
+    reader = PostgresMyCrossPlatformProductSummaryReader(
+        spreadsheet_id="legacy-source-is-not-a-product-summary-authority",
+        statement_repository=StatementRepository(),
+        full_order_repository=EmptyFullOrderRepository(),
+    )
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="incomplete Full Order coverage"):
+        reader.load_payout_snapshot()
+
+
+def test_payout_postgres_reader_fails_closed_for_cross_market_statement_rows():
+    from src.invoice_app.repositories.shopee_full_order_current_repository import (
+        FullOrderCurrentSnapshot,
+    )
+    from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
+        PostgresMyCrossPlatformProductSummaryReader,
+    )
+
+    class CrossMarketStatementRepository:
+        def reporting_statement_data_rows(self):
+            return (
+                tuple(
+                    _sheet_row(
+                        STATEMENT_DATA_HEADERS,
+                        record_type="ORDER",
+                        platform="Shopee SG",
+                        validation_status="PASSED",
+                        commit_status="COMMITTED",
+                        order_id="SAME-ID",
+                        payout_completed_date="2026-09-08",
+                    )
+                ),
+            )
+
+    class EmptyFullOrderRepository:
+        def read_snapshot(self):
+            return FullOrderCurrentSnapshot((), ())
+
+    reader = PostgresMyCrossPlatformProductSummaryReader(
+        spreadsheet_id="legacy-source-is-not-a-product-summary-authority",
+        statement_repository=CrossMarketStatementRepository(),
+        full_order_repository=EmptyFullOrderRepository(),
+    )
+
+    with pytest.raises(CrossPlatformProductSummaryError, match="Statement read crossed"):
+        reader.load_payout_snapshot()
+
+
 def test_order_created_date_uses_explicit_current_rows_without_payout_evidence():
     from src.invoice_app.services.cross_platform_product_summary import (
         CrossPlatformDateType,
@@ -792,6 +1153,7 @@ def _item(
 
 def test_payout_date_options_are_platform_linked_and_ordinary_range_filters_before_aggregation():
     from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
         CrossPlatformReportingSnapshot,
         build_cross_platform_product_summary,
     )
@@ -821,8 +1183,9 @@ def test_payout_date_options_are_platform_linked_and_ordinary_range_filters_befo
     ]
 
 
-def test_persisted_promotion_facts_allocate_amount_without_product_master_lookup():
+def test_product_summary_requires_the_persisted_full_order_subtotal_without_allocation():
     from src.invoice_app.services.cross_platform_product_summary import (
+        CrossPlatformProductSummaryError,
         CrossPlatformReportingSnapshot,
         build_cross_platform_product_summary,
     )
@@ -834,12 +1197,8 @@ def test_persisted_promotion_facts_allocate_amount_without_product_master_lookup
         )
     )
 
-    summary = build_cross_platform_product_summary(snapshot, platform="Shopee MY")
-
-    assert [(row.sku_code, row.original_sales, row.discount_amount, row.amount) for row in summary.product_rows] == [
-        ("SKU-10", Decimal("10.00"), Decimal("3.33"), Decimal("6.67")),
-        ("SKU-20", Decimal("20.00"), Decimal("6.67"), Decimal("13.33")),
-    ]
+    with pytest.raises(CrossPlatformProductSummaryError, match="Full Order Current has no Product Subtotal"):
+        build_cross_platform_product_summary(snapshot, platform="Shopee MY")
 
 
 def test_invalid_payout_range_has_no_report():

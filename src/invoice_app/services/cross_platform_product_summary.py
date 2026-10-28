@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
@@ -48,6 +48,7 @@ from src.invoice_app.services.product_summary_identity import (
 from src.invoice_app.services.market_context import (
     CROSS_PLATFORM_MARKET_CONTEXTS,
     CROSS_PLATFORM_OPTIONS,
+    MarketContext,
     SHOPEE_MY,
     resolve_market_context,
 )
@@ -225,48 +226,90 @@ class GoogleSheetsCrossPlatformProductSummaryReader:
 
 
 class PostgresMyCrossPlatformProductSummaryReader:
-    """MY reporting reader with PostgreSQL Statement and Full Order authorities.
+    """Market-bound reader with separate Order-Created and Payout authorities.
 
-    Invoice-backed financial rows retain their separately approved source while
-    Current order facts are always read through the explicitly selected backend.
+    Order-Created and Payout reporting read only the selected market's
+    PostgreSQL Full Order snapshot. The legacy Invoice-backed snapshot remains
+    available only through :meth:`load_snapshot` for non-Product-Summary
+    compatibility consumers that have not yet migrated.
     """
 
     def __init__(
         self,
         *,
         spreadsheet_id: str,
-        gateway: CrossPlatformReportingGateway,
         statement_repository: PostgresStatementRepository,
         full_order_repository: FullOrderCurrentReader,
+        gateway: CrossPlatformReportingGateway | None = None,
+        legacy_gateway_factory: Callable[[], CrossPlatformReportingGateway] | None = None,
+        market_context: MarketContext = SHOPEE_MY,
     ) -> None:
         if not spreadsheet_id.strip():
             raise ValueError("spreadsheet_id must not be blank.")
+        if gateway is not None and legacy_gateway_factory is not None:
+            raise ValueError("Configure either gateway or legacy_gateway_factory, not both.")
         self._spreadsheet_id = spreadsheet_id.strip()
         self._gateway = gateway
+        self._legacy_gateway_factory = legacy_gateway_factory
         self._statement_repository = statement_repository
         self._full_order_repository = full_order_repository
+        self._market_context = resolve_market_context(market_context)
+
+    def load_order_created_snapshot(self) -> CrossPlatformReportingSnapshot:
+        """Load the Full Order-only authority for Order-Created reporting.
+
+        This deliberately does not construct or read the legacy Invoice gateway,
+        and does not access Statement data: neither source is an Order-Created
+        Product Summary authority.
+        """
+
+        current = self._read_current_snapshot()
+        _require_snapshot_market(current, self._market_context)
+        return CrossPlatformReportingSnapshot(
+            eligible_items=(),
+            order_created_items=_full_order_current_reporting_items_from_snapshot(current),
+        )
+
+    def load_payout_snapshot(self) -> CrossPlatformReportingSnapshot:
+        """Load Statement-selected Full Order items for Payout Product Summary.
+
+        Statement ``ORDER`` rows determine only the market-scoped payout date
+        and selected order IDs.  Full Order remains the sole product/item
+        authority, so this path neither constructs nor reads the legacy Invoice
+        gateway and never allocates order-level settlement components to items.
+        """
+
+        payout_dates = _committed_payout_dates_from_statement_rows(
+            self._statement_repository.reporting_statement_data_rows(),
+            market_context=self._market_context,
+        )
+        current = self._read_current_snapshot()
+        _require_snapshot_market(current, self._market_context)
+        return CrossPlatformReportingSnapshot(
+            eligible_items=_full_order_current_reporting_items_from_snapshot(
+                current,
+                payout_dates=payout_dates,
+            ),
+        )
 
     def load_snapshot(self) -> CrossPlatformReportingSnapshot:
+        """Load the legacy Payout Product Summary source contract unchanged."""
+
         non_statement_tabs = (
             INVOICE_ORDERS_TAB,
             INVOICE_ITEMS_TAB,
         )
         try:
-            values = dict(self._gateway.read_tabs(self._spreadsheet_id, non_statement_tabs))
+            values = dict(
+                self._legacy_gateway().read_tabs(self._spreadsheet_id, non_statement_tabs)
+            )
         except HistoricalInvoiceStorageError:
             raise
         except Exception as error:
             raise HistoricalInvoiceStorageError(
                 "Consolidated Product Summary source snapshot read failed."
             ) from error
-        try:
-            current = self._full_order_repository.read_snapshot()
-        except HistoricalInvoiceStorageError:
-            raise
-        except Exception as error:
-            raise HistoricalInvoiceStorageError(
-                "Consolidated Product Summary Full Order Current read failed."
-            ) from error
+        current = self._read_current_snapshot()
         values[SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB] = [
             list(SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS),
             *[list(_serialize_order(row)) for row in current.orders],
@@ -279,6 +322,25 @@ class PostgresMyCrossPlatformProductSummaryReader:
             list(row) for row in self._statement_repository.reporting_statement_data_rows()
         ]
         return build_cross_platform_reporting_snapshot(values)
+
+    def _legacy_gateway(self) -> CrossPlatformReportingGateway:
+        if self._gateway is not None:
+            return self._gateway
+        if self._legacy_gateway_factory is not None:
+            return self._legacy_gateway_factory()
+        raise HistoricalInvoiceStorageError(
+            "Payout Product Summary legacy Invoice source is not configured."
+        )
+
+    def _read_current_snapshot(self) -> FullOrderCurrentSnapshot:
+        try:
+            return self._full_order_repository.read_snapshot()
+        except HistoricalInvoiceStorageError:
+            raise
+        except Exception as error:
+            raise HistoricalInvoiceStorageError(
+                "Consolidated Product Summary Full Order Current read failed."
+            ) from error
 
 
 def build_cross_platform_reporting_snapshot(
@@ -405,11 +467,9 @@ def build_cross_platform_product_summary(
         and (from_date is None or selected_date >= from_date)
         and (to_date is None or selected_date <= to_date)
     )
-    source_items = (
-        _direct_full_order_amounts(filtered)
-        if date_type is CrossPlatformDateType.ORDER_CREATED
-        else _allocate_shopee_amounts(filtered)
-    )
+    # Both date modes use the same Full Order item facts and aggregation.
+    # Their sole difference is the authority that selected the eligible orders.
+    source_items = _direct_full_order_amounts(filtered)
     return CrossPlatformProductSummary(
         platform=platform,
         date_type=date_type,
@@ -544,6 +604,56 @@ def _reporting_date_authority(
     )
 
 
+def _committed_payout_dates_from_statement_rows(
+    rows: Sequence[Sequence[Any]],
+    *,
+    market_context: MarketContext,
+) -> dict[tuple[str, str], date]:
+    """Return only this context's committed Statement ORDER payout evidence."""
+
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    payout_dates: dict[tuple[str, str], date] = {}
+    for row_number, row in enumerate(rows, start=1):
+        padded = tuple(row) + (None,) * max(0, len(STATEMENT_DATA_HEADERS) - len(row))
+        if len(padded) > len(STATEMENT_DATA_HEADERS) and any(
+            _text(value) for value in padded[len(STATEMENT_DATA_HEADERS):]
+        ):
+            raise CrossPlatformProductSummaryError(
+                f"PostgreSQL Statement row {row_number} exceeds the locked schema."
+            )
+        if _text(padded[positions["validation_status"]]) != "PASSED":
+            continue
+        if _text(padded[positions["commit_status"]]) != "COMMITTED":
+            continue
+        if _text(padded[positions["record_type"]]) != "ORDER":
+            continue
+        platform = _text(padded[positions["platform"]])
+        order_id = _text(padded[positions["order_id"]])
+        if platform != market_context.persisted_platform:
+            raise CrossPlatformProductSummaryError(
+                "Consolidated Product Summary Statement read crossed the "
+                f"{market_context.display_name} market boundary."
+            )
+        if not order_id:
+            raise CrossPlatformProductSummaryError(
+                f"PostgreSQL Statement row {row_number} has no committed ORDER identity."
+            )
+        payout_date = _optional_iso_date(
+            padded[positions["payout_completed_date"]],
+            tab="PostgreSQL Statement_Data",
+            row_number=row_number,
+            field="payout_completed_date",
+        )
+        if payout_date is not None:
+            _set_consistent_date(
+                payout_dates,
+                (market_context.key.value, order_id),
+                payout_date,
+                source="PostgreSQL Statement_Data",
+            )
+    return payout_dates
+
+
 def _reporting_order_identity(market: str, order_id: str) -> tuple[str, str]:
     try:
         context = resolve_market_context(market)
@@ -610,10 +720,76 @@ def _full_order_current_reporting_items(
             ],
         }
     )
+    return _full_order_current_reporting_items_from_snapshot(current)
+
+
+def _require_snapshot_market(
+    current: FullOrderCurrentSnapshot,
+    market_context: MarketContext,
+) -> None:
+    """Fail closed if a market-bound Full Order repository leaks another market."""
+
+    expected_market = market_context.key.value
+    observed_markets = {
+        row.market for row in (*current.orders, *current.items)
+    }
+    if observed_markets - {expected_market}:
+        raise CrossPlatformProductSummaryError(
+            "Consolidated Product Summary Full Order Current read crossed the "
+            f"{market_context.display_name} market boundary."
+        )
+
+
+def _full_order_current_reporting_items_from_snapshot(
+    current: FullOrderCurrentSnapshot,
+    *,
+    payout_dates: Mapping[tuple[str, str], date] | None = None,
+) -> tuple[CommittedReportingItem, ...]:
+    """Map an already-selected Full Order snapshot to common reporting facts."""
+
     orders = {(order.market, order.order_id): order for order in current.orders}
+    items_by_order = current.items_by_identity()
+    if payout_dates is not None:
+        missing_orders = sorted(set(payout_dates) - set(orders))
+        missing_items = sorted(
+            identity
+            for identity in payout_dates
+            if identity in orders and not items_by_order.get(identity)
+        )
+        if missing_orders or missing_items:
+            details = []
+            if missing_orders:
+                details.append(
+                    "orders=" + ", ".join(
+                        f"{market}/{order_id}" for market, order_id in missing_orders[:5]
+                    )
+                )
+            if missing_items:
+                details.append(
+                    "items=" + ", ".join(
+                        f"{market}/{order_id}" for market, order_id in missing_items[:5]
+                    )
+                )
+            raise CrossPlatformProductSummaryError(
+                "Committed Statement payout selection has incomplete Full Order coverage: "
+                + "; ".join(details)
+                + "."
+            )
     eligible: list[CommittedReportingItem] = []
     for item in current.items:
-        order = orders[(item.market, item.order_id)]
+        try:
+            order = orders[(item.market, item.order_id)]
+        except KeyError as error:
+            raise CrossPlatformProductSummaryError(
+                f"{item.order_id}/{item.item_index}: Full Order Current item has no order."
+            ) from error
+        payout_date = (
+            None
+            if payout_dates is None
+            else payout_dates.get((item.market, item.order_id))
+        )
+        if payout_dates is not None and payout_date is None:
+            continue
         if _is_excluded_order_created_status(order.order_status):
             continue
         context = resolve_market_context(item.market)
@@ -644,7 +820,7 @@ def _full_order_current_reporting_items(
                 currency=context.currency_code,
                 order_id=item.order_id,
                 item_index=item.item_index,
-                payout_completed_date=None,
+                payout_completed_date=payout_date,
                 seller_sku=seller_sku,
                 nav=_text(item.nav),
                 description=_text(item.product_name),
@@ -769,56 +945,6 @@ def _cent_current_money(value: Decimal, order_id: str, item_index: int, field: s
     )
 
 
-def _allocate_shopee_amounts(
-    items: Sequence[CommittedReportingItem],
-) -> tuple[CommittedReportingItem, ...]:
-    normal: list[CommittedReportingItem] = []
-    groups: dict[tuple[str, str, str], list[CommittedReportingItem]] = defaultdict(list)
-    for item in items:
-        if item.platform not in CROSS_PLATFORM_INCLUDED_PERSISTED_PLATFORMS:
-            raise CrossPlatformProductSummaryError(
-                f"No committed reporting adapter exists for {item.platform}."
-            )
-        if item.promotion_group_id:
-            groups[(item.platform, item.order_id, item.promotion_group_id)].append(item)
-        elif item.promotion_label or item.source_group_total is not None:
-            raise CrossPlatformProductSummaryError(
-                f"{item.order_id}/{item.item_index}: promotion evidence has no group identity."
-            )
-        else:
-            if item.line_subtotal is None:
-                raise CrossPlatformProductSummaryError(
-                    f"{item.order_id}/{item.item_index}: missing persisted line_subtotal."
-                )
-            normal.append(replace(item, amount=item.line_subtotal))
-
-    result = list(normal)
-    for (_platform, _order_id, group_id), members in sorted(groups.items()):
-        totals = {item.source_group_total for item in members}
-        if None in totals or len(totals) != 1:
-            first = members[0]
-            raise CrossPlatformProductSummaryError(
-                f"{first.order_id}/{group_id}: persisted promotion total is missing or conflicting."
-            )
-        total = next(iter(totals))
-        assert total is not None
-        prices = {item.unit_price for item in members}
-        weights = (
-            tuple(item.unit_price * item.quantity for item in members)
-            if len(prices) > 1
-            else tuple(Decimal(item.quantity) for item in members)
-        )
-        tie_breaks = tuple(
-            (item.nav, item.seller_sku, item.order_id, item.item_index)
-            for item in members
-        )
-        allocations = _largest_remainder_allocations(total, weights, tie_breaks)
-        result.extend(
-            replace(item, amount=amount) for item, amount in zip(members, allocations)
-        )
-    return tuple(sorted(result, key=_source_item_sort_key))
-
-
 def _aggregate_product_rows(
     source_items: Sequence[CommittedReportingItem],
 ) -> tuple[ProductSummaryRow, ...]:
@@ -911,34 +1037,6 @@ def _tab_rows(
         if any(_text(value) for value in padded):
             result.append((row_number, padded[: len(headers)]))
     return tuple(result)
-
-
-def _largest_remainder_allocations(
-    total: Decimal,
-    weights: Sequence[Decimal],
-    tie_breaks: Sequence[tuple[str, str, str, int]],
-) -> tuple[Decimal, ...]:
-    if not weights or len(weights) != len(tie_breaks):
-        raise CrossPlatformProductSummaryError(
-            "Promotion allocation requires aligned persisted members."
-        )
-    if any(weight < 0 for weight in weights) or sum(weights) <= 0:
-        raise CrossPlatformProductSummaryError(
-            "Promotion allocation requires positive persisted weights."
-        )
-    sign = Decimal("-1") if total < 0 else Decimal("1")
-    absolute_cents = int((abs(total) / CENT).to_integral_exact())
-    total_weight = sum(weights, Decimal("0"))
-    exact = tuple(Decimal(absolute_cents) * weight / total_weight for weight in weights)
-    floors = [int(value.to_integral_value(rounding=ROUND_FLOOR)) for value in exact]
-    remaining = absolute_cents - sum(floors)
-    ranking = sorted(
-        range(len(weights)),
-        key=lambda index: (-(exact[index] - floors[index]), tie_breaks[index]),
-    )
-    for index in ranking[:remaining]:
-        floors[index] += 1
-    return tuple(sign * Decimal(value) * CENT for value in floors)
 
 
 def _cent_money(
