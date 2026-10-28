@@ -186,6 +186,13 @@ rules. It preserves the source models and immutable evidence ledgers.
   drift invalidates or safely recomputes the plan. Google Sheets is not a
   database transaction, so retain staged write, exact readback, and recovery
   guarantees without claiming cross-sheet transactional atomicity.
+- For duplicate/evidence comparison only, a dynamic `SERVICE_FEE_DETAIL` fact
+  may be equivalent to an absent counterpart only when it is exactly zero, the
+  other parsed source proves that its complete Service Fee header set omits that
+  exact dynamic column, and every other bundle fact remains equal. This is not
+  a general missing-equals-zero rule: nonzero facts, present-header missing
+  values, ordinary components, and unknown committed header provenance remain
+  fail-closed. Persisted component facts are never rewritten or removed.
 - For classifier-bound Statement money only, numeric `Decimal` equality is
   authoritative: insignificant decimal scale and signed zero are not evidence
   differences (`0` = `0.00`, `107.4` = `107.40`). Preserve NULL and blank

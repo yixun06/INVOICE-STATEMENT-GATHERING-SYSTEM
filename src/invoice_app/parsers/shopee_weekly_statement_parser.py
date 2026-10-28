@@ -136,6 +136,10 @@ class ParsedShopeeStatement:
     summary_lines: tuple[StatementSummaryLine, ...] = ()
     source_contract_key: str = SHOPEE_MY_STATEMENT_SOURCE.key
     income_component_columns: tuple[str, ...] = INCOME_COMPONENT_COLUMNS
+    # ``None`` deliberately means the source header set was not captured.  It
+    # is distinct from an empty tuple, which is evidence that a parsed source
+    # had no dynamic Service Fee component headers.
+    service_fee_component_columns: tuple[str, ...] | None = None
 
     @property
     def order_rows(self) -> tuple[SettlementIncomeRow, ...]:
@@ -259,7 +263,9 @@ def parse_shopee_statement(
         )
         issues: list[SourceValueIssue] = []
         parsed_income = _parse_income_rows(income_rows, issues, contract)
-        parsed_service = _parse_service_fee_rows(service_rows, issues)
+        parsed_service, service_fee_component_columns = _parse_service_fee_rows(
+            service_rows, issues
+        )
         parsed_shipping = (
             _parse_shipping_rows(shipping_rows, issues)
             if shipping_rows is not None else []
@@ -297,6 +303,7 @@ def parse_shopee_statement(
         summary_lines=tuple(summary_lines),
         source_contract_key=contract.key,
         income_component_columns=contract.income_component_columns,
+        service_fee_component_columns=service_fee_component_columns,
     )
 
 
@@ -771,7 +778,7 @@ def _is_income_group_heading(row: tuple[Any, ...]) -> bool:
 
 def _parse_service_fee_rows(
     rows: list[tuple[Any, ...]], issues: list[SourceValueIssue]
-) -> list[ServiceFeeDetail]:
+) -> tuple[list[ServiceFeeDetail], tuple[str, ...]]:
     header_index, positions = _require_header(
         rows, SERVICE_FEE_REQUIRED_COLUMNS, "Service Fee Details"
     )
@@ -803,7 +810,9 @@ def _parse_service_fee_rows(
             components=components,
             source_row_number=row_number,
         ))
-    return parsed
+    # Keep the complete header set separately from per-row values.  A missing
+    # value in a present header is not evidence that the header was absent.
+    return parsed, tuple(header for _, header in component_columns)
 
 def _parse_shipping_rows(
     rows: list[tuple[Any, ...]], issues: list[SourceValueIssue]

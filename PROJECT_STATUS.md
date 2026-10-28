@@ -90,6 +90,14 @@ data remains read-only comparison/audit evidence.
 
 ### POSTGRES_SG_STATEMENT_POSTGRESQL - IMPLEMENTED / TESTED / REPLAY VERIFIED / LOCAL CHECKPOINTED / NOT PUSHED
 
+- SG Statement dynamic zero `SERVICE_FEE_DETAIL` overlap handling is **CLOSED /
+  REAL SMOKE VERIFIED**. The mixed 30/08/2026-05/09/2026 source classified 427
+  orders as 113 NEW and 314 exact duplicates, with 0 conflicts/unsafe and all
+  113 NEW orders covered by Full Order. The previously failing
+  `Income.released.sg.20260929_20261006.xlsx` source classified 709 orders as
+  already imported (910 SKU rows), with zero additional writes. Historical
+  PostgreSQL facts were not deleted or rewritten.
+
 - SG `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`,
   and `Order_Adjustments` now use the shared market-scoped PostgreSQL
   repository when the explicit SG Statement backend is `postgresql`. Data

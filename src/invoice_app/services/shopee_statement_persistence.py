@@ -8,7 +8,7 @@ contract against authoritative persisted state.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -218,6 +218,11 @@ class StatementCommitState:
     committed_order_evidence: tuple[CommittedOrderSettlementEvidence, ...] = ()
     committed_statement_rows: tuple[tuple[str, ...], ...] = ()
     committed_financial_component_rows: tuple[tuple[str, ...], ...] = ()
+    # Header presence is optional historical provenance.  A missing mapping
+    # entry is intentionally unknown, not evidence of an absent header.
+    committed_service_fee_component_headers_by_batch: Mapping[
+        str, tuple[str, ...]
+    ] = field(default_factory=dict)
 
 
 class StatementCommitOutcome(str, Enum):
@@ -979,6 +984,14 @@ _ORDER_BUNDLE_MONETARY_FIELDS = frozenset(
 )
 _COMPONENT_BUNDLE_MONETARY_FIELDS = frozenset({"component_amount"})
 
+_EvidenceBundle = tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]
+
+
+@dataclass(frozen=True)
+class _CommittedBundleCandidate:
+    bundle: _EvidenceBundle
+    service_fee_component_headers: frozenset[str] | None
+
 
 def _classify_order_bundles(
     plan: StatementCommitPlan,
@@ -999,7 +1012,11 @@ def _classify_order_bundles(
         state.committed_statement_rows,
         state.committed_financial_component_rows,
         persisted_platform=persisted_platform,
+        service_fee_component_headers_by_batch=(
+            state.committed_service_fee_component_headers_by_batch
+        ),
     )
+    incoming_service_fee_component_headers = _service_fee_component_headers(plan.statement)
     new: list[str] = []
     duplicate: list[str] = []
     conflict: list[str] = []
@@ -1013,12 +1030,26 @@ def _classify_order_bundles(
             unsafe.append(order_id)
         elif not candidates:
             new.append(order_id)
-        elif all(candidate == source_bundle for candidate in candidates):
+        elif all(
+            _bundles_are_semantically_equivalent(
+                source_bundle,
+                candidate,
+                incoming_service_fee_component_headers=incoming_service_fee_component_headers,
+            )
+            for candidate in candidates
+        ):
             duplicate.append(order_id)
-        elif any(candidate == source_bundle for candidate in candidates):
+        elif any(
+            _bundles_are_semantically_equivalent(
+                source_bundle,
+                candidate,
+                incoming_service_fee_component_headers=incoming_service_fee_component_headers,
+            )
+            for candidate in candidates
+        ):
             unsafe.append(order_id)
         elif any(
-            _bundle_shape(candidate) != _bundle_shape(source_bundle)
+            _bundle_shape(candidate.bundle) != _bundle_shape(source_bundle)
             for candidate in candidates
         ):
             unsafe.append(order_id)
@@ -1030,7 +1061,7 @@ def _classify_order_bundles(
 def _bundle_map(
     rows: Iterable[tuple[str, ...]],
     components: Iterable[tuple[str, ...]],
-) -> dict[str, tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]]:
+) -> dict[str, _EvidenceBundle]:
     data_positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
     component_positions = {
         name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
@@ -1115,7 +1146,8 @@ def _committed_bundle_map(
     components: Iterable[tuple[str, ...]],
     *,
     persisted_platform: str,
-) -> dict[str, tuple[tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]], ...]]:
+    service_fee_component_headers_by_batch: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[_CommittedBundleCandidate, ...]]:
     data_positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
     component_positions = {
         name: index for index, name in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
@@ -1136,13 +1168,97 @@ def _committed_bundle_map(
             batch_components.setdefault(
                 row[component_positions["statement_batch_id"]], []
             ).append(row)
-    result: dict[str, list[tuple[Counter[tuple[str, ...]], Counter[tuple[str, ...]]]]] = {}
+    result: dict[str, list[_CommittedBundleCandidate]] = {}
     for batch_id in batch_rows.keys() | batch_components.keys():
+        header_evidence = service_fee_component_headers_by_batch.get(batch_id)
+        normalized_headers = (
+            frozenset(header.strip() for header in header_evidence if header.strip())
+            if header_evidence is not None
+            else None
+        )
         for order_id, bundle in _bundle_map(
             batch_rows.get(batch_id, ()), batch_components.get(batch_id, ())
         ).items():
-            result.setdefault(order_id, []).append(bundle)
+            result.setdefault(order_id, []).append(
+                _CommittedBundleCandidate(bundle, normalized_headers)
+            )
     return {order_id: tuple(bundles) for order_id, bundles in result.items()}
+
+
+def _service_fee_component_headers(
+    statement: ParsedShopeeWeeklyStatement,
+) -> frozenset[str] | None:
+    headers = statement.service_fee_component_columns
+    if headers is None:
+        return None
+    return frozenset(header.strip() for header in headers if header.strip())
+
+
+def _bundles_are_semantically_equivalent(
+    incoming: _EvidenceBundle,
+    committed: _CommittedBundleCandidate,
+    *,
+    incoming_service_fee_component_headers: frozenset[str] | None,
+) -> bool:
+    """Compare complete bundles without turning general missing evidence into zero.
+
+    A source-export schema can legitimately drop a dynamic Service Fee column.
+    It is equivalent only to the opposite source's zero-valued detail fact when
+    that source's complete header set proves the column is absent.  No stored
+    fact is changed, and unknown committed header provenance remains strict.
+    """
+
+    incoming_rows, incoming_components = incoming
+    committed_rows, committed_components = committed.bundle
+    if incoming_rows != committed_rows:
+        return False
+    return _component_multisets_are_semantically_equivalent(
+        incoming_components,
+        committed_components,
+        incoming_service_fee_component_headers=incoming_service_fee_component_headers,
+        committed_service_fee_component_headers=committed.service_fee_component_headers,
+    )
+
+
+def _component_multisets_are_semantically_equivalent(
+    incoming: Counter[tuple[str, ...]],
+    committed: Counter[tuple[str, ...]],
+    *,
+    incoming_service_fee_component_headers: frozenset[str] | None,
+    committed_service_fee_component_headers: frozenset[str] | None,
+) -> bool:
+    if incoming == committed:
+        return True
+    incoming_remaining = incoming.copy()
+    committed_remaining = committed.copy()
+    _discard_proven_absent_dynamic_service_fee_zeroes(
+        committed_remaining,
+        incoming_service_fee_component_headers,
+    )
+    _discard_proven_absent_dynamic_service_fee_zeroes(
+        incoming_remaining,
+        committed_service_fee_component_headers,
+    )
+    return incoming_remaining == committed_remaining
+
+
+def _discard_proven_absent_dynamic_service_fee_zeroes(
+    components: Counter[tuple[str, ...]],
+    opposite_service_fee_component_headers: frozenset[str] | None,
+) -> None:
+    """Remove only zero Service Fee detail facts whose opposite header is proven absent."""
+
+    if opposite_service_fee_component_headers is None:
+        return
+    for component in tuple(components):
+        record_type, source_sheet, _, _, component_name, amount, *_ = component
+        if (
+            record_type == "SERVICE_FEE_DETAIL"
+            and source_sheet == "Service Fee Details"
+            and component_name not in opposite_service_fee_component_headers
+            and _canonicalize_bundle_monetary_value(amount) == "0"
+        ):
+            del components[component]
 
 
 def _bundle_shape(
