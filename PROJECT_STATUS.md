@@ -12,6 +12,38 @@
 InvoiceGather is a reconciliation-and-evidence system. Full Order Current and
 committed Statement are the active operational authorities; legacy Invoice/PDF
 data remains read-only comparison/audit evidence.
+### ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED
+
+- A shared read-only `OrderFinancialProjection` now composes the market-bound
+  PostgreSQL Full Order Current repository, a Statement-only committed
+  financial reader, and committed Order Adjustment reader for one exact
+  `MarketContext + order_id`. It exposes Full Order date/status, committed
+  Statement payout/released/product-price facts, raw native financial
+  components plus deterministic native-name totals, refund components, and
+  independent adjustment events/totals. It does not define a net-income
+  formula, allocate order-level money to items, or select/filter consumer UI
+  policy.
+- A Statement ORDER without the matching market-bound Full Order Current row
+  fails closed. A Full Order with no committed Statement is explicit as
+  `MISSING_STATEMENT`, without any Invoice/PDF fallback. MY/SG platform labels
+  remain normalized only by `MarketContext`; cross-market readers fail closed.
+  The new layer has no Product Master, Invoice_Orders, Invoice_Items, or Google
+  Sheets Invoice-tab runtime dependency. UAT2/business/schema write delta: 0.
+- Authority-boundary verification moved all Full Order snapshot access,
+  `order_created_date`, and `order_status` composition out of
+  `shopee_statement_financial_read.py`. That reader now returns only committed
+  native Statement facts; `OrderFinancialProjection` performs the exact-market
+  Full Order/Statement join and owns its `MISSING_STATEMENT` state. SG Analysis
+  retains the same visible behavior while consuming `OrderFinancialProjection`,
+  so it does not recreate a second Full Order/Statement composite.
+- Focused projection, Statement-financial-read, and SG Analysis regressions
+  passed (14 tests); changed modules compile and the diff check passes. Code
+  checkpoint `cf80bd1` (`feat: add order financial projection`) contains only
+  the projection, boundary cleanup, and SG compatibility wiring/tests. The
+  requested real PostgreSQL smoke remains blocked before a query because
+  `INVOICEGATHER_PG_USER` and `INVOICEGATHER_PG_PASSWORD` are not present in
+  this Codex environment; no Google Sheets fallback was attempted. Business
+  writes: 0. Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
 
 ## Current System State
 
@@ -688,6 +720,20 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-28; Task: close OrderFinancialProjection authority boundary;
+  State: `ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED`.
+  Outcome: the Statement reader is semantically Statement-only and has no Full
+  Order access. `OrderFinancialProjection` is the only Full Order/Statement
+  composition boundary; it returns exactly one projection per `(market,
+  order_id)`, preserves native component multiplicity without item allocation,
+  keeps adjustments separate, and has no Net Income or Invoice/Google Sheets
+  fallback. SG Analysis consumes that projection rather than joining the two
+  authorities itself. Verification: 14 focused projection/Statement-reader/
+  SG-Analysis tests passed; `py_compile` and staged diff check passed; staged
+  secret scan found no credential material. Code checkpoint: `cf80bd1`
+  (`feat: add order financial projection`). Business write delta: 0; schema
+  delta: 0; push: **NOT PUSHED**; deployment: **NOT VERIFIED**.
 
 - Date: 2026-10-28; Task: close Consolidated Product Summary PostgreSQL
   cutover; State: `CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED /
