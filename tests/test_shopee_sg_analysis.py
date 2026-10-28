@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -139,6 +140,26 @@ def test_sg_analysis_delegates_cross_authority_composition_to_order_financial_pr
     source = (Path(__file__).resolve().parents[1] / "src" / "invoice_app" / "services" / "shopee_sg_analysis.py").read_text(encoding="utf-8")
     assert "read_order_financial_projections(" in source
     assert "read_committed_statement_financials(" not in source
+
+
+def test_sg_analysis_uses_projection_status_and_order_date_for_order_rows():
+    baseline = _snapshot()
+    changed_current = FullOrderCurrentSnapshot(
+        (
+            _order("SG-SETTLED", date(2026, 8, 1)),
+            _order("SG-PENDING", date(2026, 8, 1)),
+        ),
+        baseline.current.items,
+    )
+    report = build_shopee_sg_analysis(
+        replace(baseline, current=changed_current),
+        SgAnalysisFilters(SgAnalysisDateBasis.ORDER_CREATED, date(2026, 9, 2), date(2026, 9, 3)),
+    )
+
+    assert [(row.order_id, row.order_created_date, row.order_status) for row in report.rows] == [
+        ("SG-PENDING", date(2026, 9, 3), "Completed"),
+        ("SG-SETTLED", date(2026, 9, 2), "Completed"),
+    ]
 
 
 def test_sg_component_rows_and_adjustments_are_preserved_separately_from_released_amount():

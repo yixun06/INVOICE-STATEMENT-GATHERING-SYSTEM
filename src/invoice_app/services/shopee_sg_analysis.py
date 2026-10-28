@@ -74,8 +74,7 @@ class ShopeeSgAnalysisSnapshot:
     def available_dates(self, basis: SgAnalysisDateBasis) -> tuple[date, ...]:
         if basis is SgAnalysisDateBasis.ORDER_CREATED:
             return tuple(sorted({
-                order.order_created_date for order in self.current.orders
-                if order.market == SHOPEE_SG.key.value
+                projection.order_created_date for projection in self.projections
             }))
         return tuple(sorted({
             projection.payout_completed_date for projection in self.projections
@@ -161,11 +160,6 @@ def build_shopee_sg_analysis(
 ) -> ShopeeSgAnalysis:
     """Build a read-only order-level report without Invoice/PDF or PM facts."""
 
-    orders = {
-        _normalized_order_id(order.order_id): order
-        for order in snapshot.current.orders
-        if order.market == SHOPEE_SG.key.value
-    }
     quantities: dict[str, int] = defaultdict(int)
     subtotals: dict[str, Decimal] = defaultdict(lambda: ZERO_MONEY)
     for item in snapshot.current.items:
@@ -181,8 +175,8 @@ def build_shopee_sg_analysis(
     }
     if filters.date_basis is SgAnalysisDateBasis.ORDER_CREATED:
         candidates = (
-            order_id for order_id, order in orders.items()
-            if filters.from_date <= order.order_created_date <= filters.to_date
+            order_id for order_id, projection in financial.items()
+            if filters.from_date <= projection.order_created_date <= filters.to_date
         )
     else:
         candidates = (
@@ -194,21 +188,16 @@ def build_shopee_sg_analysis(
 
     rows = []
     for order_id in sorted(candidates):
-        order = orders[order_id]
-        projection = financial.get(order_id)
+        projection = financial[order_id]
         rows.append(SgAnalysisOrderRow(
             order_id=order_id,
-            order_status=order.order_status,
-            order_created_date=order.order_created_date,
-            payout_completed_date=None if projection is None else projection.payout_completed_date,
+            order_status=projection.order_status,
+            order_created_date=projection.order_created_date,
+            payout_completed_date=projection.payout_completed_date,
             quantity=quantities[order_id],
             product_subtotal=subtotals[order_id],
-            settlement_state=(
-                OrderFinancialProjectionState.MISSING_STATEMENT
-                if projection is None
-                else projection.settlement_state
-            ),
-            released_amount=None if projection is None else projection.released_amount,
+            settlement_state=projection.settlement_state,
+            released_amount=projection.released_amount,
         ))
     return ShopeeSgAnalysis(
         filters,
