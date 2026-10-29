@@ -1,482 +1,424 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
-from src.invoice_app.domain.historical_invoice import (
-    CanonicalInvoiceItem,
-    CanonicalInvoiceOrder,
+from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment, EvidenceStatus
+from src.invoice_app.repositories.shopee_full_order_current_repository import FullOrderCurrentSnapshot
+from src.invoice_app.services.google_sheets_statement_writer import (
+    CommittedStatementFinancialComponentFact,
+    CommittedStatementFinancialFacts,
 )
-from src.invoice_app.services.shopee_my_live_analysis import (
-    AnalysisFilters,
-    DateBasis,
-    DateRangeError,
-    GroupBy,
-    PayoutStatus,
-    ShopeeMyAnalyticsError,
-    ShopeeMyAnalyticsSnapshot,
-    build_shopee_my_live_analysis,
-    compare_kpi,
-    load_shopee_my_analytics_snapshot,
-    load_shopee_my_analytics_snapshot_from_reporting_snapshot,
+from src.invoice_app.services.shopee_analysis import (
+    AnalysisDateBasis,
+    ReconciliationStatus,
+    ShopeeAnalysisError,
+    ShopeeAnalysisFilters,
+    ShopeeAnalysisPresentation,
+    ShopeeAnalysisSnapshot,
+    build_shopee_analysis,
+    load_shopee_analysis_snapshot,
+    available_statuses,
+    product_options,
+)
+from src.invoice_app.services.shopee_full_order_adapter import FullOrderCurrentItem, FullOrderCurrentOrder
+from src.invoice_app.services.shopee_my_live_analysis import load_shopee_my_analysis_snapshot
+from src.invoice_app.services.shopee_order_financial_projection import (
+    OrderFinancialProjection,
+    OrderFinancialProjectionState,
+)
+from src.invoice_app.services.market_context import SHOPEE_SG
+from src.invoice_app.ui.shopee_analysis_dashboard import (
+    _aggregate_trend_frame,
+    _default_trend_aggregation,
+    _financial_trend_frame,
+    _product_chart_label,
+    _product_trend_frame,
+    _reconciliation_status_frame,
+    _trend_chart,
 )
 
 
-def _order(
-    order_id: str,
-    *,
-    created: date,
-    payout: date | None = None,
-    layout: str = "NORMAL_ORDER",
-    final: str | None = "100.00",
-    refund: str | None = None,
-    platform: str = "Shopee",
-) -> CanonicalInvoiceOrder:
-    return CanonicalInvoiceOrder(
-        platform=platform,
+def _order(order_id: str = "MY-1", *, market: str = "shopee_my", status: str = "Completed") -> FullOrderCurrentOrder:
+    return FullOrderCurrentOrder(
+        market=market,
         order_id=order_id,
-        order_created_date=created,
-        payout_completed_date=payout,
-        invoice_financial_layout=layout,
-        final_amount=Decimal(final) if final is not None else None,
-        refund_amount=Decimal(refund) if refund is not None else None,
+        order_status=status,
+        order_created_date=date(2026, 10, 1),
+        source_file="full-order.csv",
+        snapshot_hash="hash",
+        last_synced_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
     )
 
 
-def _item(
-    order_id: str,
-    index: int,
-    *,
-    sku: str = "SKU-A",
-    nav: str = "300001",
-    name: str = "Organic Tea",
-    variation: str = "500g",
-    quantity: int = 1,
-    line_subtotal: str = "80.00",
-    unit_price: str = "100.00",
-    platform: str = "Shopee",
-) -> CanonicalInvoiceItem:
-    return CanonicalInvoiceItem(
-        platform=platform,
+def _item(order_id: str = "MY-1", *, market: str = "shopee_my", subtotal: str = "100.00") -> FullOrderCurrentItem:
+    return FullOrderCurrentItem(
+        market=market,
         order_id=order_id,
-        item_index=index,
-        seller_sku=sku,
-        resolved_seller_sku=sku,
-        nav=nav,
-        product_name=name,
-        variation=variation,
-        quantity=quantity,
-        unit_price=Decimal(unit_price),
-        line_subtotal=Decimal(line_subtotal),
+        item_index=0,
+        source_parent_sku="PARENT-1",
+        source_seller_sku="SKU-1",
+        resolved_seller_sku="SKU-1",
+        nav="5000064",
+        product_name="Canonical Tea",
+        variation="500g",
+        quantity=2,
+        unit_price=Decimal("55.00"),
+        product_subtotal=Decimal(subtotal),
+        return_refund_status="",
+        resolve_sku="RESOLVED-1",
     )
 
 
-def _filters(
-    *,
-    basis: DateBasis = DateBasis.ORDER_CREATED,
-    start: date = date(2026, 8, 1),
-    end: date = date(2026, 8, 31),
-    payout: PayoutStatus = PayoutStatus.ALL,
-    group_by: GroupBy = GroupBy.DAY,
-    top_n: int = 10,
-) -> AnalysisFilters:
-    return AnalysisFilters(basis, start, end, payout, group_by, top_n)
-
-
-def test_date_basis_inclusive_ranges_and_pending_membership():
-    orders = (
-        _order("START", created=date(2026, 8, 1), payout=None, final="10"),
-        _order("END", created=date(2026, 8, 31), payout=date(2026, 9, 2), final="20"),
-        _order("PAYOUT", created=date(2026, 7, 10), payout=date(2026, 8, 15), final="30"),
-    )
-    items = tuple(_item(order.order_id, 0, quantity=1, line_subtotal="1") for order in orders)
-    snapshot = ShopeeMyAnalyticsSnapshot(orders, items)
-
-    created = build_shopee_my_live_analysis(snapshot, _filters())
-    payout = build_shopee_my_live_analysis(
-        snapshot, _filters(basis=DateBasis.PAYOUT)
-    )
-
-    assert created.current_kpis.orders == 2
-    assert created.current_kpis.total_sales == Decimal("30")
-    assert payout.current_kpis.orders == 1
-    assert payout.current_kpis.total_sales == Decimal("30")
-    assert payout.filters.effective_payout_status is PayoutStatus.RELEASED
-
-
-def test_available_dates_follow_date_basis_and_payout_status_without_changing_filters():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("RELEASED", created=date(2026, 8, 2), payout=date(2026, 8, 5)),
-            _order("PENDING", created=date(2026, 8, 3), payout=None),
-        ),
-        (_item("RELEASED", 0), _item("PENDING", 0)),
-    )
-
-    assert snapshot.available_dates(DateBasis.ORDER_CREATED, PayoutStatus.ALL) == (
-        date(2026, 8, 2),
-        date(2026, 8, 3),
-    )
-    assert snapshot.available_dates(DateBasis.ORDER_CREATED, PayoutStatus.RELEASED) == (
-        date(2026, 8, 2),
-    )
-    assert snapshot.available_dates(DateBasis.ORDER_CREATED, PayoutStatus.PENDING) == (
-        date(2026, 8, 3),
-    )
-    assert snapshot.available_dates(DateBasis.PAYOUT, PayoutStatus.ALL) == (
-        date(2026, 8, 5),
+def _component(name: str, amount: str, *, record_type: str = "ORDER") -> CommittedStatementFinancialComponentFact:
+    return CommittedStatementFinancialComponentFact(
+        record_type=record_type,
+        order_id="MY-1",
+        component_name=name,
+        component_amount=Decimal(amount),
+        statement_batch_id="batch-1",
+        statement_file_hash="statement-hash",
+        statement_source_sheet="Income",
+        statement_source_row_number=10,
+        sequence_no="1",
+        payout_completed_date=date(2026, 10, 5),
     )
 
 
-def test_from_after_to_is_rejected():
-    with pytest.raises(DateRangeError, match="From Date"):
-        _filters(start=date(2026, 8, 2), end=date(2026, 8, 1))
-
-
-@pytest.mark.parametrize(
-    ("status", "expected_orders"),
-    (
-        (PayoutStatus.ALL, 2),
-        (PayoutStatus.RELEASED, 1),
-        (PayoutStatus.PENDING, 1),
-    ),
-)
-def test_created_date_payout_status_filters(status, expected_orders):
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("RELEASED", created=date(2026, 8, 2), payout=date(2026, 8, 5)),
-            _order("PENDING", created=date(2026, 8, 3), payout=None),
-        ),
-        (_item("RELEASED", 0), _item("PENDING", 0)),
+def _adjustment() -> CanonicalOrderAdjustment:
+    return CanonicalOrderAdjustment(
+        platform="Shopee",
+        linked_order_id="MY-1",
+        adjustment_type="RETURN_REFUND_AFTER_ORDER_COMPLETED",
+        adjustment_description="Return Refund Adjustment After Order Completed",
+        adjustment_reason=None,
+        adjustment_complete_date=date(2026, 10, 8),
+        adjustment_amount=Decimal("-2.00"),
+        payout_completed_date=date(2026, 10, 5),
+        statement_batch_id="batch-1",
+        statement_sequence_no="adjustment-1",
+        statement_source_filename="statement.xlsx",
+        statement_file_hash="statement-hash",
+        adjustment_event_fingerprint="event-hash",
+        evidence_status=EvidenceStatus.STATEMENT_ONLY,
     )
 
-    report = build_shopee_my_live_analysis(snapshot, _filters(payout=status))
 
-    assert report.current_kpis.orders == expected_orders
-
-
-def test_payout_date_forces_released_and_cannot_include_pending():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("RELEASED", created=date(2026, 7, 1), payout=date(2026, 8, 5)),
-            _order("PENDING", created=date(2026, 8, 5), payout=None),
-        ),
-        (_item("RELEASED", 0), _item("PENDING", 0)),
+def _snapshot(*, market: str = "shopee_my", currency: str = "MYR", include_statement: bool = True) -> ShopeeAnalysisSnapshot:
+    components = (
+        _component("Product Price", "100.00"),
+        _component("Transaction Fee", "-5.00"),
+        _component("Refund Amount", "-10.00"),
+        _component("Transaction Fee", "-5.00", record_type="SKU"),
+    ) if include_statement else ()
+    projection = OrderFinancialProjection(
+        market=market,
+        order_id="MY-1",
+        order_created_date=date(2026, 10, 1),
+        order_status="Completed",
+        settlement_state=(OrderFinancialProjectionState.AVAILABLE if include_statement else OrderFinancialProjectionState.MISSING_STATEMENT),
+        payout_completed_date=date(2026, 10, 5) if include_statement else None,
+        released_amount=Decimal("85.00") if include_statement else None,
+        statement_product_price=Decimal("100.00") if include_statement else None,
+        statement_order_facts=(),
+        financial_components=components,
+        component_totals=(),
+        refund_components=tuple(component for component in components if component.component_name == "Refund Amount"),
+        adjustment_total=Decimal("-2.00"),
+        adjustment_events=(_adjustment(),),
     )
-    filters = _filters(basis=DateBasis.PAYOUT, payout=PayoutStatus.PENDING)
-
-    report = build_shopee_my_live_analysis(snapshot, filters)
-
-    assert filters.effective_payout_status is PayoutStatus.RELEASED
-    assert report.current_kpis.orders == 1
-
-
-def test_financial_layouts_drive_sales_refunds_and_fail_closed_unknowns():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("NORMAL", created=date(2026, 8, 2), final="120.00"),
-            _order(
-                "CANCELLED",
-                created=date(2026, 8, 3),
-                layout="CANCELLED_ORDER",
-                final="0.00",
-            ),
-            _order(
-                "REFUND",
-                created=date(2026, 8, 4),
-                layout="RETURN_REFUND",
-                final="-40.00",
-                refund="-40.00",
-            ),
-            _order("UNKNOWN", created=date(2026, 8, 5), layout="OTHER", final="999.00"),
-        ),
-        (
-            _item("NORMAL", 0, quantity=2, line_subtotal="90.00"),
-            _item("CANCELLED", 0, quantity=5, line_subtotal="500.00"),
-            _item("REFUND", 0, quantity=3, line_subtotal="300.00"),
-            _item("UNKNOWN", 0, quantity=9, line_subtotal="900.00"),
-        ),
+    return ShopeeAnalysisSnapshot(
+        presentation=ShopeeAnalysisPresentation("Shopee SG" if market == "shopee_sg" else "Shopee MY", currency, "S$" if currency == "SGD" else "RM"),
+        market=market,
+        current=FullOrderCurrentSnapshot((_order(market=market),), (_item(market=market),)),
+        projections=(projection,),
     )
 
-    report = build_shopee_my_live_analysis(snapshot, _filters())
 
-    assert report.current_kpis.total_sales == Decimal("120.00")
-    assert report.current_kpis.orders == 1
-    assert report.current_kpis.units_sold == 2
-    assert report.current_kpis.refund_amount == Decimal("40.00")
-    assert report.unknown_layout_count == 1
-    assert sum(row.product_sales for row in report.top_products_by_sales) == Decimal("90.00")
-
-
-def test_kpis_use_final_amount_distinct_orders_items_and_zero_safe_aov():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("A", created=date(2026, 8, 2), final="100.00"),
-            _order("B", created=date(2026, 8, 3), final="50.00"),
-        ),
-        (
-            _item("A", 0, quantity=2, line_subtotal="70.00"),
-            _item("A", 1, sku="SKU-B", nav="300002", quantity=3, line_subtotal="20.00"),
-            _item("B", 0, quantity=4, line_subtotal="40.00"),
-        ),
+def _filters(**kwargs: object) -> ShopeeAnalysisFilters:
+    return ShopeeAnalysisFilters(
+        date_basis=AnalysisDateBasis.ORDER_CREATED,
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 31),
+        **kwargs,
     )
 
-    report = build_shopee_my_live_analysis(snapshot, _filters())
-    empty = build_shopee_my_live_analysis(
-        snapshot, _filters(start=date(2027, 1, 1), end=date(2027, 1, 2))
-    )
 
-    assert report.current_kpis.total_sales == Decimal("150.00")
-    assert report.current_kpis.orders == 2
-    assert report.current_kpis.units_sold == 9
-    assert report.current_kpis.average_order_value == Decimal("75.00")
-    assert empty.current_kpis.average_order_value == Decimal("0.00")
+def test_canonical_projection_facts_drive_my_metrics_without_component_multiplication():
+    report = build_shopee_analysis(_snapshot(), _filters())
+
+    assert report.product_sales == Decimal("100.00")
+    assert report.total_orders == 1
+    assert report.units_sold == 2
+    assert report.average_order_value == Decimal("100.00")
+    assert report.released_amount == Decimal("85.00")
+    assert report.refund_amount == Decimal("10.00")
+    assert report.adjustment_total == Decimal("-2.00")
+    assert report.statement_charges == Decimal("-5.00")
+    assert report.rows[0].reconciliation_status is ReconciliationStatus.RECONCILED
+    assert {row.component_name: row.amount for row in report.component_totals} == {
+        "Product Price": Decimal("100.00"),
+        "Refund Amount": Decimal("-10.00"),
+        "Transaction Fee": Decimal("-5.00"),
+    }
+    assert len(report.rows[0].financial_components) == 4
 
 
-def test_previous_period_uses_same_day_count_and_non_date_filters():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("CURRENT", created=date(2026, 8, 15), payout=None, final="100"),
-            _order("PREVIOUS-PENDING", created=date(2026, 7, 24), payout=None, final="50"),
-            _order(
-                "PREVIOUS-RELEASED",
-                created=date(2026, 7, 25),
-                payout=date(2026, 7, 26),
-                final="900",
-            ),
-        ),
-        (
-            _item("CURRENT", 0),
-            _item("PREVIOUS-PENDING", 0),
-            _item("PREVIOUS-RELEASED", 0),
-        ),
-    )
+def test_missing_statement_fails_closed_without_invoice_fallback():
+    report = build_shopee_analysis(_snapshot(include_statement=False), _filters())
 
-    report = build_shopee_my_live_analysis(
+    assert report.rows[0].released_amount is None
+    assert report.rows[0].reconciliation_status is ReconciliationStatus.INSUFFICIENT_EVIDENCE
+    assert report.rows[0].expected_released_amount is None
+
+
+def test_payout_date_status_and_empty_selection_use_one_canonical_order_set():
+    snapshot = _snapshot()
+    payout_report = build_shopee_analysis(
         snapshot,
-        _filters(
-            start=date(2026, 8, 15),
-            end=date(2026, 9, 5),
-            payout=PayoutStatus.PENDING,
-        ),
+        ShopeeAnalysisFilters(AnalysisDateBasis.PAYOUT, date(2026, 10, 5), date(2026, 10, 5)),
     )
-
-    assert report.current_period.day_count == report.previous_period.day_count == 22
-    assert report.previous_period.from_date == date(2026, 7, 24)
-    assert report.previous_period.to_date == date(2026, 8, 14)
-    assert report.previous_kpis.total_sales == Decimal("50")
-
-
-@pytest.mark.parametrize("group_by", tuple(GroupBy))
-def test_group_by_changes_only_calendar_aggregation_granularity(group_by):
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("A", created=date(2026, 8, 15), final="10"),
-            _order("B", created=date(2026, 8, 16), final="20"),
-            _order("C", created=date(2026, 9, 1), final="30"),
-        ),
-        (_item("A", 0), _item("B", 0), _item("C", 0)),
-    )
-
-    report = build_shopee_my_live_analysis(
+    empty_report = build_shopee_analysis(
         snapshot,
-        _filters(
-            start=date(2026, 8, 15),
-            end=date(2026, 9, 5),
-            group_by=group_by,
-        ),
+        ShopeeAnalysisFilters(AnalysisDateBasis.ORDER_CREATED, date(2026, 10, 2), date(2026, 10, 2)),
     )
 
-    assert report.current_kpis.orders == 3
-    assert report.current_kpis.total_sales == Decimal("60")
-    assert sum(point.orders for point in report.current_trend) == 3
-    assert report.current_trend[0].bucket_start == date(2026, 8, 15)
-    assert report.current_trend[-1].bucket_end == date(2026, 9, 5)
+    assert payout_report.total_orders == 1
+    assert payout_report.rows[0].order_status == "Completed"
+    assert empty_report.rows == ()
+    assert empty_report.products == ()
 
 
-def test_week_buckets_anchor_to_selected_period_and_keep_partial_final_week():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("FIRST", created=date(2026, 9, 1), final="10"),
-            _order("LAST", created=date(2026, 9, 30), final="20"),
-        ),
-        (_item("FIRST", 0), _item("LAST", 0)),
+def test_cancelled_is_excluded_but_canceled_retains_the_shared_status_behavior():
+    snapshot = _snapshot()
+    cancelled = replace(snapshot.projections[0], order_status="Cancelled")
+    canceled = replace(snapshot.projections[0], order_status="Canceled")
+    report = build_shopee_analysis(replace(snapshot, projections=(cancelled,)), _filters())
+    retained = build_shopee_analysis(replace(snapshot, projections=(canceled,)), _filters())
+
+    assert report.rows == ()
+    assert available_statuses(replace(snapshot, projections=(cancelled,))) == ()
+    assert retained.total_orders == 1
+    assert available_statuses(replace(snapshot, projections=(canceled,))) == ("Canceled",)
+
+
+def test_settlement_metrics_use_only_the_committed_statement_order_cohort():
+    snapshot = _snapshot()
+    missing_statement = replace(
+        snapshot.projections[0],
+        order_id="MY-2",
+        settlement_state=OrderFinancialProjectionState.MISSING_STATEMENT,
+        payout_completed_date=None,
+        released_amount=None,
+        statement_product_price=None,
+        financial_components=(),
+        refund_components=(),
+        adjustment_total=Decimal("0.00"),
+        adjustment_events=(),
     )
-
-    report = build_shopee_my_live_analysis(
+    combined = replace(
         snapshot,
-        _filters(
-            start=date(2026, 9, 1),
-            end=date(2026, 9, 30),
-            group_by=GroupBy.WEEK,
+        current=FullOrderCurrentSnapshot(
+            snapshot.current.orders + (_order("MY-2"),),
+            snapshot.current.items + (_item("MY-2", subtotal="40.00"),),
         ),
+        projections=snapshot.projections + (missing_statement,),
+    )
+    report = build_shopee_analysis(combined, _filters())
+
+    assert report.product_sales == Decimal("140.00")
+    assert report.settled_product_sales == Decimal("100.00")
+    assert report.released_amount == Decimal("85.00")
+    assert report.settlement_difference == Decimal("15.00")
+    assert report.settled_orders == 1
+    assert report.missing_statement_orders == 1
+    assert report.settlement_coverage == Decimal("0.5")
+    assert report.reconciliation_counts[ReconciliationStatus.INSUFFICIENT_EVIDENCE] == 1
+
+
+def test_reconciliation_coverage_separates_pending_statement_from_mismatch():
+    snapshot = _snapshot()
+    missing = replace(
+        snapshot.projections[0],
+        order_id="MY-2",
+        settlement_state=OrderFinancialProjectionState.MISSING_STATEMENT,
+        payout_completed_date=None,
+        released_amount=None,
+        statement_product_price=None,
+        financial_components=(),
+        refund_components=(),
+        adjustment_events=(),
+    )
+    mismatch = replace(snapshot.projections[0], order_id="MY-3", released_amount=Decimal("84.00"))
+    combined = replace(
+        snapshot,
+        current=FullOrderCurrentSnapshot(
+            snapshot.current.orders + (_order("MY-2"), _order("MY-3")),
+            snapshot.current.items + (_item("MY-2"), _item("MY-3")),
+        ),
+        projections=(snapshot.projections[0], missing, mismatch),
     )
 
-    assert [
-        (point.bucket_start, point.bucket_end)
-        for point in report.current_trend
-    ] == [
-        (date(2026, 9, 1), date(2026, 9, 7)),
-        (date(2026, 9, 8), date(2026, 9, 14)),
-        (date(2026, 9, 15), date(2026, 9, 21)),
-        (date(2026, 9, 22), date(2026, 9, 28)),
-        (date(2026, 9, 29), date(2026, 9, 30)),
+    frame, other_pending = _reconciliation_status_frame(build_shopee_analysis(combined, _filters()))
+
+    assert frame.to_dict("records") == [
+        {"Status": "Reconciled", "Orders": 1, "Percent": pytest.approx(1 / 3)},
+        {"Status": "Pending Statement evidence", "Orders": 1, "Percent": pytest.approx(1 / 3)},
+        {"Status": "Mismatch", "Orders": 1, "Percent": pytest.approx(1 / 3)},
     ]
+    assert other_pending == 0
 
 
-def test_payout_coverage_counts_normal_orders_without_changing_kpis():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (
-            _order("RELEASED", created=date(2026, 8, 2), payout=date(2026, 8, 5), final="20"),
-            _order("PENDING", created=date(2026, 8, 3), payout=None, final="30"),
-            _order(
-                "REFUND",
-                created=date(2026, 8, 4),
-                payout=None,
-                layout="RETURN_REFUND",
-                final="-5",
-                refund="-5",
-            ),
-        ),
-        (_item("RELEASED", 0), _item("PENDING", 0), _item("REFUND", 0)),
+def test_product_chart_label_is_compact_but_deterministically_traceable():
+    full_name = "Organic extra virgin cold pressed olive oil with a very long audited product name"
+
+    assert _product_chart_label(full_name, limit=24) == "Organic extra virgin co…"
+    assert _product_chart_label("  Canonical   Tea  ") == "Canonical Tea"
+
+
+def test_trend_frames_never_include_a_date_outside_the_selected_scope():
+    report = build_shopee_analysis(_snapshot(), _filters())
+
+    product_frame = _product_trend_frame(report, "Product Sales")
+    financial_frame = _financial_trend_frame(report, "Released Amount")
+
+    assert product_frame["Date"].between(report.filters.from_date, report.filters.to_date).all()
+    assert financial_frame["Date"].between(report.filters.from_date, report.filters.to_date).all()
+    chart = _trend_chart(product_frame, metric="Product Sales", report=report, financial=False)
+    assert chart.to_dict()["encoding"]["x"]["scale"]["domain"] == ["2026-10-01", "2026-10-31"]
+
+
+def test_trend_aggregation_is_bounded_and_defaults_to_the_selected_range_length():
+    filters = ShopeeAnalysisFilters(
+        AnalysisDateBasis.ORDER_CREATED,
+        date(2026, 10, 15),
+        date(2027, 2, 15),
+    )
+    frame = pd.DataFrame(
+        {
+            "Date": [date(2026, 10, 16), date(2026, 10, 20), date(2026, 11, 1), date(2027, 2, 10)],
+            "Product Sales": [10.0, 20.0, 30.0, 40.0],
+        }
     )
 
-    report = build_shopee_my_live_analysis(snapshot, _filters())
+    weekly = _aggregate_trend_frame(frame, metric="Product Sales", aggregation="Weekly", filters=filters)
+    monthly = _aggregate_trend_frame(frame, metric="Product Sales", aggregation="Monthly", filters=filters)
 
-    assert report.payout_coverage.released_orders == 1
-    assert report.payout_coverage.pending_orders == 1
-    assert report.current_kpis.total_sales == Decimal("50")
-    assert report.current_kpis.orders == 2
+    assert _default_trend_aggregation(filters) == "Weekly"
+    assert _default_trend_aggregation(_filters()) == "Daily"
+    assert _default_trend_aggregation(
+        ShopeeAnalysisFilters(AnalysisDateBasis.ORDER_CREATED, date(2026, 1, 1), date(2027, 1, 2))
+    ) == "Monthly"
+    assert weekly["Date"].between(filters.from_date, filters.to_date).all()
+    assert monthly["Date"].between(filters.from_date, filters.to_date).all()
+    assert monthly["Date"].tolist() == [date(2026, 10, 15), date(2026, 11, 1), date(2027, 2, 1)]
+    assert monthly["Product Sales"].tolist() == [30.0, 30.0, 40.0]
 
 
-def test_comparison_zero_baselines_and_refund_colour_semantics():
-    assert compare_kpi(Decimal("10"), Decimal("0")).display == "New"
-    assert compare_kpi(Decimal("0"), Decimal("0")).display == "—"
-    assert compare_kpi(Decimal("0"), Decimal("10")).display == "-100.0%"
-    refund_increase = compare_kpi(Decimal("20"), Decimal("10"), inverse=True)
-    refund_decrease = compare_kpi(Decimal("5"), Decimal("10"), inverse=True)
-    assert (refund_increase.direction, refund_increase.delta_color) == (
-        "negative",
-        "inverse",
+def test_reconciliation_mismatch_is_visible_and_never_forced():
+    snapshot = _snapshot()
+    projection = replace(snapshot.projections[0], released_amount=Decimal("84.00"))
+    report = build_shopee_analysis(replace(snapshot, projections=(projection,)), _filters())
+
+    assert report.rows[0].reconciliation_status is ReconciliationStatus.MISMATCH
+    assert report.rows[0].reconciliation_difference == Decimal("-1.00")
+
+
+def test_credits_remain_signed_native_statement_components():
+    snapshot = _snapshot()
+    projection = snapshot.projections[0]
+    credit = _component("Shipping Credit", "3.00")
+    updated = replace(
+        projection,
+        financial_components=projection.financial_components + (credit,),
+        released_amount=Decimal("88.00"),
     )
-    assert (refund_decrease.direction, refund_decrease.delta_color) == (
-        "positive",
-        "inverse",
-    )
+    report = build_shopee_analysis(replace(snapshot, projections=(updated,)), _filters())
+
+    assert report.statement_charges == Decimal("-5.00")
+    assert report.statement_credits == Decimal("3.00")
+    assert report.rows[0].reconciliation_status is ReconciliationStatus.RECONCILED
 
 
-def test_product_analytics_use_line_subtotal_stable_identity_top_n_and_concentration():
-    orders = tuple(
-        _order(f"O{index}", created=date(2026, 8, index + 1), final="999.00")
-        for index in range(1, 8)
-    )
-    items = (
-        _item("O1", 0, sku="SAME", nav="NAV-1", name="Tea old", quantity=1, line_subtotal="10"),
-        _item("O2", 0, sku="SAME", nav="NAV-1", name="Tea new", quantity=2, line_subtotal="20"),
-        _item("O3", 0, sku="SAME", nav="NAV-2", name="Tea", quantity=3, line_subtotal="30"),
-        _item("O4", 0, sku="SKU-4", nav="NAV-4", quantity=4, line_subtotal="40"),
-        _item("O5", 0, sku="SKU-5", nav="NAV-5", quantity=5, line_subtotal="50"),
-        _item("O6", 0, sku="SKU-6", nav="NAV-6", quantity=6, line_subtotal="60"),
-        _item("O7", 0, sku="SKU-7", nav="NAV-7", quantity=7, line_subtotal="70"),
-    )
-    snapshot = ShopeeMyAnalyticsSnapshot(orders, items)
+def test_product_filter_never_allocates_whole_order_financial_facts():
+    snapshot = _snapshot()
+    product_key = product_options(snapshot)[0].key
+    report = build_shopee_analysis(snapshot, _filters(product_keys=frozenset((product_key,))))
 
-    report = build_shopee_my_live_analysis(snapshot, _filters(top_n=5))
-    complete_ranking = build_shopee_my_live_analysis(snapshot, _filters(top_n=10))
+    assert report.rows[0].released_amount == Decimal("85.00")
+    assert report.rows[0].reconciliation_status is ReconciliationStatus.INSUFFICIENT_EVIDENCE
+    assert "do not allocate" in report.rows[0].reconciliation_reason
 
-    same_nav_1 = next(
-        row
-        for row in report.top_products_by_sales
-        if row.seller_sku == "SAME" and row.nav == "NAV-1"
-    )
-    assert same_nav_1.product_sales == Decimal("30")
-    assert same_nav_1.quantity == 3
-    assert any(
-        row.seller_sku == "SAME" and row.nav == "NAV-2"
-        for row in complete_ranking.top_products_by_sales
-    )
-    assert len(report.top_products_by_sales) == 5
-    assert len(report.top_products_by_quantity) == 5
-    assert [row.label for row in report.sales_contribution][-1] == "Others"
-    assert sum(row.product_sales for row in report.sales_contribution) == Decimal("280")
-    assert report.current_kpis.total_sales == Decimal("6993.00")
-    assert same_nav_1.display_label.startswith("[SAME] ")
-    assert "Tea" in same_nav_1.display_label
-def test_snapshot_rejects_sg_and_loader_uses_only_read_methods():
-    with pytest.raises(ShopeeMyAnalyticsError, match="outside persisted platform"):
-        ShopeeMyAnalyticsSnapshot(
-            (_order("SG", created=date(2026, 8, 1), platform="Shopee SG"),),
-            (_item("SG", 0, platform="Shopee SG"),),
+
+def test_shared_contract_accepts_sg_and_preserves_sg_currency():
+    snapshot = _snapshot(market="shopee_sg", currency="SGD")
+    report = build_shopee_analysis(snapshot, _filters())
+
+    assert report.presentation.currency_display == "S$"
+    assert report.product_sales == Decimal("100.00")
+
+
+def test_snapshot_rejects_cross_market_full_order_facts():
+    with pytest.raises(ShopeeAnalysisError, match="market boundary"):
+        ShopeeAnalysisSnapshot(
+            presentation=ShopeeAnalysisPresentation("Shopee MY", "MYR", "RM"),
+            market="shopee_my",
+            current=FullOrderCurrentSnapshot((_order(),), (_item(market="shopee_sg"),)),
+            projections=(),
         )
 
-    class ReadSpy:
-        def __init__(self):
-            self.calls = []
 
-        def list_orders(self, **kwargs):
-            self.calls.append(("list_orders", kwargs))
-            return (_order("MY", created=date(2026, 8, 1)),)
+def test_my_provider_reads_only_full_order_and_statement_projection_facets():
+    snapshot = FullOrderCurrentSnapshot((_order(),), (_item(),))
 
-        def get_items_by_order_ids(self, platform, order_ids):
-            self.calls.append(("get_items_by_order_ids", platform, tuple(order_ids)))
-            return {"MY": (_item("MY", 0),)}
+    class FullOrderRepository:
+        def read_snapshot(self):
+            return snapshot
 
-        def import_invoice(self, *_args, **_kwargs):
-            raise AssertionError("Live Analysis must not write")
+    class StatementReader:
+        persisted_platform = "Shopee"
 
-    reader = ReadSpy()
-    snapshot = load_shopee_my_analytics_snapshot(reader)
+        def read_committed_financial_facts(self):
+            return CommittedStatementFinancialFacts("Shopee", (), ())
 
-    assert [order.order_id for order in snapshot.orders] == ["MY"]
-    assert reader.calls == [
-        ("list_orders", {"platform": "Shopee"}),
-        ("get_items_by_order_ids", "Shopee", ("MY",)),
-    ]
+        def reload_active_commit_state(self):
+            return SimpleNamespace(order_adjustments=())
 
-
-def test_live_analysis_overwrites_legacy_dates_with_full_order_and_statement_authority():
-    from src.invoice_app.services.cross_platform_product_summary import (
-        CrossPlatformReportingSnapshot,
-        ReportingDateAuthority,
+    result = load_shopee_my_analysis_snapshot(
+        full_order_repository=FullOrderRepository(),
+        statement_reader=StatementReader(),
     )
 
-    reporting_snapshot = CrossPlatformReportingSnapshot(
-        eligible_items=(),
-        date_authority=ReportingDateAuthority(
-            order_created_dates={
-                ("shopee_my", "MY"): date(2026, 9, 10),
-            },
-            payout_completed_dates={
-                ("shopee_my", "MY"): date(2026, 9, 17),
-            },
-        ),
-        canonical_orders=(
-            _order("MY", created=date(2026, 8, 1), payout=date(2026, 8, 8), final="20"),
-            _order("NO-MATCH", created=date(2026, 8, 2), payout=date(2026, 8, 9), final="30"),
-        ),
-        canonical_items=(
-            _item("MY", 0),
-            _item("NO-MATCH", 0),
-        ),
+    assert result.market == "shopee_my"
+    assert result.projections[0].settlement_state is OrderFinancialProjectionState.MISSING_STATEMENT
+
+
+def test_shared_loader_uses_sg_presentation_contract_without_my_fallback():
+    snapshot = FullOrderCurrentSnapshot((_order(market="shopee_sg"),), (_item(market="shopee_sg"),))
+
+    class FullOrderRepository:
+        def read_snapshot(self):
+            return snapshot
+
+    class StatementReader:
+        persisted_platform = "Shopee SG"
+
+        def read_committed_financial_facts(self):
+            return CommittedStatementFinancialFacts("Shopee SG", (), ())
+
+        def reload_active_commit_state(self):
+            return SimpleNamespace(order_adjustments=())
+
+    result = load_shopee_analysis_snapshot(
+        market_context=SHOPEE_SG,
+        full_order_repository=FullOrderRepository(),
+        statement_reader=StatementReader(),
     )
 
-    snapshot = load_shopee_my_analytics_snapshot_from_reporting_snapshot(reporting_snapshot)
-
-    assert [(order.order_id, order.order_created_date, order.payout_completed_date) for order in snapshot.orders] == [
-        ("MY", date(2026, 9, 10), date(2026, 9, 17)),
-        ("NO-MATCH", None, None),
-    ]
-    assert snapshot.available_dates(DateBasis.ORDER_CREATED) == (date(2026, 9, 10),)
-    assert snapshot.available_dates(DateBasis.PAYOUT) == (date(2026, 9, 17),)
-
-
-def test_missing_canonical_product_identity_fails_closed():
-    snapshot = ShopeeMyAnalyticsSnapshot(
-        (_order("A", created=date(2026, 8, 1)),),
-        (_item("A", 0, nav=""),),
-    )
-
-    with pytest.raises(ShopeeMyAnalyticsError, match="identity is incomplete"):
-        build_shopee_my_live_analysis(snapshot, _filters())
+    assert result.market == "shopee_sg"
+    assert result.presentation.currency_display == "S$"

@@ -119,6 +119,56 @@ data remains read-only comparison/audit evidence.
   `3b1244429abd787a69e12816edf89830b55ec0e2`
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
+### MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - CLOSED / FINAL UIUX ACCEPTED
+
+- Shopee MY Analysis V2 is a read-only MY provider over the shared canonical
+  Shopee Analysis view model and renderer. It loads only the explicit
+  `SHOPEE_MY` Full Order Current repository and committed Statement reader,
+  then obtains one `OrderFinancialProjection` per market/order. Product Sales
+  is the selected Full Order Item `product_subtotal` sum; released amount,
+  native signed components, refund evidence, and linked adjustment events are
+  projection facts. Adjustments remain separate from release.
+- The V2 page has shared Order Created/Payout date selection, product and
+  status filters, canonical advanced filters, Overview, Product Analysis, and
+  Financial & Reconciliation tabs. Its shared renderer keeps Product,
+  Settlement, and secondary Adjustment KPI groups distinct; uses market-neutral
+  compact reconciliation, signed-component, and product-ranking charts; and
+  provides Daily/Weekly/Monthly trend display aggregation without widening the
+  selected date authority. The shared renderer takes presentation metadata
+  rather than PostgreSQL/table knowledge and is contract-tested for both MY
+  (`RM`) and SG (`S$`) without changing SG Analysis semantics.
+- Settlement presentation now keeps its populations explicit: Total Product
+  Sales remains every selected eligible Full Order item, while Settled Product
+  Sales, Released Amount, Statement components, and Settlement Difference use
+  only the exact committed Statement ORDER cohort. Coverage reports settled
+  versus selected orders; missing Statement remains a normal lifecycle state.
+  Trend frames and their explicit chart domain are clipped to the selected
+  date interval. Order inspection is search-first beside reconciliation and
+  preserves missing Statement as a calm lifecycle state rather than a mismatch.
+- The retired MY Analysis consumer no longer reads `Invoice_Orders`,
+  `Invoice_Items`, Google Sheets Invoice tabs, Invoice/PDF classification,
+  layout states, or legacy final/refund/line-subtotal fields. There is no
+  fallback. Missing Statement evidence stays explicit and reconciliation is
+  fail-closed. Business/schema/data writes: 0. Deployment: **NOT VERIFIED**.
+- The final shared-renderer refinement uses a responsive two-row filter layout,
+  deliberate 2x2 Product and Settlement KPI groups, and a simplified Overview
+  with only settlement breakdown and reconciliation coverage. Product and
+  Financial tabs own their respective date-basis-labelled trends. Reconciliation
+  is a labelled 100% stacked bar with distinct healthy, pending-lifecycle, and
+  mismatch presentation; native component impact excludes base Product Price
+  from the visual ranking but retains it in exact detail. Order inspection now
+  appears before the reconciliation dataframe. No business formula, authority,
+  projection, cohort, component sign, filter meaning, or database behavior
+  changed. Product Owner final UI/UX acceptance is recorded. Deployment remains
+  **NOT VERIFIED**.
+
+### SHOPEE_ANALYSIS_FINAL_UIUX_REFINEMENT - CLOSED / PRODUCT OWNER ACCEPTED
+
+- The final shared-renderer refinement is accepted as the completion state for
+  the canonical MY Analysis V2 consumer. The shared MY/SG presentation contract,
+  authoritative cohort semantics, and read-only PostgreSQL path remain unchanged.
+  Deployment remains **NOT VERIFIED**.
+
 
 ### SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED / VERIFIED
 
@@ -737,6 +787,18 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-29; Task: close Shopee MY Analysis V2 canonical PostgreSQL and
+  final shared UI/UX refinement; State:
+  `MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - CLOSED / FINAL UIUX ACCEPTED` and
+  `SHOPEE_ANALYSIS_FINAL_UIUX_REFINEMENT - CLOSED / PRODUCT OWNER ACCEPTED`.
+  Outcome: the explicit `SHOPEE_MY` canonical provider and shared MY/SG renderer
+  are complete. Full Order items remain the Product cohort; the committed
+  Statement ORDER population remains the Settlement cohort; missing Statement is
+  a normal pending-evidence lifecycle state. 59 focused MY Analysis, shared
+  renderer, projection, SG Analysis, and MarketContext tests passed; `py_compile`
+  and staged diff checks passed. Legacy Invoice runtime reads: 0. Business,
+  PostgreSQL, and Google Sheets writes: 0. Deployment: **NOT VERIFIED**.
 
 - Date: 2026-10-28; Task: close Shopee SG Analysis OrderFinancialProjection
   cutover; State: `SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED /
