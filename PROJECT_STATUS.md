@@ -170,6 +170,18 @@ data remains read-only comparison/audit evidence.
   Deployment remains **NOT VERIFIED**.
 
 
+### SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED
+
+- Shopee SG has a thin market-locked `SHOPEE_SG` provider over the shared
+  canonical Shopee Analysis view model and renderer. No SG-specific dashboard
+  remains. Full Order Orders/Items are the Product cohort; committed Statement
+  ORDER evidence through `OrderFinancialProjection` is the Settlement cohort.
+  Signed SG-native components and independent linked/unlinked adjustments remain
+  source-faithful. Missing Statement remains pending evidence, never mismatch;
+  no legacy Invoice runtime read exists. Product Owner verified live SG canonical
+  data in InvoiceGather localhost with `S$` presentation. Business/schema/data
+  writes: 0. Deployment: **NOT VERIFIED**.
+
 ### SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED / VERIFIED
 
 - Shopee SG Analysis now uses `OrderFinancialProjection` for all order-row
@@ -787,6 +799,17 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 - **SHOPEE SG DATA IMPORT V1 COMPLETE / PRODUCT OWNER ACCEPTED / COMMITTED / PUSHED:** checkpoint `71cf1949da11005c5a3113a8c86106373be3bed0` (`feat: complete shopee sg data import v1`) is pushed to `origin/feature/uat2-invoice-persistence-integration`. Real ordinary SG Invoice and Listing evidence are audited; PDF/ZIP test intake, market-aware SGD presentation, and live `shopee sg` Product Listing reconciliation are enabled through Manual Review / Accepted Candidate. A separately approved destination/persistence contract, SG Statement, and cancellation/refund/return evidence remain pending. Source-access/data-contract failures must fail closed. Deployment: **NOT VERIFIED**.
 
 ## Recent Execution History
+
+- Date: 2026-10-29; Task: close Shopee SG Analysis shared-template cutover;
+  State: `SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED`.
+  Outcome: Product Owner accepted live localhost rendering of canonical SG data
+  through the shared MY/SG Analysis V2 renderer. Full Order remains the Product
+  cohort; committed Statement ORDER evidence remains the Settlement cohort;
+  adjustments remain independent. The prior aggregation display observation was
+  verified as transient browser state, not an implementation defect. Verification:
+  59 focused SG/MY/shared-renderer/projection/MarketContext tests plus `py_compile`
+  and staged diff checks passed. Legacy Invoice runtime reads: 0. Business,
+  PostgreSQL, and Google Sheets writes: 0. Deployment: **NOT VERIFIED**.
 
 - Date: 2026-10-29; Checkpoint record: `f25a7f28aa85f0b86266bea5c9a4e0edf5d0c13f`
   (`feat: close shopee analysis v2 canonical dashboard`) contains only the
