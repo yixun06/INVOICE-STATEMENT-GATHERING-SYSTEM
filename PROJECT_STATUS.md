@@ -800,6 +800,21 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-29; Task: MY Full Order identity-first Product Master resolver
+  and Validate classification; State: `MY_FULL_ORDER_IDENTITY_FIRST_PM_RESOLVER`
+  **CLOSED / REAL APRIL VERIFIED**. Product
+  Owner confirmed exact identity-first precedence and complete canonical
+  consensus; separate SKU and Parent SKU fallbacks retain fail-closed conflicts.
+  The actual April source and live MY Product Master resolve both Muesli, both
+  Barley Grass, 13 Cactus and the Chilli examples. Read-only PostgreSQL
+  comparison: 2,036 = 2,036 NEW + 0 UPDATED + 0 UNCHANGED + 0 NEED REVIEW.
+  Verification: 249 focused/market/reporting regressions and clean-index smoke
+  passed (empty test secrets file); no business,
+  Product Master, workbook or schema writes. Deployment: NOT VERIFIED.
+  Git implementation checkpoint: `94d7101`; normal feature-branch push of
+  `94d7101` succeeded. Documentation checkpoint follows separately.
+
+
 - Date: 2026-10-29; Checkpoint record: `3f2b131aa621308a7b1e736c212ee9470e5f6300`
   (`feat: cut over shopee sg analysis dashboard`) contains only SG provider/UI,
   focused SG tests, and exact closure/status history hunks. Push: **NOT PUSHED**.
