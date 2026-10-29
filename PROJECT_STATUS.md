@@ -788,6 +788,11 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-29; Checkpoint record: `f25a7f28aa85f0b86266bea5c9a4e0edf5d0c13f`
+  (`feat: close shopee analysis v2 canonical dashboard`) contains only the
+  canonical MY provider, shared renderer, retiring MY helper, focused tests, and
+  exact status/history hunks. Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
+
 - Date: 2026-10-29; Task: close Shopee MY Analysis V2 canonical PostgreSQL and
   final shared UI/UX refinement; State:
   `MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - CLOSED / FINAL UIUX ACCEPTED` and
