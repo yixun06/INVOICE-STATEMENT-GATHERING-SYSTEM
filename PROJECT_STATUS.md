@@ -800,6 +800,11 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-29; Checkpoint record: `3f2b131aa621308a7b1e736c212ee9470e5f6300`
+  (`feat: cut over shopee sg analysis dashboard`) contains only SG provider/UI,
+  focused SG tests, and exact closure/status history hunks. Push: **NOT PUSHED**.
+  Deployment: **NOT VERIFIED**.
+
 - Date: 2026-10-29; Task: close Shopee SG Analysis shared-template cutover;
   State: `SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED`.
   Outcome: Product Owner accepted live localhost rendering of canonical SG data
