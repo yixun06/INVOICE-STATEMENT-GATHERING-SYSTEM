@@ -1262,20 +1262,21 @@ def _render_full_order_validation() -> None:
     preview = review.sync_preview
     issues = review.current_batch.issues
     ready = review.ready
+    comparison_error = getattr(review, "comparison_error", None)
     render_authoritative_status(
         title="Ready" if ready else "Needs Attention",
         message=(
             "Full Order source, Product Master identity, and current-store preview passed."
             if ready
-            else "Resolve every Full Order Product Master or source issue before sync."
+            else comparison_error or "Resolve every Full Order Product Master or source issue before sync."
         ),
         state="ready" if ready else "blocked",
     )
     with st.container(horizontal=True):
         st.metric("Orders", len(review.parsed.order_ids), border=True)
-        st.metric("New", preview.new_count if preview else 0, border=True)
-        st.metric("Updated", preview.updated_count if preview else 0, border=True)
-        st.metric("Unchanged", preview.unchanged_count if preview else 0, border=True)
+        st.metric("New", preview.new_count if preview else "Unavailable", border=True)
+        st.metric("Updated", preview.updated_count if preview else "Unavailable", border=True)
+        st.metric("Unchanged", preview.unchanged_count if preview else "Unavailable", border=True)
         st.metric("Need Review", len({issue.order_id for issue in issues}), border=True)
     st.caption(
         "Only Order IDs present in this workbook are inserted or replaced. "
@@ -1317,6 +1318,8 @@ def _render_full_order_validation() -> None:
             ],
             hide_index=True,
         )
+    elif ready:
+        st.success("No orders need review.")
     _render_next_step(
         "Continue to review sync",
         4,

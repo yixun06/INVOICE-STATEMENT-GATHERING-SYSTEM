@@ -41,12 +41,13 @@ class _FakeStreamlit:
         self.successes: list[str] = []
         self.warnings: list[str] = []
         self.dataframes: list[object] = []
+        self.metrics: dict[str, object] = {}
 
     def container(self, **_kwargs):
         return _Container()
 
-    def metric(self, *_args, **_kwargs):
-        pass
+    def metric(self, label, value, **_kwargs):
+        self.metrics[label] = value
 
     def caption(self, *_args, **_kwargs):
         pass
@@ -244,6 +245,23 @@ def test_full_order_validation_displays_listing_resolve_sku_separately(monkeypat
             }
         ]
     ]
+
+
+def test_full_order_validation_shows_unavailable_for_missing_comparison(monkeypatch):
+    fake = _FakeStreamlit()
+    review = SimpleNamespace(
+        ready=False, sync_preview=None, comparison_error="Current-store classification is unavailable.",
+        current_batch=SimpleNamespace(items=(), issues=()),
+        parsed=SimpleNamespace(order_ids=("ORDER-1",), dimension_fallback_used=False),
+    )
+    status = []
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(data_import, "_full_order_review", lambda: review)
+    monkeypatch.setattr(data_import, "render_authoritative_status", lambda **kwargs: status.append(kwargs))
+    monkeypatch.setattr(data_import, "_render_next_step", lambda *_args, **_kwargs: None)
+    data_import._render_full_order_validation()
+    assert [fake.metrics[key] for key in ("New", "Updated", "Unchanged")] == ["Unavailable"] * 3
+    assert "unavailable" in status[0]["message"]
 
 
 def test_completed_full_order_sync_starts_a_clean_next_upload_without_reusing_review(monkeypatch):

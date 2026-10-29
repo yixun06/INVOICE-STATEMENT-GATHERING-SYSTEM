@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -32,6 +32,7 @@ class ShopeeFullOrderImportReview:
     parsed: ParsedShopeeFullOrder
     current_batch: FullOrderCurrentBatch
     sync_preview: FullOrderSyncResult | None
+    comparison_error: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -91,8 +92,28 @@ def review_shopee_full_order_upload(
             current_market=expected_market,
         )
     batch = adapt_shopee_full_order(parsed, product_master=product_master)
-    preview = repository.classify(batch) if batch.syncable else None
-    return ShopeeFullOrderImportReview(source_bytes, parsed, batch, preview)
+    # Preview only complete orders, while retaining all issues as a whole-batch
+    # commit blocker. The repository owns the canonical comparison semantics.
+    preview = None
+    comparison_error = None
+    try:
+        if batch.orders:
+            preview = repository.classify(replace(batch, issues=()))
+            expected = {(order.market, order.order_id) for order in batch.orders}
+            actual = {(decision.market, decision.order_id) for decision in preview.decisions}
+            if (actual != expected or len(preview.decisions) != len(expected)
+                or preview.new_count + preview.updated_count + preview.unchanged_count != len(expected)):
+                raise ValueError("Full Order classification is incomplete.")
+        else:
+            preview = FullOrderSyncResult(decisions=())
+        issue_ids = {issue.order_id for issue in batch.issues}
+        valid_ids = {order.order_id for order in batch.orders}
+        if issue_ids & valid_ids or issue_ids | valid_ids != set(parsed.order_ids):
+            raise ValueError("Full Order validation does not cover every workbook order.")
+    except Exception:
+        preview = None
+        comparison_error = "Current-store classification is unavailable. Validate again."
+    return ShopeeFullOrderImportReview(source_bytes, parsed, batch, preview, comparison_error)
 
 
 def refresh_shopee_full_order_review(

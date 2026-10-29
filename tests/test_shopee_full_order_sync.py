@@ -988,7 +988,7 @@ def test_updated_reupload_preserves_a_stored_blank_resolve_sku_without_backfilli
     assert repository.read_snapshot().items[0].resolve_sku == ""
 
 
-def test_updated_reupload_preserves_existing_resolve_sku_when_listing_candidates_conflict():
+def test_updated_reupload_blocks_when_listing_resolve_sku_candidates_conflict():
     gateway = _Gateway()
     repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="uat2", gateway=gateway)
     original = parse_shopee_full_order(
@@ -1014,13 +1014,8 @@ def test_updated_reupload_preserves_existing_resolve_sku_when_listing_candidates
         market=SHOPEE_MY,
     )
     batch = adapt_shopee_full_order(updated, product_master=conflicting_master)
-    result = repository.sync(batch)
-
-    assert batch.items[0].resolve_sku == ""
-    assert batch.items[0].resolve_sku_warning == (
-        "Resolved SKU conflicts across matched Listing candidates."
-    )
-    assert result.updated_count == 1
+    assert not batch.syncable
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
     assert repository.read_snapshot().items[0].resolve_sku == "9555208010555-2"
 
 

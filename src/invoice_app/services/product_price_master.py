@@ -7,6 +7,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 import re
+import unicodedata
 from typing import Any, Iterable, Mapping
 
 from openpyxl import load_workbook
@@ -153,6 +154,16 @@ class ProductPriceMaster:
         )
         self._seller_sku_index = _build_index(self._normal_records, "seller_sku")
         self._parent_sku_index = _build_index(self._normal_records, "parent_sku")
+        self._my_full_order_name_index: dict[str, tuple[ProductPriceMasterRecord, ...]] = {}
+        self._my_full_order_resolve_index: dict[str, tuple[ProductPriceMasterRecord, ...]] = {}
+        by_name: dict[str, list[ProductPriceMasterRecord]] = defaultdict(list)
+        by_resolve: dict[str, list[ProductPriceMasterRecord]] = defaultdict(list)
+        for record in self.records:
+            by_name[_full_order_identity_text(record.product_name)].append(record)
+            if record.resolve_sku:
+                by_resolve[normalize_sku_text(record.resolve_sku)].append(record)
+        self._my_full_order_name_index = {key: tuple(value) for key, value in by_name.items()}
+        self._my_full_order_resolve_index = {key: tuple(value) for key, value in by_resolve.items()}
         self._sku_parent_peer_keys = sku_parent_peer_keys
         self._allow_less_suffix_alias = allow_less_suffix_alias
 
@@ -343,6 +354,11 @@ class ProductPriceMaster:
         SKU, Parent SKU, and name/variation indexes.  They are examined only after
         all normal Full Order resolution steps have returned not found.
         """
+        if parent_family_variation_disambiguation:
+            return self._lookup_my_full_order_identity_first(
+                seller_sku=seller_sku, parent_sku=parent_sku,
+                product_name=product_name, variation_name=variation_name,
+            )
         earlier_ambiguous_result: ProductPriceLookupResult | None = None
         for source_sku in dict.fromkeys((seller_sku, parent_sku)):
             if not normalize_sku_text(source_sku):
@@ -353,6 +369,17 @@ class ProductPriceMaster:
                 variation_name=variation_name,
             )
             if result.status in _NORMAL_MATCHED_STATUSES:
+                if len(result.source_rows) > 1:
+                    selected = tuple(
+                        r for r in self._normal_records if r.source_row in result.source_rows
+                    )
+                    consensus = self._full_order_canonical_consensus(selected)
+                    if consensus is None:
+                        return self._conflict(
+                            selected, "Full Order Product Master candidates disagree or lack "
+                            "complete NAV, canonical SKU, UNIT PRICE USOLF, or resolve_sku evidence."
+                        )
+                    result = consensus
                 if parent_family_variation_disambiguation:
                     family_result = self._resolve_parent_family_variation(
                         result=result,
@@ -360,8 +387,35 @@ class ProductPriceMaster:
                         variation_name=variation_name,
                     )
                     if family_result is not None:
-                        return family_result
+                        family = self._parent_sku_index.get(
+                            normalize_sku_text(parent_sku), ()
+                        )
+                        if self._full_order_canonical_consensus(family) is None:
+                            return family_result
                 return result
+            # This is Full Order only: retain the ordinary lookup's SKU/parent
+            # precedence, and collapse complete identical outputs, not rows.
+            key = normalize_sku_text(source_sku)
+            candidates = (
+                self._sku_candidates(key) if self._sku_parent_peer_keys else
+                self._seller_sku_index.get(key, ()) or self._parent_sku_index.get(key, ())
+            )
+            if len(candidates) > 1:
+                narrowed = _match_name_variation(candidates, product_name, variation_name)
+                if narrowed:
+                    candidates = narrowed
+                elif _match_text(variation_name):
+                    candidates = _match_variation(candidates, variation_name)
+                if len(candidates) > 1:
+                    consensus = self._full_order_canonical_consensus(candidates)
+                    if consensus is not None:
+                        return consensus
+                    if not narrowed and result.status is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS:
+                        return result
+                    return self._conflict(
+                        candidates, "Full Order Product Master candidates disagree or lack "
+                        "complete NAV, canonical SKU, UNIT PRICE USOLF, or resolve_sku evidence."
+                    )
             if (
                 result.status
                 is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
@@ -404,6 +458,106 @@ class ProductPriceMaster:
         return earlier_ambiguous_result or self._not_found(
             "No normal Product Listing or FULL_ORDER_MATCH_ONLY identity exactly "
             "matches Product Name / Variation."
+        )
+
+    def _lookup_my_full_order_identity_first(
+        self, *, seller_sku: str | None, parent_sku: str | None,
+        product_name: str | None, variation_name: str | None,
+    ) -> ProductPriceLookupResult:
+        """Resolve structured MY source identity by exact evidence, never by price."""
+        name = _full_order_identity_text(product_name)
+        variation = _full_order_identity_text(variation_name)
+        sku = normalize_sku_text(seller_sku)
+        parent = normalize_sku_text(parent_sku)
+        sku = "" if _is_invalid_sku(sku) else sku
+        parent = "" if _is_invalid_sku(parent) else parent
+        names = self._my_full_order_name_index.get(name, ()) if name else ()
+        name_sku = tuple(r for r in names if sku and normalize_sku_text(r.seller_sku) == sku)
+        name_variation = tuple(r for r in names if variation and _full_order_identity_text(r.variation_name) == variation)
+        levels = [
+            ("NAME_VARIATION_SKU", tuple(r for r in name_sku if variation and _full_order_identity_text(r.variation_name) == variation)),
+            ("NAME_SKU", name_sku if not variation or not name_variation else ()),
+            ("NAME_VARIATION", name_variation),
+            ("NAME", names if not variation else ()),
+        ]
+        conflict = None
+        for stage, candidates in levels:
+            if not candidates:
+                continue
+            resolved = self._resolve_my_full_order_candidates(candidates, stage)
+            if resolved.status is PriceLookupStatus.MATCHED:
+                return resolved
+            conflict = resolved
+
+        # Seller SKU and Parent SKU are separate evidence pools. Existing exact
+        # Name/Variation/SKU evidence narrows each pool without fuzzy matching.
+        for stage, candidates in (
+            ("SELLER_SKU", self._seller_sku_index.get(sku, ())),
+            ("PARENT_SKU", self._parent_sku_index.get(parent, ())),
+            ("RESOLVE_SKU", _unique_records(
+                record for key in dict.fromkeys((sku, parent)) if key
+                for record in self._my_full_order_resolve_index.get(key, ())
+            )),
+        ):
+            if not candidates:
+                continue
+            for key, value in (("product_name", name), ("variation_name", variation)):
+                exact = tuple(r for r in candidates if value and _full_order_identity_text(getattr(r, key)) == value)
+                if exact:
+                    candidates = exact
+            if stage == "PARENT_SKU" and sku:
+                exact = tuple(r for r in candidates if normalize_sku_text(r.seller_sku) == sku)
+                if exact:
+                    candidates = exact
+            resolved = self._resolve_my_full_order_candidates(candidates, stage)
+            if resolved.status is PriceLookupStatus.MATCHED:
+                return resolved
+            # Do not escape a conflicting stronger SKU family by looking at a
+            # weaker key or operational POS mapping.
+            return resolved
+        return conflict or self._not_found("No exact Full Order Product Master identity was found.")
+
+    def _resolve_my_full_order_candidates(
+        self, candidates: tuple[ProductPriceMasterRecord, ...], stage: str,
+    ) -> ProductPriceLookupResult:
+        if len(candidates) == 1:
+            return self._matched_identity(candidates, status=PriceLookupStatus.MATCHED, matched_by=stage)
+        consensus = self._full_order_canonical_consensus(candidates)
+        if consensus is not None:
+            return consensus
+        return self._conflict(
+            candidates, f"{stage} candidates have conflicting or incomplete canonical SKU, NAV, UNIT PRICE USOLF, or resolve_sku evidence."
+        )
+
+    def _full_order_canonical_consensus(
+        self, records: tuple[ProductPriceMasterRecord, ...]
+    ) -> ProductPriceLookupResult | None:
+        if len(records) < 2:
+            return None
+        outputs = {
+            (normalize_sku_text(r.seller_sku) or normalize_sku_text(r.parent_sku),
+             r.nav_code, r.unit_price_usolf, r.resolve_sku)
+            for r in records
+        }
+        if len(outputs) != 1:
+            return None
+        sku, nav, usolf, resolve_sku = next(iter(outputs))
+        if not sku or not nav or usolf is None or usolf <= 0:
+            return None
+        prices = {r.unit_selling_price for r in records}
+        return ProductPriceLookupResult(
+            status=PriceLookupStatus.MATCHED,
+            unit_selling_price=next(iter(prices)) if len(prices) == 1 else None,
+            matched_by="full_order_canonical_consensus",
+            matched_sku=sku,
+            matched_parent_sku=None,
+            matched_product_name=None,
+            matched_variation_name=None,
+            source_metadata=self.metadata,
+            source_rows=tuple(sorted(r.source_row for r in records)),
+            nav_code=nav,
+            unit_price_usolf=usolf,
+            resolve_sku=resolve_sku,
         )
 
     def lookup_sg_full_order(
@@ -965,6 +1119,10 @@ def _match_variation(
     )
 def _match_text(value: str | None) -> str:
     return normalize_match_text(value)
+
+
+def _full_order_identity_text(value: str | None) -> str:
+    return normalize_whitespace(unicodedata.normalize("NFKC", value or "")).casefold()
 
 
 def _is_invalid_sku(value: str) -> bool:

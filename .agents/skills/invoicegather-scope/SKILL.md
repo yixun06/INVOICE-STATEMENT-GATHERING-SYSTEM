@@ -1108,6 +1108,18 @@ route the source to Manual Review and block persistence.
 
 ### Shopee MY Full Order Current price source — Product Owner decision
 
+**MY structured Full Order identity-first resolution (2026-10-29):** use exact
+normalized Product Name + Variation + Seller SKU, then Product Name + Seller
+SKU when Variation is blank or has no applicable exact candidate, Product Name
++ Variation, and Product Name alone when Variation is blank. If those do not
+resolve, use separate exact Seller SKU, Parent SKU, then complete `resolve_sku`
+fallback pools. Name and Variation use NFKC, casefold and collapsed whitespace;
+never fuzzy-match or infer bundle components. At any level, multiple rows may
+resolve only when each independently agrees on canonical Seller SKU, NAV,
+positive USOLF and the complete `resolve_sku`; Listing Price alone is not a
+conflict. Conflicting or incomplete evidence remains blocked. This MY rule does
+not replace the separately locked SG exact Name + Variation row contract.
+
 This rule applies only to Shopee MY Full Order / All Order ingestion into
 `Shopee_FullOrder_Current_Items`. After the existing deterministic Product
 Master identity resolution succeeds, persist:

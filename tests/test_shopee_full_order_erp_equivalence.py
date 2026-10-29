@@ -90,6 +90,7 @@ def _chili_master():
             "unit_selling_price": "6.90",
             "unit_price_usolf": "8.90",
             "nav_code": "5000065",
+            "resolve_sku": "9555208106913",
         },
         {
             "seller_sku": CHILI_PARENT_SKU,
@@ -99,6 +100,7 @@ def _chili_master():
             "unit_selling_price": "6.90",
             "unit_price_usolf": "6.90",
             "nav_code": "5000047",
+            "resolve_sku": CHILI_PARENT_SKU,
         },
     )
 
@@ -149,13 +151,14 @@ def test_my_full_order_uses_exact_variation_within_the_conflicting_parent_family
     assert batch.items[0].unit_price == expected_usolf
 
 
-def test_my_full_order_conflicting_parent_family_unknown_variation_fails_closed():
+def test_my_full_order_unknown_variation_can_use_unique_exact_name_and_sku():
     batch = adapt_shopee_full_order(
         _chili_parsed(variation="Unknown Chili Variation"), product_master=_chili_master()
     )
 
-    assert batch.syncable is False
-    assert batch.issues[0].code == "PM_ENRICHMENT_REQUIRED"
+    assert batch.syncable is True
+    assert batch.items[0].resolved_seller_sku == CHILI_PARENT_SKU
+    assert batch.items[0].nav == "5000047"
 
 
 def test_my_parent_family_variation_rule_preserves_unrelated_seller_sku_resolution():
@@ -191,9 +194,9 @@ def test_sg_full_order_does_not_enable_the_my_parent_family_variation_rule():
     )
 
     assert batch.syncable is True
-    assert batch.items[0].resolved_seller_sku == CHILI_PARENT_SKU
-    assert batch.items[0].nav == "5000047"
-    assert batch.items[0].unit_price == Decimal("6.90")
+    assert batch.items[0].resolved_seller_sku == "9555208106913"
+    assert batch.items[0].nav == "5000065"
+    assert batch.items[0].unit_price == Decimal("8.90")
 
 
 def test_blank_lakadong_variation_resolves_only_for_the_verified_erp_identity():
@@ -219,7 +222,7 @@ def test_exact_lakadong_variations_keep_the_normal_match_path(variation):
     assert result.matched_variation_name == variation
 
 
-def test_unknown_same_price_candidates_do_not_gain_verified_equivalence():
+def test_unknown_candidates_with_same_complete_output_use_consensus():
     master = _master(
         _record("One", parent_sku="UNKNOWN-SKU", product_id="UNKNOWN"),
         _record("Two", parent_sku="UNKNOWN-SKU", product_id="UNKNOWN"),
@@ -233,7 +236,7 @@ def test_unknown_same_price_candidates_do_not_gain_verified_equivalence():
         verified_erp_identities=FULL_ORDER_VERIFIED_ERP_IDENTITIES,
     )
 
-    assert result.status is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
+    assert result.matched_by == "full_order_canonical_consensus"
 
 
 @pytest.mark.parametrize(
@@ -256,7 +259,7 @@ def test_conflicting_verified_erp_fields_fail_closed(changes):
     assert result.status is not PriceLookupStatus.VERIFIED_ERP_IDENTITY_EQUIVALENCE
 
 
-def test_unapproved_additional_variation_prevents_verified_equivalence():
+def test_additional_variation_with_same_output_uses_consensus():
     result = _lakadong_master(_record("09/2028")).lookup_full_order(
         seller_sku=SKU,
         parent_sku=SKU,
@@ -265,7 +268,7 @@ def test_unapproved_additional_variation_prevents_verified_equivalence():
         verified_erp_identities=FULL_ORDER_VERIFIED_ERP_IDENTITIES,
     )
 
-    assert result.status is PriceLookupStatus.PRICE_CONFIRMED_IDENTITY_AMBIGUOUS
+    assert result.matched_by == "full_order_canonical_consensus"
 
 
 def test_unapproved_source_variation_prevents_verified_equivalence():
