@@ -46,7 +46,8 @@ def test_sidebar_uses_live_analysis_contract_in_exact_order(tmp_path, monkeypatc
     assert analysis_labels == list(LIVE_ANALYSIS_PAGES)
     assert {"Dashboard", "Shopee", "ZENXIN"}.isdisjoint(labels)
     source = APP_PATH.read_text(encoding="utf-8")
-    assert 'render_navigation_section("LIVE ANALYSIS"' in source
+    assert 'render_navigation_section("LIVE ANALYSIS DASHBOARD"' in source
+    assert 'render_navigation_section("ZEONIQ SYNC SALES"' in source
     assert 'render_navigation_section("REPORTS"' not in source
     assert '"Shopee MY": "storefront"' in source
     assert '"Shopee SG": "local_mall"' in source

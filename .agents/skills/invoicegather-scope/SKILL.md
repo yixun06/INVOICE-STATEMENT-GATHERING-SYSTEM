@@ -44,6 +44,23 @@ source-safety, Statement, and historical rationale.
 
 ## Active Shopee MY + SG Order and Settlement Architecture — Product Owner Confirmed
 
+### Phase 1 application surface — Product Owner reviewed (2026-10-29)
+
+The shared MY/SG Analysis dashboard uses draft filters and an explicit Apply
+filters action; Reset filters restores both draft and applied defaults. The
+active filter summary describes applied filters. This changes presentation
+and interaction only, not report data authority or financial definitions.
+
+The visible Data Import chooser offers Shopee MY and Shopee SG, each with Full
+Order Import and Statement. Weekly Billing, Monthly Billing, legacy Invoice/PDF
+Import and Monthly Statement Import are removed from the visible surface, but
+their underlying code is retained for a later dependency review. The sidebar
+places Consolidated Product Summary under ZEONIQ SYNC SALES and Shopee MY,
+Shopee SG, Lazada and TikTok under LIVE ANALYSIS DASHBOARD. Lazada remains a
+safe unavailable page until a canonical adapter is approved; TikTok remains a
+placeholder. This decision supersedes conflicting older surface descriptions
+below, and does not remove the canonical `weekly_statement_*` workflow state.
+
 This is the authoritative active-flow architecture for Shopee MY and Shopee
 SG.  It supersedes every conflicting older requirement that makes an Invoice
 PDF, `Invoice_Orders`, or `Invoice_Items` a prerequisite for active Statement

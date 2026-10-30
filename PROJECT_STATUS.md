@@ -1,5 +1,26 @@
 # InvoiceGather Project Status
 
+### Shopee Analysis final minor polish — ready for PO review (2026-10-30)
+
+- Tightened native spacing between the filters and shared module content; the
+  segmented control keeps its collapsed accessible label and market session keys.
+- Product Owner approved scoped CSS: the shared native control uses connected
+  segments, a pale green selection, neutral surfaces and visible keyboard focus.
+- Focused MY/SG module and filter checks: 60 passed; the final accepted-scope
+  regression suite passed 246 tests with 32 explicit skips. A fresh fixture
+  server supports browser checks; authenticated live-data acceptance remains
+  with PO.
+- Local checkpoint `2a7d00d` (`feat: finalize app surface and analysis
+  dashboard ux`) is **COMMITTED / NOT PUSHED**. The prior clean restart of
+  localhost:8503 was blocked by execution policy. No business data or schema
+  write occurred.
+
+Recent execution: 2026-10-30; app surface and shared Analysis UX checkpoint;
+implemented; scoped CSS and accepted workflow/regression updates; 246 passed,
+32 skipped, browser fixture, compile and diff checks; Git `2a7d00d` committed,
+not pushed; UAT2 writes 0; schema delta 0; decision required none; next PO
+live-browser review.
+
 ## Current Baseline
 
 - Date: 2026-10-14
@@ -12,38 +33,6 @@
 InvoiceGather is a reconciliation-and-evidence system. Full Order Current and
 committed Statement are the active operational authorities; legacy Invoice/PDF
 data remains read-only comparison/audit evidence.
-### ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED
-
-- A shared read-only `OrderFinancialProjection` now composes the market-bound
-  PostgreSQL Full Order Current repository, a Statement-only committed
-  financial reader, and committed Order Adjustment reader for one exact
-  `MarketContext + order_id`. It exposes Full Order date/status, committed
-  Statement payout/released/product-price facts, raw native financial
-  components plus deterministic native-name totals, refund components, and
-  independent adjustment events/totals. It does not define a net-income
-  formula, allocate order-level money to items, or select/filter consumer UI
-  policy.
-- A Statement ORDER without the matching market-bound Full Order Current row
-  fails closed. A Full Order with no committed Statement is explicit as
-  `MISSING_STATEMENT`, without any Invoice/PDF fallback. MY/SG platform labels
-  remain normalized only by `MarketContext`; cross-market readers fail closed.
-  The new layer has no Product Master, Invoice_Orders, Invoice_Items, or Google
-  Sheets Invoice-tab runtime dependency. UAT2/business/schema write delta: 0.
-- Authority-boundary verification moved all Full Order snapshot access,
-  `order_created_date`, and `order_status` composition out of
-  `shopee_statement_financial_read.py`. That reader now returns only committed
-  native Statement facts; `OrderFinancialProjection` performs the exact-market
-  Full Order/Statement join and owns its `MISSING_STATEMENT` state. SG Analysis
-  retains the same visible behavior while consuming `OrderFinancialProjection`,
-  so it does not recreate a second Full Order/Statement composite.
-- Focused projection, Statement-financial-read, and SG Analysis regressions
-  passed (14 tests); changed modules compile and the diff check passes. Code
-  checkpoint `cf80bd1` (`feat: add order financial projection`) contains only
-  the projection, boundary cleanup, and SG compatibility wiring/tests. The
-  requested real PostgreSQL smoke remains blocked before a query because
-  `INVOICEGATHER_PG_USER` and `INVOICEGATHER_PG_PASSWORD` are not present in
-  this Codex environment; no Google Sheets fallback was attempted. Business
-  writes: 0. Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
 
 ## Current System State
 
@@ -119,6 +108,18 @@ data remains read-only comparison/audit evidence.
   `3b1244429abd787a69e12816edf89830b55ec0e2`
   (`feat: migrate shopee my statement runtime to postgres`); it is explicitly
   **NOT PUSHED**. Deployment remains **NOT VERIFIED**.
+
+### POSTGRES_UPPER_LAYER_CONSUMER_AUDIT - AUDITED / MIGRATION DESIGN PENDING
+
+- Read-only audit confirmed the reusable market-locked `StatementFinancialRead`
+  and `OrderAdjustmentRead` projections already provide the correct exact
+  Full Order/Statement boundary for SG Analysis. MY Live Analysis and MY
+  Weekly Billing still retain `Invoice_Orders` / `Invoice_Items` Google Sheets
+  readers for legacy financial/product semantics; Monthly Billing additionally
+  remains bound to legacy Monthly Statement Google Sheets tabs. Consolidated
+  Payout Product Summary is superseded by the canonical reader below. No
+  upper-layer code should raw-join PostgreSQL authorities independently.
+
 ### MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - CLOSED / FINAL UIUX ACCEPTED
 
 - Shopee MY Analysis V2 is a read-only MY provider over the shared canonical
@@ -169,18 +170,53 @@ data remains read-only comparison/audit evidence.
   authoritative cohort semantics, and read-only PostgreSQL path remain unchanged.
   Deployment remains **NOT VERIFIED**.
 
-
 ### SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED
 
-- Shopee SG has a thin market-locked `SHOPEE_SG` provider over the shared
-  canonical Shopee Analysis view model and renderer. No SG-specific dashboard
-  remains. Full Order Orders/Items are the Product cohort; committed Statement
-  ORDER evidence through `OrderFinancialProjection` is the Settlement cohort.
-  Signed SG-native components and independent linked/unlinked adjustments remain
-  source-faithful. Missing Statement remains pending evidence, never mismatch;
-  no legacy Invoice runtime read exists. Product Owner verified live SG canonical
-  data in InvoiceGather localhost with `S$` presentation. Business/schema/data
+- Shopee SG now has a thin market-locked `SHOPEE_SG` provider over the existing
+  shared canonical Shopee Analysis view model and renderer. The former separate
+  SG Phase A dashboard and its parallel report types are retired. Full Order
+  items remain the Product cohort; `OrderFinancialProjection` remains the
+  settlement, signed native-component, refund, and linked-adjustment authority.
+  Missing Statement is still a Pending Statement evidence lifecycle state, not
+  a mismatch. The shared dashboard receives `S$` presentation metadata and has
+  no SG-specific renderer or legacy Invoice runtime read. Product Owner verified
+  live SG canonical data in the InvoiceGather localhost UI. Business/schema/data
   writes: 0. Deployment: **NOT VERIFIED**.
+
+### ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED
+
+- A shared read-only `OrderFinancialProjection` now composes the market-bound
+  PostgreSQL Full Order Current repository, a Statement-only committed
+  financial reader, and committed Order Adjustment reader for one exact
+  `MarketContext + order_id`. It exposes Full Order date/status, committed
+  Statement payout/released/product-price facts, raw native financial
+  components plus deterministic native-name totals, refund components, and
+  independent adjustment events/totals. It does not define a net-income
+  formula, allocate order-level money to items, or select/filter consumer UI
+  policy.
+- A Statement ORDER without the matching market-bound Full Order Current row
+  fails closed. A Full Order with no committed Statement is explicit as
+  `MISSING_STATEMENT`, without any Invoice/PDF fallback. MY/SG platform labels
+  remain normalized only by `MarketContext`; cross-market readers fail closed.
+  The new layer has no Product Master, Invoice_Orders, Invoice_Items, or Google
+  Sheets Invoice-tab runtime dependency. UAT2/business/schema write delta: 0.
+- Authority-boundary verification moved all Full Order snapshot access,
+  `order_created_date`, and `order_status` composition out of
+  `shopee_statement_financial_read.py`. That reader now returns only committed
+  native Statement facts; `OrderFinancialProjection` performs the exact-market
+  Full Order/Statement join and owns its `MISSING_STATEMENT` state. SG Analysis
+  retains the same visible behavior while consuming `OrderFinancialProjection`
+  for its order date/status, settlement, released amount, and components; its
+  separate Full Order snapshot is now item-only (quantity/subtotal), so it does
+  not recreate a second Full Order/Statement composite.
+- Focused projection, Statement-financial-read, and SG Analysis regressions
+  passed (14 tests); changed modules compile and the diff check passes. Code
+  checkpoint `cf80bd1` (`feat: add order financial projection`) contains only
+  the projection, boundary cleanup, and SG compatibility wiring/tests. The
+  requested real PostgreSQL smoke remains blocked before a query because
+  `INVOICEGATHER_PG_USER` and `INVOICEGATHER_PG_PASSWORD` are not present in
+  this Codex environment; no Google Sheets fallback was attempted. Business
+  writes: 0. Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
 
 ### SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED / VERIFIED
 
@@ -199,6 +235,7 @@ data remains read-only comparison/audit evidence.
   `72855d2` (`feat: complete sg analysis projection cutover`) contains only
   the SG service wiring and focused regression. Business/schema writes: 0.
   Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
+
 ### CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED / REAL LOCALHOST SMOKE VERIFIED
 
 - Payout Product Summary now selects only `PASSED` + `COMMITTED` Statement
@@ -271,6 +308,14 @@ data remains read-only comparison/audit evidence.
   local four-domain transaction/rollback tests pass. A real NEW SG Statement
   Commit is deliberately **NOT PERFORMED** and requires separate Product Owner
   authorization. Deployment is **NOT VERIFIED**.
+- The Product Owner-approved dynamic Service Fee overlap rule is implemented at
+  the shared complete-bundle comparison boundary: a `SERVICE_FEE_DETAIL` is
+  ignored only when it is exactly zero and the opposite parsed export proves
+  that the exact dynamic header is absent. This does not alter stored facts or
+  general missing-value semantics. The real 709-order overlap replay is pending
+  because the local Docker PostgreSQL container/runtime credentials were not
+  available in this execution; no checkpoint is authorized until that replay
+  confirms the expected zero-write result.
 
 ### SHOPEE_SG_ANALYSIS_PHASE_A - IMPLEMENTED / TESTED / UNCHECKPOINTED
 
@@ -292,6 +337,98 @@ data remains read-only comparison/audit evidence.
   2,417 available Statement orders and 5,756 without settlement; 123,033
   component rows, all linked to the 2,417 settled orders; 17 adjustment events
   totalling S$207.16 separately. UAT2/business/schema write delta: 0.
+
+### STATEMENT_WORKFLOW_REVIEW_CHECKPOINT - COMMIT OUTCOME FIX IMPLEMENTED / RUNTIME REPLAY PENDING
+
+- MY and SG share a session-local Statement workflow checkpoint separate
+  from the mutable presentation cursor. A coherent staged review restores the
+  highest explicitly completed step after a Streamlit rerun, harmless widget
+  interaction, or active-session hydration; an explicit Back action remains
+  authoritative. A lower Validate cursor can no longer silently replace a
+  current Review & Commit destination while its review/commit plan remains
+  valid in app-harness coverage. This checkpoint is not yet accepted as a
+  real-runtime fix.
+- Genuine evidence drift now retains the Review destination as explicitly
+  blocked: stale evidence and prior plan details are hidden, `Commit Statement`
+  is disabled, and only a successful Refresh validation replaces the
+  stage/review pair and clears the stale reason. This changes no Statement
+  parser, evidence classifier, duplicate/partial-commit rule, Full Order gate,
+  adjustment classification, or persistence behavior.
+- Verification: shared state tests plus MY/SG AppTest rerun/hydration/stale
+  coverage passed; the focused Statement suite passed 53 tests with 14
+  explicitly archived V2 skips; changed modules pass `py_compile` and
+  `git diff --check`. The local 1,195-order source was not available for a new
+  runtime replay in this execution; its last verified 1,119 NEW / 76 exact
+  duplicate / 0 conflict / 0 Full Order gap evidence remains unchanged because
+  business classification code was not modified. Google Sheets, UAT2,
+  schema, and business write delta: 0. Git stage/commit/push: 0; deployment:
+  **NOT VERIFIED**.
+- Follow-up source-selection audit found a separate real crash path:
+  `_render_source_selection` directly indexed the selected-label map although
+  Streamlit may return `None` or a stale widget value after page/session
+  restoration. The selector now restores only a valid persisted/evidenced
+  source, otherwise requires an explicit selection; it never guesses from a
+  batch ID. The focused AppTest regression passes, while an authenticated
+  browser replay of the MY Step 5 case remains required. Business/schema/UAT2
+  write delta: 0; Git stage/commit/push: 0; deployment: **NOT VERIFIED**.
+- Commit no longer maps every `committed=False` result to Validate. The shared
+  commit result now carries an authoritative navigation outcome: successful
+  write completes normally; `ALREADY_IMPORTED / NO_NEW_FACTS` is an idempotent
+  zero-write completion; stale, conflict, unsafe, and generic blocked outcomes
+  remain in Review with an explicit refresh blocker; verified no-write writer
+  failure remains in Review with a technical error. The handler does not call
+  staged-source cleanup, recovery removal, or global reset. The separate
+  Streamlit import/session disappearance remains under investigation. The
+  opt-in redacted trace now includes outcome and safe reason codes, in addition
+  to handler, preflight, writer, transition, rerun, and first-render markers.
+  Focused MY/SG outcome, service, persistence, writer, and pilot tests pass.
+  Business/schema/UAT2 write delta: 0; Git stage/commit/push: 0; deployment:
+  **NOT VERIFIED**.
+- Refreshing a stale Review or retrying after verified `WRITE_NOT_APPLIED` now
+  intentionally returns to Step 4 Reconcile before a new Review/Commit plan is
+  exposed. If a refresh cannot construct the authoritative writer preflight,
+  Step 4 retains the exact blocker and exposes `Rebuild reconciliation`; it no
+  longer renders a generic unavailable state with no recovery action. Missing
+  staged source bytes fail closed with a re-upload instruction and preserve the
+  existing review rather than reporting a false successful refresh. Shared
+  MY/SG AppTest coverage verifies stale Review -> Reconcile -> Review,
+  unavailable-preflight rebuild, refreshed conflict blocking, and source-byte
+  loss. Business/schema/UAT2 write delta: 0; Git stage/commit/push: 0;
+  deployment: **NOT VERIFIED**.
+
+### SHOPEE_STATEMENT_COMPLETE_BUNDLE_PARTIAL_COMMIT - IMPLEMENTED / TESTED / UNCHECKPOINTED
+
+- MY and SG now share one authoritative committed-snapshot classifier and
+  write-plan builder in Reconcile, Review, and locked Commit. Each order is
+  classified as `NEW`, `EXACT_DUPLICATE`, `CONFLICT`, or
+  `INCOMPLETE_UNSAFE` from its complete evidence bundle: ORDER, native SKU
+  rows, financial components, refund facts, and provenance. Repeated child
+  rows are compared as multisets; missing, extra, ambiguous, or changed facts
+  cannot be discarded as duplicates.
+- A mixed source may skip complete exact-duplicate bundles and commit only
+  complete new bundles with all associated children. Full Order Current is
+  checked only for `NEW` order IDs. Adjustments are classified independently;
+  exact duplicates are skipped, new linked or unlinked events are retained,
+  and conflicting/unsafe events fail closed. A fully duplicate source with no
+  new adjustment ends as `ALREADY_IMPORTED / NO_NEW_FACTS` with zero rows and
+  no duplicate artifact.
+- Source-level control totals remain the immutable validation contract and are
+  displayed separately from the filtered new-facts write set. The UI reports
+  new, skipped, conflict, unsafe, and new-only Full Order counts. Commit obtains
+  the application lock, reloads committed evidence, and reruns the same builder;
+  material drift invalidates or safely recomputes the authorized plan.
+- Fresh read-only MY replay of `Income.released.my.20261011_20261023.xlsx`
+  classifies 1,119 complete new bundles, 76 complete exact duplicates, 0
+  conflicts, and 0 incomplete/unsafe bundles. All 1,119 new orders have Full
+  Order Current coverage. Source Total Released remains RM35,759.06; the
+  filtered new-order write set is RM33,126.14. Nine adjustments are new, one is
+  skipped as an exact duplicate, and none conflict. Status is `MIXED` and the
+  plan is eligible without rewriting any duplicate facts.
+- Google Sheets does not provide database-level cross-sheet transactions. The
+  writer retains one batch request plus exact readback and recovery checks, and
+  the residual partial-write/uncertain-outcome risk remains explicit. No live
+  Google Sheets, database, schema, or business write was performed. Git
+  stage/commit/push: 0; deployment: **NOT VERIFIED**.
 
 ### SHOPEE_MY_SG_ANY_PERIOD_STATEMENT_MODEL - IMPLEMENTED / TESTED
 
@@ -438,7 +575,7 @@ data remains read-only comparison/audit evidence.
 - Source and PostgreSQL counts match: Invoice Orders 5,997; Invoice Items 8,575; Full Order Current Orders 14,456; Full Order Current Items 21,805; Statement Data 18,381; Statement Financial Components 397,647; Statement Summary 448; Order Adjustments 20. All source business keys were unique. Verification matched 24 representative rows, NULL/non-NULL counts for all 180 migrated source columns, exact sums for all 51 financial columns, and the complete 21,805-row `resolve_sku` key/value digest; maximum preserved `resolve_sku` length is 58.
 - An initial verification-code mismatch failed closed and rolled back every pending row insert; the issue was only tuple serialization in the `resolve_sku` digest. The corrected migration then committed successfully. A full real rerun reported `affected=0` for every table while repeating all verification checks, proving no duplicates and no rewrites for an unchanged source snapshot.
 - DBeaver connection is confirmed against the same target: host `127.0.0.1`, port `5433`, database `invoicegather`, and the Docker-configured database user; the password remains external to source control. Local PostgreSQL schema/data writes occurred only for this authorized migration. Repository integration, an application PostgreSQL backend, shadow/dual write, hybrid/full cutoff, production deployment, Google Sheets replacement, and company-server-versus-cloud hosting remain deferred pending a new Product Owner decision. Checkpoint: `feat: establish verified postgres foundation` on `feature/uat2-invoice-persistence-integration`; deployment: **NOT AUTHORIZED**.
-
+- **Cross-domain market-boundary prerequisite closed (2026-10-27):** Statement PostgreSQL remains physically isolated by approved `platform` labels (`Shopee` / `Shopee SG`), while Full Order PostgreSQL remains physically keyed by canonical `market`. The shared `MarketContext` boundary is the only approved normalizer; direct raw `Statement.platform` to `FullOrder.market` joins are prohibited. Non-writing regression now proves that an identical MY/SG `order_id` reads only its own Statement evidence and Full Order row, and that the Full Order existence gate rejects the same ID from the other market in both directions. Current Full Order PostgreSQL history is MY-only: 14,456 Orders / 21,805 Items; no SG rows. Schema/business-data writes: 0.
 - **MY Full Order PostgreSQL real-source runtime smoke — PARTIAL / CUTOVER BLOCKED (2026-10-27):** the Product Owner supplied `Order.all.order_creation_date.20260927_20261027.xlsx` (SHA-256 `314e99df…bd750f19`), which parsed as 2,629 MY Orders / 3,711 Items with zero PM issues. The explicit MY-only PostgreSQL Full Order backend atomically processed 460 NEW, 771 UPDATED, and 1,398 UNCHANGED Orders (661 inserted and 1,953 updated Item rows), with transaction-internal reconstruction readback. PostgreSQL now has 14,916 Orders / 22,466 Items; Sheets business-key parity is exact, and Statement counts remain 26,722 / 578,653 / 548 / 46 with SG still absent. A same-source replay reported 0 NEW / 0 UPDATED / 2,629 UNCHANGED. The Statement Full Order gate (8,557 committed MY ORDER identities), Full Order-backed date authority, and financial Product Summary grouping all replay correctly through PostgreSQL without Full Order Sheets reads. Cutover remains blocked because four pre-existing `resolve_sku` values differ from Sheets (`8717496900999` in PostgreSQL versus `5004182` in Sheets); none is present in the supplied source, so this task must not overwrite them from a Sheets fallback or mix the separate Compact Barcode workstream. No Google Sheets write, SG migration, Statement write, schema change, Git checkpoint, or deployment occurred. Required next action: separately authorize/provide the authoritative resolution for those four historical `resolve_sku` facts, then rerun final parity acceptance.
 
 - **MY Full Order PostgreSQL runtime - LOCALLY VERIFIED (2026-10-27):** This supersedes the preceding partial/blocker status. The Product Owner approved current Google Sheets Full Order as authoritative for four historical `resolve_sku` values. A serializable exact-key PostgreSQL transaction corrected only `(shopee_my, 2606169B4UWA26, 3)`, `(shopee_my, 2606250FQ35NGU, 10)`, `(shopee_my, 2609046406GEH9, 0)`, and `(shopee_my, 260908ET48YAJV, 3)` from `8717496900999` to `5004182`, with locked-row readback proving all other columns unchanged. Final parity is 14,916 / 14,916 Orders and 22,466 / 22,466 Items, with no missing, extra, or business-field mismatches. Reconstruction, the 8,557-identity Statement Full Order gate, Analysis date authority, and Order Created Product Summary (20,950 items / Qty 31,768 / 429 groups) pass through the explicit MY PostgreSQL backend. The supplied source replays as 0 NEW / 0 UPDATED / 2,629 UNCHANGED. Statement remains 26,722 / 578,653 / 548 / 46 and SG Full Order remains 0 / 0. PostgreSQL selection provides Full Order reads/writes without Sheets fallback; Product Master Sheets remains read-only and explicit `google_sheets` remains separately available. Google Sheets writes, Statement writes, SG migration, schema changes, push, and deployment: 0.
@@ -800,6 +937,16 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
 
 ## Recent Execution History
 
+- Date: 2026-10-30; Task: Shopee Analysis module navigation; State: LOCAL IMPLEMENTATION / LIVE PO REVIEW PENDING; Outcome: replaced separate module buttons with one native market-scoped segmented selector, preserving applied filters and shared MY/SG rendering. Verification: focused tests and local fixture browser check; Git: no stage, checkpoint or push; deployment: NOT VERIFIED; UAT2 write delta: 0; schema delta: 0; Decision required: NO; Next: review authenticated MY/SG live application.
+
+- Date: 2026-10-30; Task: strict shared Shopee Analysis modular layout; State: LOCAL IMPLEMENTATION / BROWSER ACCEPTANCE PENDING; Outcome: removed numeric trend padding, added market-scoped module navigation and grouped Overview/filter actions; preserved shared MY/SG authorities and semantics. Verification: 60 focused tests passed; Git: no checkpoint or push; deployment: NOT VERIFIED; UAT2 write delta: 0; schema delta: 0; Decision required: NO; Next: complete live-browser visual and chart verification.
+
+- Date: 2026-10-30; Task: shared Shopee Analysis modular UI refinement; State: LOCAL IMPLEMENTATION / PENDING PO REVIEW; Outcome: grouped applied filters and actions, styled module tabs, aligned product and financial analysis cards, preserving canonical report semantics and shared MY/SG renderer. Verification: 58 focused tests passed, py_compile and diff check passed; Git: no checkpoint or push; deployment: NOT VERIFIED; UAT2 write delta: 0; schema delta: 0; Decision required: NO; Next: visual review at desktop and laptop widths.
+
+- Date: 2026-10-30; Task: shared Shopee Analysis apply filters and UI polish; State: LOCAL IMPLEMENTATION / PENDING PO REVIEW; Outcome: MY and SG share draft/applied filter state, explicit apply/reset, and applied-filter context with restrained native chart and section presentation; financial definitions and authorities unchanged. Verification: focused Analysis and market tests plus AppTest; Git: no checkpoint or push; deployment: NOT VERIFIED; UAT2 write delta: 0; schema delta: 0; Decision required: NO; Next: Product Owner localhost review.
+
+- Date: 2026-10-29; Task: Phase 1 application-surface regression triage; State: LOCAL TESTED / PENDING CLOSURE; Outcome: Product Owner reviewed the Phase 1 routes and source surface. The original focused rerun had 176 passed and 37 failed: 27 obsolete removed-surface expectations and 10 stale test setup/label expectations. Updated applicable tests, explicitly retired 18 legacy Invoice UI cases, and preserved MY/SG Statement ownership and partial-state guards. No production logic changed during triage. Verification: expanded final suite 477 passed, 47 skipped (including 18 retired legacy UI cases); Git: no checkpoint, commit or push; deployment: not verified; UAT2 write delta: 0; schema delta: 0; Decision required: NO; Next: Product Owner closure review and separate Phase 2 dependency/dead-code review.
+
 - Date: 2026-10-29; Task: MY Full Order identity-first Product Master resolver
   and Validate classification; State: `MY_FULL_ORDER_IDENTITY_FIRST_PM_RESOLVER`
   **CLOSED / REAL APRIL VERIFIED**. Product
@@ -812,41 +959,128 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   passed (empty test secrets file); no business,
   Product Master, workbook or schema writes. Deployment: NOT VERIFIED.
   Git implementation checkpoint: `94d7101`; normal feature-branch push of
-  `94d7101` succeeded. Documentation checkpoint follows separately.
+  `94d7101` succeeded. Documentation checkpoint: `933c50e`; normal push of
+  the documentation checkpoint succeeded.
 
+- Date: 2026-10-29; Task: MY Full Order PM exact-name resolution and Validate
+  classification; State: IMPLEMENTED / ACCEPTANCE BLOCKED. The actual April
+  workbook and live MY Product Master resolve both Barley Grass orders by exact
+  name (Listing row 430, NAV 3000686, USOLF 49.90) and both Muesli orders by
+  consensus. Read-only PostgreSQL comparison: 2,036 orders = 2,022 NEW +
+  0 UPDATED + 0 UNCHANGED + 14 NEED REVIEW. The prior resolver replay had two
+  review orders; the requested candidate-union/fail-closed rule exposes 13
+  Cactus orders with conflicting canonical SKUs and one Chilli order with
+  conflicting SKU/NAV/USOLF, all previously accepted. Exact SKU precedence
+  versus the new fail-closed rule requires Product Owner clarification before
+  claiming no new review cases or checkpointing. Regression: 234 passed;
+  py_compile and diff check passed. UAT2 business writes: 0; schema delta: 0;
+  Git stage/commit/push: 0; deployment: NOT VERIFIED. Next: resolve the
+  candidate-precedence decision and repeat real-source acceptance.
 
-- Date: 2026-10-29; Checkpoint record: `3f2b131aa621308a7b1e736c212ee9470e5f6300`
-  (`feat: cut over shopee sg analysis dashboard`) contains only SG provider/UI,
-  focused SG tests, and exact closure/status history hunks. Push: **NOT PUSHED**.
-  Deployment: **NOT VERIFIED**.
+- Date: 2026-10-29; Task: MY Full Order Product Master canonical consensus;
+  State: IMPLEMENTED / REVIEW PENDING. Multiple exact candidates may agree on
+  canonical Seller SKU, NAV, positive USOLF and resolve_sku without a unique
+  physical variation row; conflicting or incomplete tuples remain blocked.
+  SG exact-row resolution is unchanged. Synthetic regression covers the reported
+  SKU; the April Full Order source and live Product Master candidate evidence
+  were not supplied, so the two reported orders remain unverified. Final focused
+  and regression run: 202 passed; an earlier broader run had 201 passed and two
+  legacy Cross Platform session-view UI tests failed against
+  the current committed-data UI contract. Git: no stage/commit/push; deployment:
+  not verified; UAT2 business writes: 0; schema delta: 0. Next: obtain the
+  April source and matching Product Master evidence for read-only verification.
 
-- Date: 2026-10-29; Task: close Shopee SG Analysis shared-template cutover;
-  State: `SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED`.
-  Outcome: Product Owner accepted live localhost rendering of canonical SG data
-  through the shared MY/SG Analysis V2 renderer. Full Order remains the Product
-  cohort; committed Statement ORDER evidence remains the Settlement cohort;
-  adjustments remain independent. The prior aggregation display observation was
-  verified as transient browser state, not an implementation defect. Verification:
-  59 focused SG/MY/shared-renderer/projection/MarketContext tests plus `py_compile`
-  and staged diff checks passed. Legacy Invoice runtime reads: 0. Business,
-  PostgreSQL, and Google Sheets writes: 0. Deployment: **NOT VERIFIED**.
+- Date: 2026-10-29; Task: inspect shared Shopee Analysis trend aggregation
+  selector/report binding; State: VERIFIED / NO CODE CHANGE. Outcome: Product
+  and Financial aggregation widgets use distinct Streamlit keys
+  (`product_trend_aggregation` / `financial_trend_aggregation`); each title and
+  aggregation frame use its own selected value. AppTest changed Product from
+  Daily to Weekly while Financial remained Daily, with matching rendered titles.
+  No authority, cohort, query, or chart styling change was required. Business,
+  schema, and data writes: 0; Git stage/checkpoint/push: 0; deployment:
+  **NOT VERIFIED**. Next: refresh the active browser page and retry.
 
-- Date: 2026-10-29; Checkpoint record: `f25a7f28aa85f0b86266bea5c9a4e0edf5d0c13f`
-  (`feat: close shopee analysis v2 canonical dashboard`) contains only the
-  canonical MY provider, shared renderer, retiring MY helper, focused tests, and
-  exact status/history hunks. Push: **NOT PUSHED**. Deployment: **NOT VERIFIED**.
+- Date: 2026-10-29; Task: cut Shopee SG Analysis to the shared Shopee Analysis
+  V2 provider/view-model/renderer; State:
+  `SG_ANALYSIS_SHARED_TEMPLATE_CUTOVER - CLOSED / PRODUCT OWNER ACCEPTED`.
+  Outcome: replaced the separate SG Phase A service/dashboard with an explicit
+  `SHOPEE_SG` provider and the existing market-neutral renderer. Product facts
+  remain Full Order-only; settlement, signed native components, refunds, and
+  linked adjustments remain `OrderFinancialProjection` facts; missing Statement
+  remains pending evidence. Verification: 58 focused SG/MY/shared-renderer,
+  projection, and MarketContext tests passed; `py_compile` and `git diff --check`
+  passed. Both local Streamlit endpoints returned HTTP 200. This shell lacks the
+  external PostgreSQL credentials, so no live query or business-data fallback
+  was attempted. Business/schema/data writes: 0; Git stage/checkpoint/push: 0;
+  deployment: **NOT VERIFIED**. Product Owner localhost acceptance: **PASS**.
 
 - Date: 2026-10-29; Task: close Shopee MY Analysis V2 canonical PostgreSQL and
   final shared UI/UX refinement; State:
   `MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - CLOSED / FINAL UIUX ACCEPTED` and
   `SHOPEE_ANALYSIS_FINAL_UIUX_REFINEMENT - CLOSED / PRODUCT OWNER ACCEPTED`.
-  Outcome: the explicit `SHOPEE_MY` canonical provider and shared MY/SG renderer
-  are complete. Full Order items remain the Product cohort; the committed
-  Statement ORDER population remains the Settlement cohort; missing Statement is
-  a normal pending-evidence lifecycle state. 59 focused MY Analysis, shared
-  renderer, projection, SG Analysis, and MarketContext tests passed; `py_compile`
-  and staged diff checks passed. Legacy Invoice runtime reads: 0. Business,
-  PostgreSQL, and Google Sheets writes: 0. Deployment: **NOT VERIFIED**.
+  Outcome: converted clipping filter/KPI rows to deliberate responsive groups;
+  removed duplicate Overview trends; replaced reconciliation donut presentation
+  with labelled 100% stacked coverage; retained signed settlement/component
+  analysis while excluding base Product Price from impact ranking; made chart
+  date basis/aggregation titles explicit; preserved full product names outside
+  compact ranking labels; and moved search-first order inspection above its
+  evidence table. Verification: 59 focused MY Analysis, shared renderer,
+  projection, SG Analysis, and market-context tests passed; `py_compile` and
+  both diff checks passed. Legacy Invoice runtime reads: 0. Business/schema/data
+  writes: 0. Git stage/checkpoint/push: 0. Deployment: **NOT VERIFIED**. Next:
+  Product Owner final UI/UX acceptance is recorded. Deployment: **NOT VERIFIED**.
+
+- Date: 2026-10-29; Task: final Shopee MY Analysis V2 UI/UX polish; State:
+  `MY_ANALYSIS_V2_FINAL_UI_POLISH - IMPLEMENTED / LOCALHOST PRODUCT OWNER REVIEW PENDING`.
+  Outcome: retained the shared canonical MY/SG renderer and changed only
+  presentation. Product, Settlement, and Financial Adjustment KPI hierarchy is
+  explicit; settlement evidence uses lifecycle-safe wording and a compact
+  reconciliation donut; signed settlement/component and ranked-product bars
+  complement the detailed tables. Product and financial trends support bounded
+  Daily/Weekly/Monthly display aggregation, and order inspection is now
+  search-first beside reconciliation. Focused MY V2, projection, SG Analysis,
+  and market-context tests passed (55 tests); compilation and diff checks
+  passed. Legacy Invoice runtime reads: 0. Business/schema/data writes: 0. No
+  stage, checkpoint, or push. Product Owner localhost visual/data review and
+  deployment verification remain pending.
+
+- Date: 2026-10-29; Task: polish Shopee MY Analysis V2 settlement scope and
+  Streamlit UX; State:
+  `MY_ANALYSIS_V2_UIUX_AND_SETTLEMENT_SCOPE_POLISHED - LOCALHOST SMOKE PENDING`.
+  Outcome: corrected the dashboard-level settlement cohort so Total Product
+  Sales stays Full Order-wide while Settled Product Sales, release, components,
+  and settlement difference use the exact committed Statement ORDER population.
+  Added settlement coverage, explicit missing-Statement lifecycle messaging,
+  date-domain-clipped trends, progressive Financial/Reconciliation disclosure,
+  and explicit order selection. The shared MY/SG renderer and canonical
+  authorities are unchanged. Verification: focused MY V2 service/UI tests
+  passed. Business-data writes: 0; schema delta: 0; no stage, checkpoint, or
+  push. Product Owner localhost UI/data smoke remains required; deployment:
+  **NOT VERIFIED**.
+
+- Date: 2026-10-29; Task: implement Shopee MY Analysis V2 from canonical
+  PostgreSQL authorities; State:
+  `MY_ANALYSIS_V2_CANONICAL_POSTGRESQL - IMPLEMENTED / LOCALHOST SMOKE PENDING`.
+  Outcome: replaced the MY Invoice-shaped service/page consumer with an
+  explicit `SHOPEE_MY` provider over the shared Shopee Analysis view model and
+  renderer. Full Order items now define product metrics; the canonical
+  projection defines status/date, payout/released/settlement, native signed
+  components, and linked adjustments. The shared renderer is contract-tested
+  for MY and SG currency/presentation without changing SG Analysis. Focused
+  canonical service/UI tests and `py_compile` passed. No persistence, schema,
+  Product Summary, SG Analysis, Billing, Invoice infrastructure, business-data
+  write, stage, checkpoint, or push occurred. Product Owner localhost UI/data
+  smoke remains required; deployment: **NOT VERIFIED**.
+
+- Date: 2026-10-29; Task: audit Shopee MY Live Analysis legacy financial
+  semantics; State: `MY_LIVE_ANALYSIS_SEMANTIC_MAPPING_AUDIT_COMPLETE`.
+  Outcome: verified the current mixed-authority path and mapped remaining
+  Invoice-derived KPIs/classification against Full Order and
+  OrderFinancialProjection. No MY Analysis migration, formula/UI change,
+  business-data write, test run, stage, commit, or push occurred. Decision
+  required: approve explicit canonical meanings for Total Sales, Refund Amount,
+  and the legacy layout classifier before any cutover. Deployment: **NOT
+  VERIFIED**.
 
 - Date: 2026-10-28; Task: close Shopee SG Analysis OrderFinancialProjection
   cutover; State: `SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER - CLOSED /
@@ -859,6 +1093,20 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   scan passed. Code checkpoint: `72855d2` (`feat: complete sg analysis
   projection cutover`). Business write delta: 0; schema delta: 0; push: **NOT
   PUSHED**; deployment: **NOT VERIFIED**.
+
+- Date: 2026-10-28; Task: audit and complete Shopee SG Analysis canonical
+  projection wiring; State: `SG_ANALYSIS_ORDER_FINANCIAL_PROJECTION_CUTOVER_IMPLEMENTED`.
+  Outcome: SG Analysis already used the canonical projection for settlement,
+  released amount, and component detail, but read status/date from a parallel
+  Full Order map. The minimal wiring completion now obtains its order-row
+  status/date and Order-Created date filtering from `OrderFinancialProjection`;
+  the retained Full Order snapshot is item-only for quantity/subtotal, while
+  the independent market-locked adjustment timeline preserves unlinked events.
+  No formula, MY Analysis, Billing, Invoice, or Google Sheets Invoice path was
+  changed. Verification: 11 focused SG Analysis/projection tests passed and
+  `py_compile` plus `git diff --check` passed. Git: no stage, commit, or push.
+  UAT2 business write delta: 0; schema delta: 0; Decision required: none; Next:
+  selective checkpoint only when authorized.
 
 - Date: 2026-10-28; Task: close OrderFinancialProjection authority boundary;
   State: `ORDER_FINANCIAL_PROJECTION - CLOSED / AUTHORITY BOUNDARY VERIFIED`.
@@ -873,6 +1121,34 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   secret scan found no credential material. Code checkpoint: `cf80bd1`
   (`feat: add order financial projection`). Business write delta: 0; schema
   delta: 0; push: **NOT PUSHED**; deployment: **NOT VERIFIED**.
+
+- Date: 2026-10-28; Task: verify OrderFinancialProjection authority boundary;
+  State: VERIFIED / CORRECTED / UNCHECKPOINTED. Outcome: removed Full Order
+  snapshot access and the convenience `order_status` field from the
+  Statement-only financial reader. The canonical OrderFinancialProjection now
+  exclusively reads the market-bound Full Order snapshot and composes status,
+  order-created date, and explicit missing-Statement state with native
+  Statement and Adjustment facts. SG Analysis internal wiring was adapted with
+  no UI/output change. Verification: 13 focused projection/Statement-financial/
+  SG-Analysis tests passed, changed modules compiled, and diff check passed.
+  Git: no stage, commit, or push. UAT2 business write delta: 0; schema delta:
+  0; Decision required: none; Next: reviewer approval before checkpoint.
+
+- Date: 2026-10-28; Task: implement shared read-only canonical
+  `OrderFinancialProjection`; State: IMPLEMENTED / TESTED / LOCAL SMOKE
+  BLOCKED. Outcome: added the market-bound order-level Full Order + committed
+  Statement + native component + independent adjustment composition service for
+  future consumers only; MY Analysis, SG Analysis UI, Weekly Billing, Monthly
+  Billing, Full Order/Statement ingestion, Product Summary, Product Master,
+  and schemas are unchanged. Full Order coverage is fail-closed; unpayout Full
+  Orders remain explicit; components and adjustments are never item-allocated
+  or combined into a derived net-income field. Verification: 13 focused
+  projection/Statement-financial/SG-Analysis tests passed, changed modules
+  compiled, and diff check passed. PostgreSQL smoke was blocked before a query
+  by absent local runtime credentials (`INVOICEGATHER_PG_USER` /
+  `INVOICEGATHER_PG_PASSWORD`); no Sheets fallback. Git: no stage, commit, or
+  push. UAT2 business write delta: 0; schema delta: 0; Decision required:
+  none; Next: Product Owner/reviewer approval before staging.
 
 - Date: 2026-10-28; Task: close Consolidated Product Summary PostgreSQL
   cutover; State: `CONSOLIDATED_PRODUCT_SUMMARY_POSTGRESQL_CUTOVER - CLOSED /
@@ -893,6 +1169,111 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   (`feat: cut over consolidated product summary to postgres`); no push;
   PostgreSQL, Google Sheets, schema, and business-data write delta: 0;
   deployment: NOT VERIFIED.
+
+- Date: 2026-10-28; Task: migrate Payout Product Summary to canonical
+  PostgreSQL Statement-order selection plus Full Order items; State:
+  IMPLEMENTED / TESTED / LOCAL SMOKE PENDING. Outcome: Payout mode now reads
+  only committed market-bound Statement `ORDER` rows to select payout-date
+  order IDs, then applies the same Full Order item/subtotal calculation as
+  Order-Created mode. It has no Invoice/PDF, Google Sheets Invoice, Statement
+  SKU, Financial Component, adjustment, or product-level fee-allocation path.
+  Missing Full Order coverage and cross-market evidence fail closed. Verification:
+  MY/SG isolated reader, coverage, common-calculation, UI, barcode, and cutover
+  tests; no real PostgreSQL query was possible because external credentials are
+  unavailable in this execution. Git stage/commit/push: 0; PostgreSQL, Google
+  Sheets, schema, and business-data write delta: 0; deployment: NOT VERIFIED.
+  Next: Product Owner localhost smoke with external PostgreSQL credentials.
+
+- Date: 2026-10-28; Task: migrate Order-Created Product Summary to the
+  PostgreSQL Full Order-only reader; State: IMPLEMENTED / TESTED / REAL-DATA
+  PARITY BLOCKED. Outcome: selecting `Order Created Date` now bypasses Invoice
+  tables, Invoice Google Sheets reads, legacy Invoice repository construction,
+  and Statement reads; market-bound Full Order input is fail-closed against
+  cross-market leakage. Payout mode stays on the prior legacy Invoice path.
+  Verification: focused MY/SG reader, Payout-selection, UI, factory, and
+  cutover tests `50 passed, 8 skipped`; `py_compile` passed. The required
+  local PostgreSQL parity read could not start because external runtime
+  credentials were unavailable; Google Sheets fallback was not attempted. Git
+  stage/commit/push: 0; PostgreSQL, Google Sheets, schema, and business-data
+  write delta: 0; deployment: NOT VERIFIED. Next: provide approved external
+  PostgreSQL credentials and run the read-only MY parity comparison.
+
+- Date: 2026-10-28; Task: audit upper-layer PostgreSQL consumers and canonical
+  projection migration path; State: AUDITED / NO IMPLEMENTATION. Outcome: SG
+  Analysis already uses the market-locked Full Order + Statement financial and
+  adjustment projections. MY Analysis and Consolidated Payout Summary retain
+  legacy Invoice readers for financial/product semantics, MY Weekly Billing
+  retains legacy Invoice product data while reading Statement from PostgreSQL,
+  and Monthly Billing remains entirely Google Sheets/legacy-Monthly-bound.
+  No unsafe raw Full-Order-item-to-component join was found in active report
+  paths. Verification: targeted source/repository inventory only. Git stage,
+  commit, and push: 0; application, PostgreSQL, Google Sheets, schema, and
+  business-data write delta: 0. Decision required: canonical Payout/Billing
+  product-financial semantics before their migration. Next: implement only a
+  shared order-level projection and migrate Analysis readers when authorized.
+
+- Date: 2026-10-28; Task: close SG dynamic-zero `SERVICE_FEE_DETAIL` overlap
+  handling; State: CLOSED / REAL SMOKE VERIFIED / LOCAL CHECKPOINT PENDING.
+  Outcome: real mixed Statement smoke passed with 113 NEW and 314 exact
+  duplicates out of 427 orders, 0 conflicts/unsafe, Full Order coverage for
+  all 113 NEW orders, Total Released S$4,496.13, and Adjustment Total S$12.96.
+  The prior 709-order / 910-SKU overlap source is now recognized as already
+  imported with zero unnecessary writes; the 192 `INCOMPLETE_UNSAFE` failures
+  are no longer reproduced. Historical PostgreSQL components were not deleted
+  or rewritten. Focused MY/SG Statement regressions: 102 passed, 14 skipped;
+  `py_compile` and `git diff --check` passed. Google Sheets, PostgreSQL
+  business-data, and migration writes: 0. Git push: 0; deployment: NOT
+  VERIFIED. Next: selective local checkpoint only; no further business Commit.
+
+- Date: 2026-10-28; Task: continue SG dynamic-zero overlap read-only replay;
+  State: RUNTIME REPLAY BLOCKED / ZERO WRITE. Outcome: the approved local
+  PostgreSQL Windows service is running and `127.0.0.1:5433` is reachable, so
+  Docker availability is not the runtime gate. The external
+  `INVOICEGATHER_PG_USER` / `INVOICEGATHER_PG_PASSWORD` variables are absent,
+  so no database connection, baseline count query, 709-order classification,
+  adjustment replay, or row-delta verification was attempted. Focused MY/SG
+  Statement regressions passed `102 passed, 14 skipped`; Google Sheets,
+  PostgreSQL, schema, and business-data writes: 0; Git stage/commit/push: 0;
+  deployment: NOT VERIFIED. Next: provide the approved external PostgreSQL
+  credentials, then run the read-only 709-order replay before checkpointing.
+
+- Date: 2026-10-28; Task: implement the PO-approved narrow dynamic zero-valued
+  `SERVICE_FEE_DETAIL` overlap comparison; State: IMPLEMENTED / RUNTIME REPLAY
+  BLOCKED. Outcome: parser now retains the complete dynamic Service Fee header
+  set and the shared MY/SG classifier treats only a zero-valued `SERVICE_FEE_DETAIL`
+  from `Service Fee Details` as equivalent to an absent counterpart when the
+  opposite parsed source proves the exact header is absent. Nonzero differences,
+  a present header with a missing row, ordinary component absence, ORDER/SKU
+  differences, and unknown committed header provenance remain fail-closed.
+  Focused regressions passed (121 passed, 29 skipped); the real 709-order source
+  parsed as 709 ORDER / 910 SKU rows with the two retired PromoXtra headers
+  absent. The required current PostgreSQL replay could not run: Docker reports
+  no running PostgreSQL container and runtime credentials are unavailable. No
+  Google Sheets, PostgreSQL, schema, or business-data write occurred; Git
+  stage/commit/push: 0; deployment: NOT VERIFIED. Decision required: none.
+  Next: start the approved local PostgreSQL target, supply its external runtime
+  credentials, then perform the read-only 709-order replay before checkpointing.
+
+- Date: 2026-10-28; Task: read-only diagnosis of the 192 Shopee SG Statement
+  overlap bundles in `Income.released.sg.20260929_20261006.xlsx`; State:
+  ROOT CAUSE IDENTIFIED / NO WRITE. Outcome: all 192 are
+  `INCOMPLETE_UNSAFE` (zero `CONFLICT`) and are exactly the 100
+  2026-09-29 plus 92 2026-09-30 overlap orders; the remaining 516 October
+  orders are NEW and the sole exact duplicate is `2609275QXSN3VC`. Each unsafe
+  bundle has equal ORDER and SKU multisets and no monetary, Decimal, NULL/date,
+  sequence, or provenance-equality difference, but PostgreSQL faithfully retains
+  two additional zero-valued `SERVICE_FEE_DETAIL` facts from the historical
+  September export: `PromoXtra 5.45% cap $30` and `PromoXtra 6.54% cap $40`.
+  The later overlapping export omits both columns. The affected historical batch
+  has one ORDER fact/candidate per order and zero orphan components; this is a
+  dynamic-source-header overlap-semantics gap, not incomplete PostgreSQL data or
+  a migration/reconstruction defect. No duplicate rule was changed. Verification:
+  real source parse, active PostgreSQL preflight/reconstruction, and read-only
+  SQL; PostgreSQL/Google Sheets/schema/business/Git writes: 0; deployment:
+  NOT VERIFIED. Decision required: whether structurally absent, zero-valued
+  dynamic Service Fee columns are semantically equivalent during overlap dedupe.
+  Next: implement only a PO-approved, narrow comparison rule with regression
+  coverage; do not retry the Statement Commit first.
 
 - Date: 2026-10-28; Task: checkpoint Product Owner-verified Shopee SG Full
   Order PostgreSQL runtime smoke; State: VERIFIED / CLOSED LOCALLY / LOCAL
@@ -989,6 +1370,23 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   Items plus 771 Orders / 1,953 Items updated; Statement/SG/schema writes: 0;
   Git stage/commit/push: 0; deployment: NOT VERIFIED.
 
+- Date: 2026-10-27; Task: close PostgreSQL Statement / Full Order canonical
+  MY/SG market boundary; State: IMPLEMENTED / TESTED / NO RUNTIME OR SCHEMA
+  CHANGE. Outcome: added focused non-writing regression coverage for the same
+  Order ID in both markets. `MarketContext` maps canonical `shopee_my` /
+  `shopee_sg` to Statement `Shopee` / `Shopee SG`; the financial projection
+  returns only that market's Current order and Statement facts, while the
+  Full Order existence gate rejects the identical ID when it appears only in
+  the other market in either direction. Existing active cross-domain paths
+  were already normalized; no production correction was required. Read-only
+  PostgreSQL check: MY Full Order Current is 14,456 Orders / 21,805 Items;
+  SG is absent. Verification: 71 focused Statement/Full Order tests passed,
+  14 intentional archived skips; changed tests passed `py_compile` and
+  `git diff --check`. Google Sheets/PostgreSQL business-data writes and schema
+  changes: 0. Git stage/commit/push: 0; deployment: NOT VERIFIED. Decision
+  required: none. Next: MY Full Order PostgreSQL parity/reconstruction and
+  runtime-cutover readiness, followed separately by SG historical migration.
+
 - Date: 2026-10-27; Task: Shopee SG Statement PostgreSQL runtime cutover;
   State: IMPLEMENTED / TESTED / HISTORICAL REPLAY VERIFIED / LOCAL CHECKPOINTED
   / NOT PUSHED. Outcome: `56e9e8982b472fe663229bdb6d7c2de6988ef6e3`
@@ -1003,6 +1401,50 @@ Focused alignment evidence for `678cd06`: 82 tests, staged-import checks, `py_co
   facts were removed; Google Sheets writes, PostgreSQL business-data writes,
   schema changes, and deployment: 0 / NOT VERIFIED. A real NEW SG Statement
   Commit was not performed and requires separate Product Owner authorization.
+- Date: 2026-10-27; Task: Product Owner PostgreSQL migration strategy refresh
+  and MY Statement local checkpoint; State: MY Statement PostgreSQL acceptance
+  VERIFIED / LOCAL CHECKPOINT AUTHORIZED / NOT PUSHED. Outcome: Product Owner
+  confirmed progressive PostgreSQL migration for MY and SG application-owned
+  runtime/history data, while Product Master remains staff-editable Google
+  Sheets. The completed MY Statement runtime is the first checkpointed domain:
+  parity, atomic transaction/rollback, Numeric readback parity, successful real
+  Commit, and repeat-source idempotency are accepted. Stable Google Sheets code
+  remains available by explicit configuration; no dual authority or automatic
+  fallback is allowed. Next migration is SG Statement, then market-isolated
+  Full Order Current. Deployment/company-server work remains deferred. No
+  Google Sheets write, PostgreSQL business-data write, or remote push is part
+  of this documentation/checkpoint task.
+
+- Date: 2026-10-27; Task: narrow PostgreSQL Statement transactional readback comparison fix; State: IMPLEMENTED / TESTED / UNCHECKPOINTED / READY FOR PO RUNTIME AUTHORIZATION; Outcome: reused the active comparison-only Decimal canonicalizer only at the PostgreSQL full-field verification boundary for declared `Numeric` columns. PostgreSQL fixed-scale values (`12.90`) now compare semantically with source values (`12.9`); identifiers, dates, provenance, status, batch/source fields, blanks, and all other non-Numeric values retain exact equality. Full stable-key lookup and pre-COMMIT verification remain mandatory. Verification: 46 focused unit/Statement tests passed with 8 expected guarded skips; local PostgreSQL controls passed for four-domain scale-only readback rollback, genuine numeric mismatch rollback, and a generated all-four-domain transaction that reached COMMIT then targeted cleanup; all four injected insert-failure rollback cases passed. Four-table post-test counts are restored to 18,381 / 397,647 / 448 / 20. Google Sheets/live MY Statement commit/schema write delta: 0; temporary generated local test rows were removed; Git stage/commit/push: 0; deployment: NOT VERIFIED. Next: Product Owner authorization is required before any new real MY Statement Commit attempt.
+
+- Date: 2026-10-27; Task: first real MY Statement PostgreSQL Commit failure audit; State: READ-ONLY / FULL_ROLLBACK_CONFIRMED / FIX REQUIRED BEFORE RETRY; Outcome: the failed batch `20261027022841-76496ff6` has zero rows in `Statement_Data`, `Statement_Financial_Components`, `Statement_Summary`, and `Order_Adjustments`; the four baseline counts remain 18,381 / 397,647 / 448 / 20. The transaction reached the fail-closed full-field readback before commit, so its temporary inserts rolled back. The first verified identity existed (`ORDER`, sequence `1`) but PostgreSQL `Numeric(12,2)` readback rendered source `12.9` / `0` as `12.90` / `0.00`; the verifier compared lexical cells rather than the established comparison-only Decimal canonical form. The same representation-only defect covers 2,725 of 2,735 planned Statement Data rows, 43,981 of 57,973 Components, and 12 of 32 Summary rows; 9 planned Adjustments are unaffected. This audit made no Google Sheets or PostgreSQL business-data/schema writes; Git stage/commit/push: 0. Required next action: add one type-aware canonical readback representation boundary while retaining full-field verification, then run the existing rollback control and obtain separate PO authorization before any new live Commit attempt.
+
+- Date: 2026-10-27; Task: narrow shared Statement classifier monetary canonicalization; State: IMPLEMENTED / TESTED / UNCHECKPOINTED; Outcome: added one backend-neutral, comparison-only Decimal canonicalizer for the four Statement ORDER/SKU monetary bundle fields and Financial Component amount. It removes insignificant scale, renders signed zero as `0`, preserves NULL/blank/invalid text behavior, and leaves all non-monetary provenance and genuine monetary differences under exact complete-bundle comparison. PostgreSQL storage remains `Numeric(12,2)`; no Google Sheets fallback, writer, calculation, display, schema, or business data changed. Verification: 132 focused MY/SG Statement, PostgreSQL-cutover, and persistence/import tests passed (20 intentional guarded/retired skips); protected MY source replay against 198 relevant PostgreSQL Statement rows and 4,203 components returned 1,119 NEW / 76 EXACT_DUPLICATE / 0 CONFLICT / 0 INCOMPLETE_UNSAFE, with 9 new / 1 skipped / 0 conflicting adjustments. Git stage/commit/push: 0; UAT2/Google Sheets/PostgreSQL business-data and schema write delta: 0; deployment: NOT VERIFIED. Decision required: none; Next: selective checkpoint only after Product Owner authorization.
+
+- Date: 2026-10-27; Task: PostgreSQL migration knowledge update; State: DOCUMENTATION SYNCHRONIZED / NO CODE OR BUSINESS-DATA WRITE; Outcome: added the reusable PostgreSQL Migration Playbook and Statement incident index to scope, plus the migration acceptance checklist and confirmed parity/canonicalization lessons to Project Status. Verification: documentation diff review and `git diff --check`; Git stage/commit/push: 0; UAT2/Google Sheets/PostgreSQL business-data and schema write delta: 0; deployment: NOT VERIFIED; Decision required: none; Next: apply the playbook to future backend migration proposals.
+
+- Date: 2026-10-27; Task: Python dependency declaration audit and completion; State: VERIFIED / UNCHECKPOINTED; Outcome: scanned active source, scripts, and tests and added direct runtime declarations for Altair, Google Auth, SQLAlchemy, and the existing psycopg2 PostgreSQL dialect driver. The README now uses the project `.venv` interpreter for installation and Streamlit startup. Verification: `.venv` requirements install resolved without changes, `pip check` passed, direct runtime imports passed, and PostgreSQL engine construction loaded `postgresql+psycopg2` without a connection or business write. UAT2/Google Sheets/PostgreSQL business-data and schema write delta: 0; Git stage/commit/push: 0; deployment: NOT VERIFIED. Next: selective checkpoint only after Product Owner authorization.
+
+- Date: 2026-10-26; Task: real MY mixed-Statement Google Sheets commit verification; State: VERIFIED WRITE CAPACITY BLOCKER / ZERO WRITE / NO RETRY; Outcome: fresh configured-MY preflight of `Income.released.my.20261011_20261023.xlsx` is eligible `MIXED`: 1,195 source orders, 1,119 NEW, 76 exact duplicates, zero conflict/incomplete/NEW Full Order gaps, 2,735 Statement_Data rows, 57,973 component rows, 32 Summary rows, 9 new and 1 skipped Adjustment, RM33,126.14 new released amount. The one authorized batch attempt reached `spreadsheets.values.batchUpdate`, which returned `HttpError` HTTP 400 after 28,317 ms: `Invalid data[1]: This action would increase the number of cells in the workbook above the limit of 20000000 cells.` The actual request was 18,030,712 bytes / 17.1954 MiB, 4 ranges, 1,095,578 cells: Statement_Data 2,735; Components 57,973; Summary 32; Adjustments 9. Google returned no success response; immediate writer verification and an independent post-attempt active snapshot found zero added rows in every target (18,381 / 397,647 / 448 / 20 unchanged), so `WRITE_NOT_APPLIED` / **ZERO_WRITE_CONFIRMED**. This confirms a Google Sheets workbook cell-capacity failure; serialized payload size alone is not the proven cause. No retry, repair, split, schema, code, UAT2 business, Git, or deployment action followed. Decision required: separately approve a storage-capacity remediation (not batch splitting) before another live attempt.
+
+- Date: 2026-10-26; Task: Statement Google Sheets failed-write diagnostic preservation; State: IMPLEMENTED / TESTED / UNCHECKPOINTED / ZERO BUSINESS WRITE; Outcome: the shared active Statement writer now retains a payload-free root gateway diagnostic when its one Google Sheets values batch throws and immediate authoritative readback confirms `NONE_APPLIED`. The diagnostic contains only exception type, HTTP status/API reason where available, redacted short message, request method/operation, serialized payload size, range/row/cell shape, target range names, and elapsed time; it flows through the locked commit attempt to opt-in session trace diagnostics. `WRITE_NOT_APPLIED`, the one-request/no-retry policy, immediate readback, partial-write recovery guard, NEW-only plan, adjustment filtering, and Step 5 UI state are unchanged. Verification: six synthetic HTTP/timeout/transport gateway cases plus no-write readback coverage, locked-service propagation, and Step 5 diagnostic-trace coverage passed; changed modules passed `py_compile` and `git diff --check`. The protected 1,119-order source is unavailable locally, so its exact serialized request size remains pending; a blank-value shape lower bound for 2,735 / 57,973 / 32 / 9 target rows is 3,408,467 bytes (3.25 MiB). Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Next: replay the hosted failure with diagnostics enabled or locally stage the protected source to record the exact sanitized gateway reason and payload size.
+
+- Date: 2026-10-26; Task: shared Statement refresh-to-reconcile dead-state fix; State: IMPLEMENTED / TESTED / UNCHECKPOINTED / ZERO BUSINESS WRITE; Outcome: fixed the refresh lifecycle where an unavailable rebuilt writer preflight could reach Step 4 with only generic `Reconciliation is not available` text and a disabled forward action. The order-existence adapter now retains the authoritative blocker reason; Step 4 supplies an explicit safe rebuild action using the retained source; stale Review and verified `WRITE_NOT_APPLIED` refreshes intentionally return to Reconcile before a new Review plan can be reached. A session review missing its staged source bytes fails closed and requests re-upload. No Statement business classification, complete-bundle identity, Full Order gate, partial-commit, adjustment, or writer behavior changed. Verification: 30 focused UI tests passed; 8 new MY/SG AppTest/adapter cases passed; `py_compile` and `git diff --check` passed. A broader already-dirty Invoice workflow stabilization fixture still fails before this Statement path (`test_resolved_upload_with_current_new_classification_allows_downstream_happy_path[4]`: missing its expected Invoice continuation control) and is not counted as passing. Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Next: hosted MY 1,195-order refresh/reconcile replay and SG smoke with diagnostics enabled.
+
+- Date: 2026-10-26; Task: shared Statement Commit outcome navigation fix; State: IMPLEMENTED / TESTED / UNCHECKPOINTED / ZERO BUSINESS WRITE; Outcome: removed the unconditional `committed=False` refresh-and-Validate transition. The locked shared service now returns `COMMITTED`, `ALREADY_IMPORTED`, `STALE_REVIEW`, `CONFLICT`, `INCOMPLETE_UNSAFE`, `WRITE_FAILED`, or `BLOCKED` from existing authoritative preflight/reason evidence. UI consumes that outcome without duplicate classification: no-new-facts becomes an idempotent Review completion, stale/conflict/unsafe/blocked remain at Review with exact refresh blocker, and verified no-write writer failure remains at Review with an error. The separate session/import instability is explicitly unresolved. Verification: 84 Statement UI/service tests passed with 14 archived skips; 77 Statement persistence/writer/SG-pilot tests passed; one unrelated pre-existing Invoice AppTest fixture failed in the broader dirty-worktree group; `py_compile` and `git diff --check` passed. Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Decision required: none. Next: authenticated MY/SG replay with diagnostics enabled, then selective checkpoint only after runtime confirmation.
+
+- Date: 2026-10-26; Task: exact Statement Commit-path audit; State: MIXED COMMIT RESET / RUNTIME TRACE READY / ZERO BUSINESS WRITE; Outcome: proved that a `committed=False` result from locked Commit always refreshes the review and intentionally calls `_set_step(3)`, while the handler itself never invokes staged-source cleanup, recovery removal, or global reset. Success marks `weekly_statement_commit_completed`, requests rerun, and now returns immediately as a defensive no-fallthrough guard. Added opt-in redacted A-G commit transition tracing and focused fake-writer success, writer-not-applied, and no-new-facts coverage. The real protected MY runtime trace is still required to identify why the source disappears. Verification: 6 focused tests passed; changed Python modules compiled; `git diff --check` passed. Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Decision required: none. Next: enable `INVOICEGATHER_STATEMENT_STATE_DIAGNOSTICS=1`, replay the hosted MY Commit action, and inspect the first post-rerun trace before changing the uncommitted-result navigation policy.
+
+- Date: 2026-10-26; Task: Statement source-selection runtime crash guard; State: IMPLEMENTED / APPTEST VERIFIED / REAL RUNTIME REPLAY PENDING; Outcome: fixed `_render_source_selection` so a `None` or stale `weekly_statement_selected_source` cannot index the source map and abort a rerun. The selector persists/restores only a known source identity (explicit source type or source-specific staged review); a batch ID alone no longer guesses `Platform Orders`. An absent/unknown value renders an explicit source-selection state, and the keyed control uses session persistence. This is a confirmed crash-path fix but not yet proof that it was the Step 5-to-Step 3 root cause. Verification: 4 focused Streamlit AppTests passed and `app.py`/changed modules passed `py_compile` plus `git diff --check`; the local `streamlit run app.py` server reached HTTP 200 and clean parser imports, but its protected workflow could not be entered without configured credentials, so no authenticated Step 5 replay was performed. Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Decision required: provide an authenticated hosted/local session for the required MY/SG runtime replay. Next: replay Review & Commit with diagnostics enabled, then determine whether any remaining state writer still regresses the stage.
+
+- Date: 2026-10-25; Task: shared MY/SG Statement Review workflow state regression; State: IMPLEMENTED / TESTED / UNCHECKPOINTED; Outcome: fixed a reproducible presentation-state regression where `data_import_step` could be reset to Validate while a coherent Statement review and current commit plan remained in session. A shared session-local completed-step checkpoint now restores the highest valid intentional navigation destination across reruns/hydration for both MY and SG. Genuine currency/evidence drift remains at Review with an explicit refresh blocker, hidden old-plan details, and a disabled Commit control; successful Refresh validation atomically replaces the pair and clears the stale marker. No Statement business classification, NEW/EXACT_DUPLICATE/CONFLICT/INCOMPLETE_UNSAFE semantics, Full Order gate, partial commit, adjustment logic, parser, or writer changed. Verification: 5 new focused state/AppTest regressions passed; focused Statement suite 53 passed / 14 archived skips; `py_compile` and `git diff --check` passed. A broader already-dirty workflow-stabilization grouping reports 11 failures outside this checkpoint path and is not counted as passing. The local 1,195-order MY source was unavailable for a new runtime replay; prior verified 1,119 NEW / 76 duplicate / 0 conflict / 0 Full Order gap evidence remains applicable because business calculation code is unchanged. Google Sheets/UAT2/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Decision required: none. Next: hosted MY 1,195-order Review rerun and normal SG review smoke before selective checkpoint.
+
+- Date: 2026-10-27; Task: MY Statement PostgreSQL runtime cutover Phase 2; State: IMPLEMENTED / TESTED / UNCHECKPOINTED; Outcome: added a MY-only fail-closed PostgreSQL Statement repository and wired the existing MY Data Import/financial/adjustment contracts, reporting date authority, and Weekly Billing Statement reads to it. The repository reuses the active Full Order and complete-bundle rules, uses serializable advisory-lock transactions with fresh preflight, and verifies every inserted fact by readback. Phase 2A widened only local Statement varchar schema; four-table counts remained 18,381 / 397,647 / 448 / 20. Verification: 204 focused tests passed; 14 explicitly retired-contract tests and 6 credential-guarded local-control tests were skipped in the normal suite, while all 6 local-control tests (four staged-domain rollback, full-field readback rollback, advisory-lock serialization) passed under the explicit local target; compile and diff checks passed. MY factory smoke rebuilt 18,381 Statement rows, 397,647 components, and 20 adjustments without Google Statement-tab access. Google Sheets write delta: 0; PostgreSQL business-data write delta: 0; local schema write: widening only; Git stage/commit/push: 0; deployment/live business commit: NOT VERIFIED / NOT AUTHORIZED. Next: selective review/checkpoint only after PO authorization.
+
+- Date: 2026-10-25; Task: shared MY/SG complete-bundle Statement partial commit; State: IMPLEMENTED / TESTED / UNCHECKPOINTED; Outcome: replaced weak order-level overlap handling with complete per-order evidence classification across ORDER, native SKU, component, refund, and provenance facts. Mixed sources now skip only exact complete duplicates, gate only new orders against Full Order Current, and construct a child-complete new-facts write set; missing/extra evidence is `INCOMPLETE_UNSAFE`, changed facts are `CONFLICT`, and a fully duplicate source with no new adjustments is `ALREADY_IMPORTED / NO_NEW_FACTS`. Adjustments are classified independently and unlinked events remain preserved. Reconcile and locked Commit use the same fresh-snapshot classifier/write-plan builder, while source control totals remain separate from filtered commit totals. Fresh read-only MY replay: 1,119 new / 76 duplicate / 0 conflict / 0 unsafe; 0 new-order Full Order gaps; RM35,759.06 source total versus RM33,126.14 proposed new released amount; 9 new / 1 skipped / 0 conflicting adjustments; eligible `MIXED`. Verification: focused shared Statement, writer, SG pilot, MY parity, and Streamlit workflow regressions passed; py_compile and diff check passed. Google Sheets/database/schema/business write delta: 0. Git stage/commit/push: 0; Deployment: NOT VERIFIED. Next: Product Owner runtime verification before selective checkpoint.
+
+- Date: 2026-10-25; Task: Shopee SG Analysis Phase A; State: IMPLEMENTED / TESTED / UNCHECKPOINTED; Outcome: enabled the Shopee SG Analysis route with a separate market-aware Full Order / Statement / component / adjustment report model, read-only adjustment lookup, explicit Order Created versus Payout populations, native component drill-down, and separate immutable adjustment timeline. No Invoice/PDF, Product Master, MY financial-layout, Original Sales, Discount, product-allocation, profit, net-result, Billing, or PostgreSQL calculation was introduced. Verification: 49 focused SG financial-read, SG Analysis, and MY Live Analysis service/UI regressions passed; py_compile and diff check passed. Live SG read-only result: 8,173 Current Orders / 10,886 Items; 2,417 settled / 5,756 without Statement; 123,033 components; 17 adjustment events; no MY fallback. UAT2/business/schema write delta: 0. Git: checkpoint pending selective staging and clean-checkout review. Deployment: NOT VERIFIED. Decision required: none. Next: selective checkpoint of SG Analysis Phase A only.
+
 - Date: 2026-10-25; Task: align Shopee SG Consolidated Product Summary status rules; State: IMPLEMENTED / TESTED / COMMITTED / PUSHED; Outcome: removed the SG-only Order Created status branch and routed MY and SG through one exact existing normalized predicate. `To Ship` / `To ship` and `Cancelled` are excluded for both markets; `Canceled` and unknown statuses preserve MY's existing inclusion behavior. The date picker and Order Created Summary now consume the same shared eligible rowset for both markets. Fresh SG read-only verification remains 8,173 Current orders / 10,886 items, 89 dates (2026-07-01 through 2026-09-30), 10,395 eligible items, 317 unique NAV/SKU/USOLF groups, zero duplicate groups, and zero non-SG source rows; live SG has no affected `To Ship` / `To ship` / `Canceled` orders, so totals are unchanged. Verification: 30 focused Summary service/UI tests and `py_compile` passed. UAT2/schema/business write delta: 0. Git: isolated `fix: align shopee sg product summary status rules` checkpoint pushed to `feature/uat2-invoice-persistence-integration`. Deployment: NOT VERIFIED. Next: continue the separately scoped SG reporting work.
 
 - Date: 2026-10-24; Task: Shopee MY any-period Statement integration and active test-contract cleanup; State: IMPLEMENTED / TESTED / COMMITTED / PUSHED; Outcome: MY adopted the SG-style market-scoped Full Order Current existence gate and semantic overlap dedupe, with a shared committed Statement financial read boundary; active tests no longer require Invoice/PDF, Product Master, SKU allocation, or calendar-period gates. 14 explicitly retired V2/Product Master/Invoice-PDF tests remain archived. Verification: 118 focused MY/SG Statement tests passed and 14 archived tests skipped; py_compile and staged diff check passed. Git: `c7908deaaa520794e78e40b4f765c3d5ed2a83b1` pushed to `feature/uat2-invoice-persistence-integration`; UAT2 write delta 0; schema delta 0; deployment NOT VERIFIED. Next: migrate a report surface only after separate Product Owner authorization.

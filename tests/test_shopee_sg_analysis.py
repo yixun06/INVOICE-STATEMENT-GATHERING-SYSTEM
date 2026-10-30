@@ -181,6 +181,7 @@ def test_sg_ui_reuses_the_shared_renderer_with_sgd_controls_and_search_first_ins
     assert app.exception == []
     assert [title.value for title in app.title] == ["Shopee SG - Analysis V2"]
     assert any(element.label == "Date basis" for element in app.selectbox)
+    next(control for control in app.get("button_group") if control.label == "Analysis workspace").set_value("Financial & Reconciliation").run(timeout=20)
     assert any(element.label == "Search Order ID..." for element in app.text_input)
     assert streamlit_currency_format("SGD") == "S$ %,.2f"
 
@@ -192,6 +193,7 @@ def test_sg_order_inspection_presents_missing_statement_as_pending_evidence():
         "render_shopee_sg_analysis(_snapshot(include_statement=False))\n"
     )
     app.run(timeout=20)
+    next(control for control in app.get("button_group") if control.label == "Analysis workspace").set_value("Financial & Reconciliation").run(timeout=20)
 
     search = next(element for element in app.text_input if element.label == "Search Order ID...")
     search.set_value("SG-PENDING").run(timeout=20)

@@ -91,10 +91,17 @@ from ..services.data_import_state import (
     begin_next_full_order_upload,
     clear_statement_upload_attempt,
     invoice_upload_downstream_eligibility,
+    mark_statement_review_stale,
     mark_statement_review_stale_after_invoice_commit,
+    record_statement_commit_checkpoint,
+    record_statement_commit_first_render,
+    record_statement_workflow_transition,
     replace_statement_review_after_refresh,
+    restore_statement_workflow_step,
     reset_invoice_upload_attempt,
+    set_statement_workflow_step,
     statement_stage_review_consistency,
+    statement_workflow_diagnostics_enabled,
 )
 from ..services.shopee_weekly_statement_service import (
     StagedShopeeWeeklyStatement,
@@ -109,6 +116,7 @@ from ..services.shopee_statement_import import (
 )
 from ..services.shopee_statement_persistence import (
     StatementCommitBlocked,
+    StatementCommitOutcome,
     StatementWriteIntegrityError,
 )
 from ..services.shopee_full_order_import import (
@@ -196,7 +204,7 @@ DATA_IMPORT_PLATFORMS = (
     DataImportPlatform(
         key="shopee_my",
         display_name="Shopee MY",
-        subtitle="Import Malaysian marketplace invoices and statements.",
+        subtitle="Import Shopee MY orders and statements.",
         expected_platform="Shopee",
         supported_source_types=_ALL_SOURCE_TYPES,
         market_context=SHOPEE_MY,
@@ -204,7 +212,7 @@ DATA_IMPORT_PLATFORMS = (
     DataImportPlatform(
         key="shopee_sg",
         display_name="Shopee SG",
-        subtitle="Singapore marketplace import workspace.",
+        subtitle="Import Shopee SG orders and statements.",
         expected_platform="Shopee",
         supported_source_types=frozenset({
             PLATFORM_ORDERS, SHOPEE_FULL_ORDER_LIST, SHOPEE_WEEKLY_STATEMENT,
@@ -228,6 +236,15 @@ DATA_IMPORT_PLATFORMS = (
     ),
 )
 _DATA_IMPORT_PLATFORM_BY_KEY = {platform.key: platform for platform in DATA_IMPORT_PLATFORMS}
+_VISIBLE_DATA_IMPORT_PLATFORMS = DATA_IMPORT_PLATFORMS[:2]
+_VISIBLE_SOURCE_TYPES = frozenset({SHOPEE_FULL_ORDER_LIST, SHOPEE_WEEKLY_STATEMENT})
+_SOURCE_TYPE_BY_LABEL = {
+    "Full Order Import": SHOPEE_FULL_ORDER_LIST,
+    "Statement": SHOPEE_WEEKLY_STATEMENT,
+}
+_SOURCE_LABEL_BY_TYPE = {
+    source_type: label for label, source_type in _SOURCE_TYPE_BY_LABEL.items()
+}
 ACTIVE_IMPORT_PLATFORM_KEY = "data_import.active_platform"
 SHOW_PLATFORM_SELECTOR_KEY = "data_import.show_platform_selector"
 PENDING_PLATFORM_SWITCH_KEY = "data_import.pending_platform_switch"
@@ -254,9 +271,11 @@ _WORKFLOW_KEYS = (
     "invoice_upload_attempt",
     "weekly_statement_stage",
     "weekly_statement_review",
+    "weekly_statement_workflow_step",
     "weekly_statement_review_stale_reason",
     "weekly_statement_upload_selected",
     "weekly_statement_commit_completed",
+    "weekly_statement_commit_noop",
     "invoice_commit_completed",
     "invoice_commit_completed_count",
     "weekly_statement_uploader_version",
@@ -312,6 +331,14 @@ _FINANCIAL_FORMULA_MISMATCH = re.compile(
 )
 def initialize_data_import_state() -> None:
     """Initialize presentation-only state once per Streamlit session."""
+    if "data_import_step" not in st.session_state:
+        record_statement_workflow_transition(
+            st.session_state,
+            key="data_import_step",
+            before=None,
+            after=1,
+            reason="initialize_data_import_state",
+        )
     st.session_state.setdefault("data_import_step", 1)
     st.session_state.setdefault("import_source_type", None)
     st.session_state.setdefault("weekly_statement_uploader_version", 0)
@@ -329,6 +356,22 @@ def initialize_data_import_state() -> None:
 def reset_data_import_state() -> None:
     """Remove UI-only workflow state when the active batch is cleared."""
     for key in _WORKFLOW_KEYS:
+        if key in {
+            "data_import_step",
+            "import_source_type",
+            "weekly_statement_stage",
+            "weekly_statement_review",
+            "weekly_statement_workflow_step",
+            "weekly_statement_review_stale_reason",
+            "weekly_statement_commit_noop",
+        }:
+            record_statement_workflow_transition(
+                st.session_state,
+                key=key,
+                before=st.session_state.get(key),
+                after=None,
+                reason="reset_data_import_state",
+            )
         st.session_state.pop(key, None)
     st.session_state.pop(ACTIVE_IMPORT_MARKET_KEY, None)
     for key in tuple(st.session_state):
@@ -399,6 +442,7 @@ def render_data_import(
 ) -> None:
     """Render the sequential import workspace over the existing services."""
     initialize_data_import_state()
+    record_statement_commit_first_render(st.session_state)
     _adopt_legacy_platform_batch()
     _complete_platform_switch_after_discard()
     platform = active_data_import_platform(st.session_state)
@@ -411,8 +455,18 @@ def render_data_import(
         st.rerun()
     st.title(f"{platform.display_name} · Data Import")
     st.caption("Use the active-batch workflow to stage, validate, reconcile, and review source data.")
+    if statement_workflow_diagnostics_enabled():
+        _render_statement_workflow_diagnostics()
     _render_wizard_progress(step)
     source_type = st.session_state.get("import_source_type")
+    if platform.key not in {"shopee_my", "shopee_sg"} or (
+        source_type and source_type not in _VISIBLE_SOURCE_TYPES
+    ):
+        st.warning("This import workflow is no longer available. Discard the current batch to start a supported import.")
+        if st.button("Discard current batch", icon=":material/delete_outline:", key="discard_legacy_import_batch"):
+            discard_current_batch()
+            st.rerun()
+        return
     if source_type and not platform_supports_source(platform, source_type):
         _render_unavailable_capability(platform, source_type)
         return
@@ -457,9 +511,10 @@ def render_data_import(
 
 
 def _adopt_legacy_platform_batch() -> None:
-    """Present a pre-wizard batch as Platform Orders without changing it."""
-    if has_active_import_batch(st.session_state) and not st.session_state.get("import_source_type"):
-        st.session_state.import_source_type = PLATFORM_ORDERS
+    """Restore an evidenced source type without guessing from a batch id alone."""
+    restored_source = _restore_evidenced_source_type(st.session_state)
+    if restored_source is not None and not st.session_state.get("import_source_type"):
+        st.session_state.import_source_type = restored_source
         st.session_state.data_import_step = max(int(st.session_state.get("data_import_step", 1)), 3)
     if has_active_import_batch(st.session_state):
         market_platform = _platform_for_active_market(st.session_state)
@@ -486,6 +541,30 @@ def _complete_platform_switch_after_discard() -> None:
     if pending is not None:
         bind_active_import_platform(st.session_state, pending)
         st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = False
+
+
+def _restore_evidenced_source_type(state: MutableMapping[str, Any]) -> str | None:
+    """Return the source type only when current session evidence identifies it.
+
+    A ``batch_id`` establishes that work exists, but does not identify which
+    workflow created it.  Recover only an explicit valid source or a review
+    object unique to a source workflow; callers must otherwise keep the user
+    at safe source selection.
+    """
+
+    source_type = state.get("import_source_type")
+    if source_type in _SOURCE_LABEL_BY_TYPE:
+        return str(source_type)
+    if state.get("full_order_review") is not None:
+        return SHOPEE_FULL_ORDER_LIST
+    if state.get("monthly_statement_review") is not None:
+        return SHOPEE_MONTHLY_STATEMENT
+    if (
+        state.get("weekly_statement_review") is not None
+        or state.get("weekly_statement_stage") is not None
+    ):
+        return SHOPEE_WEEKLY_STATEMENT
+    return None
 
 
 def active_data_import_platform(state: Mapping[str, Any]) -> DataImportPlatform | None:
@@ -552,7 +631,11 @@ def bind_active_import_platform(
 
 
 def platform_supports_source(platform: DataImportPlatform, source_type: str) -> bool:
-    return source_type in platform.supported_source_types
+    return (
+        platform.key in {"shopee_my", "shopee_sg"}
+        and source_type in _VISIBLE_SOURCE_TYPES
+        and source_type in platform.supported_source_types
+    )
 
 
 def _render_platform_selection(discard_current_batch: Callable[[], None]) -> None:
@@ -593,7 +676,7 @@ def _render_platform_selection(discard_current_batch: Callable[[], None]) -> Non
             return
         st.session_state.pop(PENDING_PLATFORM_SWITCH_KEY, None)
 
-    for row in (DATA_IMPORT_PLATFORMS[:2], DATA_IMPORT_PLATFORMS[2:]):
+    for row in (_VISIBLE_DATA_IMPORT_PLATFORMS,):
         columns = st.columns(2)
         for column, platform in zip(columns, row):
             with column:
@@ -661,6 +744,15 @@ def _normalize_step_for_source(state: MutableMapping[str, Any]) -> int:
         # A presentation step alone is never proof that a Full Order upload was
         # validated.  Return to Upload rather than showing a stale completion.
         step = 2
+    if state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        step = restore_statement_workflow_step(state, step)
+    record_statement_workflow_transition(
+        state,
+        key="data_import_step",
+        before=state.get("data_import_step"),
+        after=step,
+        reason="normalize_step_for_source",
+    )
     state["data_import_step"] = step
     return step
 
@@ -670,10 +762,20 @@ def _current_step() -> int:
 
 
 def _set_step(step: int) -> None:
-    st.session_state.data_import_step = min(
+    normalized = min(
         max(step, 1),
         _max_internal_step_for_source(st.session_state.get("import_source_type")),
     )
+    record_statement_workflow_transition(
+        st.session_state,
+        key="data_import_step",
+        before=st.session_state.get("data_import_step"),
+        after=normalized,
+        reason="set_step",
+    )
+    st.session_state.data_import_step = normalized
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        set_statement_workflow_step(st.session_state, normalized)
 
 
 def _render_wizard_progress(current_step: int) -> None:
@@ -683,13 +785,28 @@ def _render_wizard_progress(current_step: int) -> None:
     )
 
 
+def _render_statement_workflow_diagnostics() -> None:
+    """Render the opt-in runtime transition trace without source payloads."""
+
+    entries = st.session_state.get("statement_workflow_transition_log", ())
+    with st.expander("Development: Statement workflow transitions", expanded=False):
+        st.caption("Development-only redacted session trace; no source or financial data is shown.")
+        if entries:
+            st.dataframe(entries, hide_index=True)
+        else:
+            st.caption("No Statement workflow state transition has been recorded in this session.")
+
+
 def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
     platform = active_data_import_platform(st.session_state)
     if platform is None:
         st.session_state[SHOW_PLATFORM_SELECTOR_KEY] = True
         st.rerun()
         return
-    active_source = st.session_state.get("import_source_type") if st.session_state.get("batch_id") else None
+    restored_source = _restore_evidenced_source_type(st.session_state)
+    active_source = restored_source if st.session_state.get("batch_id") else None
+    if active_source is not None and st.session_state.get("import_source_type") != active_source:
+        st.session_state.import_source_type = active_source
     if active_source:
         with st.container(border=True):
             st.subheader("Continue current batch")
@@ -705,23 +822,29 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
         return
     with st.container(border=True):
         st.subheader("Select source")
+        persisted_source = _restore_evidenced_source_type(st.session_state)
+        persisted_label = _SOURCE_LABEL_BY_TYPE.get(persisted_source)
+        widget_key = "weekly_statement_selected_source"
+        if persisted_label is not None and st.session_state.get(widget_key) not in _SOURCE_TYPE_BY_LABEL:
+            # The staged review/source is authoritative over an absent or stale
+            # widget value.  Set this before creating the widget so Streamlit
+            # hydrates a valid visual selection on the same rerun.
+            st.session_state[widget_key] = persisted_label
+        elif persisted_label is None and st.session_state.get(widget_key) not in _SOURCE_TYPE_BY_LABEL:
+            st.session_state.pop(widget_key, None)
         source_label = st.segmented_control(
             "Import workflow",
-            (
-                "Invoice Import",
-                "Full Order Import",
-                "Statement",
-                "Monthly Statement",
-            ),
-            key="weekly_statement_selected_source",
-            default="Invoice Import",
+            tuple(_SOURCE_TYPE_BY_LABEL),
+            key=widget_key,
+            persist_state="session",
         )
-        source_type = {
-            "Invoice Import": PLATFORM_ORDERS,
-            "Full Order Import": SHOPEE_FULL_ORDER_LIST,
-            "Statement": SHOPEE_WEEKLY_STATEMENT,
-            "Monthly Statement": SHOPEE_MONTHLY_STATEMENT,
-        }[source_label]
+        source_type = _SOURCE_TYPE_BY_LABEL.get(source_label)
+        if source_type is None:
+            st.info(
+                "Choose an import workflow before continuing. No source was inferred from missing widget state.",
+                icon=":material/touch_app:",
+            )
+            return
         st.caption(
             f"PDF or ZIP order documents for {platform.display_name}."
             if source_type == PLATFORM_ORDERS
@@ -750,12 +873,10 @@ def _render_source_selection(discard_current_batch: Callable[[], None]) -> None:
 
 
 def _render_unavailable_capability(platform: DataImportPlatform, source_type: str) -> None:
-    source_label = {
-        PLATFORM_ORDERS: "Invoice Import",
-        SHOPEE_FULL_ORDER_LIST: "Full Order Import",
-        SHOPEE_WEEKLY_STATEMENT: "Statement",
-        SHOPEE_MONTHLY_STATEMENT: "Monthly Statement",
-    }[source_type]
+    source_label = _SOURCE_LABEL_BY_TYPE.get(source_type)
+    if source_label is None:
+        st.error("The selected import workflow is no longer recognized. Choose a source again.")
+        return
     if platform.key == "shopee_sg":
         st.info(f"This import workflow is not available for {platform.display_name} yet.")
     else:
@@ -1084,6 +1205,20 @@ def _render_weekly_statement_upload() -> None:
                 full_order_repository=settings.create_full_order_current_repository(),
                 market_context=context,
             )
+            record_statement_workflow_transition(
+                st.session_state,
+                key="weekly_statement_review",
+                before=st.session_state.get("weekly_statement_review"),
+                after=review,
+                reason="statement_upload_validation_success",
+            )
+            record_statement_workflow_transition(
+                st.session_state,
+                key="weekly_statement_stage",
+                before=st.session_state.get("weekly_statement_stage"),
+                after=review.stage,
+                reason="statement_upload_validation_success",
+            )
             st.session_state.weekly_statement_review = review
             st.session_state.weekly_statement_stage = review.stage
             st.session_state.pop("weekly_statement_review_stale_reason", None)
@@ -1204,7 +1339,9 @@ def _render_validation_step(
         _render_recovery_confirmation()
     if (
         st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT
-        and _render_stale_statement_refresh("statement_validation_stale_refresh")
+        and _render_stale_statement_refresh(
+            "statement_validation_stale_refresh", next_step=3
+        )
     ):
         return
     if _render_statement_already_imported():
@@ -1225,7 +1362,9 @@ def _render_validation_step(
             _weekly_review(),
             key="statement_validation_refresh",
         )
-        _render_statement_next_step("Continue to reconcile", 4, back_step=2)
+        _render_statement_next_step(
+            "Continue to reconcile", 4, back_step=2, source_validation_only=True
+        )
     else:
         _render_next_step(
             "Continue to reconcile",
@@ -1244,10 +1383,6 @@ def _render_validation_step(
         render_platform_orders_validation_data()
         render_platform_orders_outcomes()
     else:
-        if _statement_invoice_coverage(result) is not None:
-            _render_statement_invoice_coverage_details(result)
-            _render_source_summary(result)
-            return
         _render_contract_validation(result)
         _render_source_summary(result)
         _render_statement_review_tables(collapsed=not result.commit_readiness.ready)
@@ -1549,7 +1684,14 @@ def _render_platform_invoice_validation_status(
             state="blocked",
         )
         return
-    if result.commit_readiness.ready:
+    review = _weekly_review() if result.source_type == SHOPEE_WEEKLY_STATEMENT else None
+    source_valid = bool(
+        review is not None
+        and not review.stage.rejection_reasons
+        and not review.stage.validation_issues
+        and review.stage.statement is not None
+    )
+    if result.commit_readiness.ready or source_valid:
         render_authoritative_status(
             title="Ready",
             message="The current Platform Invoice batch passed validation.",
@@ -3524,11 +3666,19 @@ def _render_reconciliation_step() -> None:
         return
     if _render_statement_already_imported():
         return
-    if _render_stale_statement_refresh("statement_reconciliation_stale_refresh"):
+    if _render_stale_statement_refresh(
+        "statement_reconciliation_stale_refresh", next_step=4
+    ):
         return
     result = _current_import_result()
     if _render_statement_source_error(result):
         return
+    active_review = _weekly_review()
+    if (
+        active_review is not None
+        and active_review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE"
+    ):
+        _render_statement_commit_preflight(active_review)
     if _statement_invoice_coverage(result) is not None:
         _render_statement_invoice_coverage_status(result)
         _render_statement_refresh_action(
@@ -3547,6 +3697,10 @@ def _render_reconciliation_step() -> None:
     if not reconciliation.available:
         reason = reconciliation.source_specific_details.get("reason")
         st.info(f"{reconciliation.status} — {reason or 'Reconciliation is not available for this staged result.'}", icon=":material/info:")
+        _render_statement_reconciliation_rebuild_action(
+            _weekly_review(),
+            key="statement_reconciliation_rebuild",
+        )
         _render_next_step(
             "Continue to review & commit",
             5,
@@ -3585,6 +3739,125 @@ def _render_reconciliation_step() -> None:
     st.caption("These results are shown for review and do not change the source outcome.")
     _render_representative_contract_exceptions(reconciliation.exceptions)
     _render_statement_review_tables(collapsed=not allowed)
+
+
+def _render_statement_reconciliation_rebuild_action(
+    review: StatementImportReview | None,
+    *,
+    key: str,
+) -> None:
+    """Rebuild the authoritative reconciliation without discarding a staged source."""
+
+    if review is None:
+        return
+    if st.button(
+        "Rebuild reconciliation",
+        icon=":material/refresh:",
+        key=key,
+    ) and _refresh_statement_review(review):
+        st.rerun()
+
+
+def _render_statement_commit_preflight(review: StatementImportReview) -> None:
+    """Show source coverage separately from the writer's no-write preview."""
+
+    statement = review.stage.statement
+    coverage = review.evidence_coverage
+    st.write("**Source / Full Order checks**")
+    st.dataframe(
+        [
+            {
+                "Parsed orders": len(statement.order_rows) if statement else 0,
+                "Source Total Released": (
+                    format_currency(
+                        statement.summary_total_released,
+                        _active_invoice_currency(),
+                    )
+                    if statement else "—"
+                ),
+                "Full Order covered": (
+                    len(coverage.ready_from_full_order_order_ids) if coverage else 0
+                ),
+                "Full Order missing": (
+                    len(coverage.additional_evidence) if coverage else 0
+                ),
+                "Source controls": (
+                    "Passed"
+                    if not review.stage.rejection_reasons
+                    and not review.stage.validation_issues
+                    else "Blocked"
+                ),
+            }
+        ],
+        hide_index=True,
+    )
+    st.write("**Commit eligibility**")
+    preflight = review.commit_preflight
+    if preflight is None:
+        st.warning(
+            "A current writer preflight is unavailable. Refresh validation before committing.",
+            icon=":material/refresh:",
+        )
+        return
+    st.dataframe(
+        [
+            {
+                "Status": preflight.status.replace("_", " ").title(),
+                "New orders": len(preflight.new_order_ids),
+                "Exact duplicates": len(preflight.exact_duplicate_order_ids),
+                "Conflicts": len(preflight.conflict_order_ids),
+                "Incomplete / unsafe": len(preflight.incomplete_unsafe_order_ids),
+                "Statement rows": preflight.proposed_statement_rows,
+                "Component rows": preflight.proposed_financial_component_rows,
+                "Summary rows": preflight.proposed_summary_rows,
+                "Adjustment inserts": preflight.proposed_adjustment_rows,
+                "Adjustment skips": preflight.skipped_adjustment_rows,
+                "Adjustment conflicts": preflight.conflicting_adjustment_rows,
+                "Proposed new released": format_currency(
+                    preflight.proposed_new_released_amount,
+                    _active_invoice_currency(),
+                ),
+            }
+        ],
+        hide_index=True,
+    )
+    if preflight.no_new_facts:
+        st.success(
+            "Already imported / no new facts. Complete duplicate evidence will be skipped with zero writes.",
+            icon=":material/check_circle:",
+        )
+    elif preflight.eligible:
+        st.success(
+            f"{len(preflight.new_order_ids):,} new orders will be imported. "
+            f"{len(preflight.exact_duplicate_order_ids):,} previously committed orders will be skipped. "
+            "Commit will read and verify authoritative state again.",
+            icon=":material/check_circle:",
+        )
+    else:
+        for reason in preflight.blocker_reasons:
+            st.warning(reason, icon=":material/warning:")
+    affected = tuple(
+        dict.fromkeys(
+            (*preflight.conflict_order_ids, *preflight.incomplete_unsafe_order_ids)
+        )
+    )
+    if affected or preflight.representative_source_rows:
+        with st.expander("Commit preflight provenance", expanded=False):
+            st.caption(
+                f"Batch {preflight.statement_batch_id or 'pending'} · "
+                f"Source {preflight.source_filename or 'unknown'} · "
+                f"File hash {preflight.statement_file_hash or 'unknown'}"
+            )
+            rows = [
+                {
+                    "Order ID": order_id,
+                    "Source row": source_row,
+                    "Affected": order_id in set(affected),
+                }
+                for order_id, source_row in preflight.representative_source_rows
+            ]
+            if rows:
+                st.dataframe(rows, hide_index=True)
 
 
 def _render_shopee_sg_test_reconciliation() -> None:
@@ -3864,6 +4137,20 @@ def _render_review_and_commit_step() -> None:
     if st.session_state.get("import_source_type") == SHOPEE_FULL_ORDER_LIST:
         _render_full_order_review_and_sync()
         return
+    if st.session_state.get("import_source_type") == SHOPEE_WEEKLY_STATEMENT:
+        if _render_stale_statement_refresh(
+            "statement_commit_stale_refresh", next_step=4
+        ):
+            # The old commit plan is deliberately not rendered as current, but
+            # retain an explicit disabled control at this destination so a
+            # stale Review cannot be mistaken for a completed commit state.
+            st.button(
+                "Commit Statement",
+                icon=":material/upload:",
+                key="statement_commit_stale",
+                disabled=True,
+            )
+            return
     if _has_pending_recovery():
         _render_recovery_confirmation()
     result = _current_import_result()
@@ -3913,7 +4200,13 @@ def _render_review_and_commit_step() -> None:
     if _render_statement_source_error(result):
         return
     if st.session_state.get("weekly_statement_commit_completed"):
-        st.success("Statement Commit Complete.", icon=":material/check_circle:")
+        if st.session_state.get("weekly_statement_commit_noop"):
+            st.success(
+                "No new Statement facts remain to import. The matching evidence is already committed.",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.success("Statement Commit Complete.", icon=":material/check_circle:")
         _render_back_button(4, key="completed_statement_back")
         _render_source_summary(result)
         return
@@ -3929,14 +4222,15 @@ def _render_review_and_commit_step() -> None:
         _render_source_summary(result)
         return
     if review is not None and review.active_gate == "FULL_ORDER_CURRENT_ORDER_EXISTENCE":
+        _render_statement_commit_preflight(review)
         if readiness.ready and review.commit_ready and not _statement_review_stale():
             st.success(
-                "Statement review complete — Full Order coverage and source financial controls passed.",
+                "Statement review complete — source checks, Full Order coverage, and fresh commit preflight passed.",
                 icon=":material/check_circle:",
             )
         else:
             st.error(
-                "Statement cannot commit until the current source and Full Order coverage blockers are resolved. "
+                "Statement cannot commit until the current source, Full Order coverage, and commit eligibility blockers are resolved. "
                 + (readiness.reasons[0] if readiness.reasons else ""),
                 icon=":material/error:",
             )
@@ -4510,7 +4804,16 @@ def _render_statement_already_imported() -> bool:
         return False
     review = _weekly_review()
     statement = review.stage.statement if review is not None else None
-    if review is None or not review.stage.already_imported or statement is None:
+    no_new_facts = bool(
+        review is not None
+        and review.commit_preflight is not None
+        and review.commit_preflight.no_new_facts
+    )
+    if (
+        review is None
+        or statement is None
+        or not (review.stage.already_imported or no_new_facts)
+    ):
         return False
 
     st.success(
@@ -4685,9 +4988,13 @@ def _render_statement_commit(ready: bool) -> None:
         )
     if refresh_clicked:
         if _refresh_statement_review(review):
+            # A retry after a verified non-write must pass through the fresh
+            # reconciliation presentation before another commit is possible.
+            _set_step(4)
             st.rerun()
     if not commit_clicked:
         return
+    record_statement_commit_checkpoint(st.session_state, "handler_entry")
     try:
         context = _required_persistence_market_context()
         settings = configured_uat2_data_settings(
@@ -4705,26 +5012,41 @@ def _render_statement_commit(ready: bool) -> None:
             full_order_repository=settings.create_full_order_current_repository(),
             market_context=context,
         )
+        record_statement_commit_checkpoint(st.session_state, "after_currency_preflight")
         if not currency.is_current:
-            st.warning(
-                "Statement review evidence changed and must be evaluated again: "
+            mark_statement_review_stale(
+                st.session_state,
+                "Statement review evidence changed after reconciliation: "
                 + ", ".join(currency.changed_evidence)
+                + ". Refresh validation before continuing.",
             )
-            if _refresh_statement_review(review):
-                _set_step(3)
-                st.rerun()
+            record_statement_commit_checkpoint(st.session_state, "before_rerun")
+            st.rerun()
             return
+        record_statement_commit_checkpoint(st.session_state, "before_locked_commit")
         attempt = commit_statement_review(
             review,
             writer=settings.create_statement_writer(),
             load_product_master=lambda: load_configured_product_price_master(context)[0],
             full_order_repository=settings.create_full_order_current_repository(),
             market_context=context,
+            transition=lambda checkpoint: record_statement_commit_checkpoint(
+                st.session_state, checkpoint
+            ),
+        )
+        record_statement_commit_checkpoint(
+            st.session_state,
+            "after_locked_commit",
+            outcome=attempt.outcome.value,
+            reason_codes=_commit_attempt_reason_codes(attempt.reasons),
+            write_failure_diagnostic=getattr(attempt, "write_failure_diagnostic", None),
         )
     except ApplicationCommitInProgress as error:
+        record_statement_commit_checkpoint(st.session_state, "commit_lock_rejected")
         st.warning(str(error))
         return
     except StatementWriteIntegrityError as error:
+        record_statement_commit_checkpoint(st.session_state, "write_integrity_error")
         st.error(f"Statement write requires manual integrity recovery: {error}")
         return
     except (
@@ -4733,21 +5055,81 @@ def _render_statement_commit(ready: bool) -> None:
         ProductMasterSourceError,
         StatementCommitBlocked,
     ) as error:
+        record_statement_commit_checkpoint(st.session_state, "commit_exception")
         st.error(f"Statement commit failed before a safe write could be confirmed: {error}")
         return
     if attempt.committed:
+        record_statement_commit_checkpoint(st.session_state, "before_success_transition")
         st.session_state.weekly_statement_commit_completed = True
+        st.session_state.pop("weekly_statement_commit_noop", None)
+        record_statement_commit_checkpoint(st.session_state, "before_rerun")
         st.rerun()
-    st.warning(
-        "Statement state changed or the write was not applied. No new commit was confirmed; validation has been refreshed."
-    )
-    if not _refresh_statement_review(review):
         return
-    _set_step(3)
+    outcome = attempt.outcome
+    reason_codes = _commit_attempt_reason_codes(attempt.reasons)
+    record_statement_commit_checkpoint(
+        st.session_state,
+        "before_outcome_transition",
+        outcome=outcome.value,
+        reason_codes=reason_codes,
+        write_failure_diagnostic=getattr(attempt, "write_failure_diagnostic", None),
+    )
+    if outcome is StatementCommitOutcome.ALREADY_IMPORTED:
+        st.session_state.weekly_statement_commit_completed = True
+        st.session_state.weekly_statement_commit_noop = True
+        record_statement_commit_checkpoint(
+            st.session_state,
+            "before_noop_completion_rerun",
+            outcome=outcome.value,
+            reason_codes=reason_codes,
+        )
+        st.rerun()
+        return
+    if outcome is StatementCommitOutcome.WRITE_FAILED:
+        st.error(
+            "Statement write was verified not applied. The staged review remains available; refresh validation before retrying.",
+            icon=":material/error:",
+        )
+        return
+    mark_statement_review_stale(
+        st.session_state,
+        "Statement commit preflight changed or is blocked: "
+        + _commit_attempt_reason_summary(attempt.reasons)
+        + ". Refresh validation before continuing.",
+    )
+    record_statement_commit_checkpoint(
+        st.session_state,
+        "before_stale_review_rerun",
+        outcome=outcome.value,
+        reason_codes=reason_codes,
+    )
     st.rerun()
 
 
+def _commit_attempt_reason_codes(reasons: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep development diagnostics free of source-specific failure detail."""
+
+    return tuple(
+        dict.fromkeys(
+            reason.split(":", 1)[0].strip() or "UNSPECIFIED"
+            for reason in reasons
+        )
+    )
+
+
+def _commit_attempt_reason_summary(reasons: tuple[str, ...]) -> str:
+    """Render the authoritative, user-facing blocker without UI reclassification."""
+
+    return "; ".join(reasons) if reasons else "the authoritative commit state is unavailable"
+
+
 def _refresh_statement_review(review: StatementImportReview) -> bool:
+    if getattr(review, "source_bytes", None) is None:
+        st.error(
+            "The staged Statement source is no longer available. Re-upload the Statement before validation can be refreshed.",
+            icon=":material/error:",
+        )
+        return False
     try:
         context = _required_persistence_market_context()
         settings = configured_uat2_data_settings(
@@ -4781,6 +5163,7 @@ def _render_statement_refresh_action(
     review: StatementImportReview | None,
     *,
     key: str,
+    next_step: int | None = None,
 ) -> None:
     """Expose the authoritative refresh even while blockers prevent navigation."""
 
@@ -4791,10 +5174,12 @@ def _render_statement_refresh_action(
         icon=":material/refresh:",
         key=key,
     ) and _refresh_statement_review(review):
+        if next_step is not None:
+            _set_step(next_step)
         st.rerun()
 
 
-def _render_stale_statement_refresh(key: str) -> bool:
+def _render_stale_statement_refresh(key: str, *, next_step: int) -> bool:
     """Hide stale blocker facts until the user rebuilds the live review."""
 
     if not _statement_review_stale():
@@ -4809,7 +5194,11 @@ def _render_stale_statement_refresh(key: str) -> bool:
         "The previous blocker list is hidden because it no longer represents "
         "the current Full Order, Statement, and Product Master evidence."
     )
-    _render_statement_refresh_action(_weekly_review(), key=key)
+    _render_statement_refresh_action(
+        _weekly_review(),
+        key=key,
+        next_step=next_step,
+    )
     _render_statement_exit_button(key=f"{key}_exit")
     return True
 
@@ -4819,10 +5208,22 @@ def _render_statement_next_step(
     step: int,
     *,
     back_step: int,
+    source_validation_only: bool = False,
 ) -> None:
     """Gate forward navigation with the authoritative Statement review."""
 
-    allowed, disabled_reason = _statement_forward_gate()
+    if source_validation_only:
+        review = _weekly_review()
+        allowed = bool(
+            review is not None
+            and review.stage.statement is not None
+            and not review.stage.rejection_reasons
+            and not review.stage.validation_issues
+            and not _statement_review_stale()
+        )
+        disabled_reason = None if allowed else "Statement source validation must pass before reconciliation."
+    else:
+        allowed, disabled_reason = _statement_forward_gate()
     with st.container(horizontal=True):
         next_clicked = st.button(
             label,
@@ -4850,7 +5251,10 @@ def _render_statement_next_step(
     if not _refresh_statement_review(review):
         return
     refreshed = _weekly_review()
-    if refreshed is None or not refreshed.commit_ready or _statement_review_stale():
+    if refreshed is None or _statement_review_stale():
+        st.warning(_statement_forward_gate()[1])
+        return
+    if not source_validation_only and not refreshed.commit_ready:
         st.warning(_statement_forward_gate()[1])
         return
     _set_step(step)

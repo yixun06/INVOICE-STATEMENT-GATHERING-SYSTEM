@@ -28,6 +28,45 @@ ZERO = Decimal("0.00")
 TREND_AGGREGATIONS = ("Daily", "Weekly", "Monthly")
 FINANCIAL_METRIC_FIELDS = {"Product Sales with Statement Evidence": "Settled Product Sales"}
 
+# The keyed Analysis module container and accessible group name restrict these
+# rules to the shared MY/SG navigation, leaving other Streamlit widgets alone.
+ANALYSIS_NAV_CSS = """
+<style>
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] {
+    border: 1px solid #dce7da;
+    border-radius: 9px;
+    overflow: hidden;
+    gap: 0;
+}
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] > button {
+    min-height: 34px;
+    padding: 5px 10px;
+    border: 0;
+    border-radius: 0;
+    background: #fff;
+    color: #34433a;
+    box-shadow: none;
+}
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] > button + button {
+    border-left: 1px solid #dce7da;
+}
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] > button:hover {
+    background: #f2f7ef;
+    color: #14532d;
+}
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] > button[aria-checked="true"] {
+    background: #e8f3e3;
+    color: #14532d;
+}
+.st-key-analysis_modules [role="radiogroup"][aria-label="Analysis workspace"] > button:focus-visible {
+    outline: 2px solid #166534;
+    outline-offset: -3px;
+    position: relative;
+    z-index: 1;
+}
+</style>
+"""
+
 
 def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot) -> None:
     """Render a market-neutral dashboard without repository or table knowledge."""
@@ -38,23 +77,42 @@ def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot) -> None:
         "Canonical Full Order product facts and committed Statement settlement evidence. "
         "Adjustments remain independent from released amount."
     )
-    filters = _render_filters(snapshot)
-    if filters is None:
-        return
-    report = build_shopee_analysis(snapshot, filters)
-    _render_filter_context(report)
-    overview, product, financial = st.tabs(("Overview", "Product Analysis", "Financial & Reconciliation"))
-    with overview:
-        _render_overview(report)
-    with product:
-        _render_product_analysis(report)
-    with financial:
-        _render_financial_analysis(report)
+    st.html(ANALYSIS_NAV_CSS)
+    with st.container(gap="xsmall"):
+        filters = _render_filters(snapshot)
+        if filters is None:
+            return
+        report = build_shopee_analysis(snapshot, filters)
+        with st.container(key="analysis_modules", gap="xsmall"):
+            module_key = f"analysis_module_{presentation.market_label}"
+            modules = ("Overview", "Product Analysis", "Financial & Reconciliation")
+            if st.session_state.get(module_key) not in modules:
+                st.session_state[module_key] = modules[0]
+            selected_module = st.segmented_control(
+                "Analysis workspace", modules, key=module_key, required=True,
+                label_visibility="collapsed", width="stretch", persist_state="session",
+            )
+            if selected_module == "Overview":
+                _render_overview(report)
+            elif selected_module == "Product Analysis":
+                _render_product_analysis(report)
+            else:
+                _render_financial_analysis(report)
 
 
 def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters | None:
     presentation = snapshot.presentation
+    prefix = f"{presentation.market_label}_analysis_"
+    applied_key = prefix + "applied_filters"
+    default_basis = tuple(AnalysisDateBasis)[0]
+    default_dates = snapshot.available_dates(default_basis)
+    if applied_key not in st.session_state and default_dates:
+        st.session_state[applied_key] = ShopeeAnalysisFilters(
+            date_basis=default_basis, from_date=default_dates[0], to_date=default_dates[-1]
+        )
     with st.container(border=True):
+        st.subheader("Filters")
+        st.caption("Choose your filters, then apply them to update the report.")
         date_controls = st.columns((1, 1.5))
         with date_controls[0]:
             basis = st.selectbox(
@@ -64,7 +122,12 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
         dates = snapshot.available_dates(basis)
         if not dates:
             st.info("No canonical dates are available for this source authority.", icon=":material/info:")
-            return None
+            if st.button("Reset filters", key=prefix + "reset_empty"):
+                for key in list(st.session_state):
+                    if key.startswith(prefix):
+                        del st.session_state[key]
+                st.rerun()
+            return st.session_state.get(applied_key)
         minimum, maximum = dates[0], dates[-1]
         with date_controls[1]:
             current_range = st.date_input(
@@ -105,11 +168,24 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
                 "Adjustment evidence", ("All", "Has adjustment", "No adjustment"),
                 key=f"{presentation.market_label}_analysis_adjustment",
             )
+        st.divider()
+        summary_col, action_col = st.columns((3, 2), vertical_alignment="center")
+        summary = summary_col.empty()
+        with action_col:
+            with st.container(horizontal=True, horizontal_alignment="right"):
+                reset_clicked = st.button("Reset filters", key=prefix + "reset")
+                apply_clicked = st.button("Apply filters", type="primary", key=prefix + "apply")
+        if reset_clicked:
+            for key in list(st.session_state):
+                if key.startswith(prefix):
+                    del st.session_state[key]
+            st.rerun()
     if not isinstance(current_range, tuple) or len(current_range) != 2:
-        st.error("Select a valid From and To date.")
-        return None
+        if apply_clicked:
+            st.error("Select a valid From and To date.")
+        return st.session_state.get(applied_key)
     try:
-        return ShopeeAnalysisFilters(
+        draft = ShopeeAnalysisFilters(
             date_basis=basis,
             from_date=current_range[0],
             to_date=current_range[1],
@@ -122,12 +198,21 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
             fee_types=frozenset(fee_types),
         )
     except ValueError as error:
-        st.error(str(error))
-        return None
+        if apply_clicked:
+            st.error(str(error))
+        return st.session_state.get(applied_key)
+    if apply_clicked:
+        st.session_state[applied_key] = draft
+    with summary.container():
+        applied = st.session_state.get(applied_key)
+        if applied is not None:
+            _render_filter_context(applied)
+        if draft != applied:
+            st.caption("Filters changed — apply to update.")
+    return st.session_state.get(applied_key)
 
 
-def _render_filter_context(report: ShopeeAnalysisReport) -> None:
-    filters = report.filters
+def _render_filter_context(filters: ShopeeAnalysisFilters) -> None:
     parts = [
         filters.date_basis.value,
         _period_label(filters.from_date, filters.to_date),
@@ -144,47 +229,45 @@ def _render_filter_context(report: ShopeeAnalysisReport) -> None:
         parts.append("Adjustment: " + ("Yes" if filters.has_adjustment else "No"))
     if filters.fee_types:
         parts.append(f"Components: {len(filters.fee_types)}")
-    st.caption(" | ".join(parts))
+    st.caption("Applied filters: " + " | ".join(parts))
 
 
 def _render_overview(report: ShopeeAnalysisReport) -> None:
     currency = report.presentation.currency_code
-    st.subheader("Product Performance")
-    _render_metric_grid((
-        ("Product Sales", _money(report.product_sales, currency), None),
-        ("Total Orders", report.total_orders, None),
-        ("Units Sold", report.units_sold, None),
-        ("Average Order Value", _money(report.average_order_value, currency), None),
-    ))
-    st.subheader("Settlement Performance")
-    _render_metric_grid((
-        ("Product Sales with Statement Evidence", _money(report.settled_product_sales, currency), None),
-        ("Released Amount", _money(report.released_amount, currency), None),
-        ("Settlement Difference", _money(report.settlement_difference, currency), None),
-        (
-            "Orders with committed Statement evidence",
-            f"{report.settled_orders:,} / {report.total_orders:,}",
-            f"{report.settlement_coverage:.1%} evidenced" if report.total_orders else None,
-        ),
-    ))
-    st.caption("Statement-evidenced Product Sales minus Released Amount.")
-    st.caption(
-        f"{report.settled_orders:,} of {report.total_orders:,} selected orders have committed Statement evidence."
-    )
-    if report.filters.product_keys:
-        st.caption("Product filters do not allocate order-level settlement facts; settlement comparison is unavailable for this selection.")
-    st.subheader("Financial Adjustments")
-    with st.container(horizontal=True):
-        st.caption(f"Refund amount: {_money(report.refund_amount, currency)}")
-        st.caption(f"Adjustment total: {_money(report.adjustment_total, currency)}")
+    st.header("Overview")
+    st.caption("Business summary of product and settlement performance.")
+    with st.container(border=True):
+        st.subheader("Product Performance")
+        st.caption("Order and product activity for the applied filters.")
+        _render_metric_grid((
+            ("Product Sales", _money(report.product_sales, currency), None),
+            ("Total Orders", report.total_orders, None),
+            ("Units Sold", report.units_sold, None),
+            ("Average Order Value", _money(report.average_order_value, currency), None),
+        ))
+    with st.container(border=True):
+        st.subheader("Settlement Performance")
+        st.caption("Committed Statement evidence for the selected orders.")
+        _render_metric_grid((
+            ("Product Sales with Statement Evidence", _money(report.settled_product_sales, currency), None),
+            ("Released Amount", _money(report.released_amount, currency), None),
+            ("Settlement Difference", _money(report.settlement_difference, currency), None),
+            ("Orders with committed Statement evidence", f"{report.settled_orders:,} / {report.total_orders:,}",
+             f"{report.settlement_coverage:.1%} evidenced" if report.total_orders else None),
+        ))
+        st.caption("Statement-evidenced Product Sales minus Released Amount.")
+        st.caption(f"{report.settled_orders:,} of {report.total_orders:,} selected orders have committed Statement evidence.")
+        if report.filters.product_keys:
+            st.caption("Product filters do not allocate order-level settlement facts; settlement comparison is unavailable for this selection.")
+        if report.rows:
+            _render_settlement_breakdown(report)
     if not report.rows:
         st.info("No canonical orders match the selected filters.", icon=":material/info:")
         return
-    settlement, reconciliation = st.columns(2)
-    with settlement:
-        _render_settlement_breakdown(report)
-    with reconciliation:
-        _render_reconciliation_summary(report)
+    _render_reconciliation_summary(report)
+    with st.container(border=True):
+        st.subheader("Financial Adjustments")
+        st.caption(f"Refund amount: {_money(report.refund_amount, currency)}  |  Adjustment total: {_money(report.adjustment_total, currency)}")
 
 
 def _render_metric_grid(values: tuple[tuple[str, object, str | None], ...]) -> None:
@@ -309,6 +392,7 @@ def _render_reconciliation_bar(frame: pd.DataFrame) -> None:
 def _render_product_analysis(report: ShopeeAnalysisReport) -> None:
     currency = report.presentation.currency_code
     st.subheader("Canonical Full Order product facts")
+    st.caption("Explore product performance and rankings within the applied selection.")
     if not report.products:
         st.info("No Full Order item rows match the selected filters.", icon=":material/info:")
         return
@@ -319,11 +403,14 @@ def _render_product_analysis(report: ShopeeAnalysisReport) -> None:
     left, right = st.columns(2)
     with left:
         with st.container(border=True):
+            st.subheader("Trend")
+            st.caption("Trend over the applied date range")
             metric = st.selectbox("Product analysis trend", ("Product Sales", "Orders", "Units Sold"), key="analysis_product_trend")
             _render_trend(_product_trend_frame(report, metric), metric=metric, report=report, financial=False, key="product")
     with right:
         with st.container(border=True):
             st.subheader("Rankings")
+            st.caption("Top 10 products; full names are available in the detail below.")
             ranking = st.selectbox("Rank products by", ("Product Sales", "Quantity"), key="analysis_product_rank")
             rows = sorted(
                 report.products,
@@ -370,6 +457,7 @@ def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
         st.info("No canonical orders match the selected filters.", icon=":material/info:")
         return
     st.subheader("Financial summary")
+    st.caption("Settlement and adjustment evidence is shown at order level.")
     with st.container(horizontal=True):
         st.metric("Product Sales with Statement Evidence", _money(report.settled_product_sales, currency), border=True)
         st.metric("Released Amount", _money(report.released_amount, currency), border=True)
@@ -378,15 +466,22 @@ def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
         st.metric("Credits", _money(report.statement_credits, currency), border=True)
         st.metric("Refund amount", _money(report.refund_amount, currency), border=True)
         st.metric("Adjustment total", _money(report.adjustment_total, currency), border=True)
-    with st.container(border=True):
-        metric = st.selectbox(
-            "Financial analysis trend",
-            ("Released Amount", "Product Sales with Statement Evidence", "Settlement Difference", "Charges", "Refund Amount", "Adjustments"),
-            key="analysis_financial_trend",
-        )
-        _render_trend(_financial_trend_frame(report, metric), metric=metric, report=report, financial=True, key="financial")
-    _render_settlement_breakdown(report)
+    trend_col, breakdown_col = st.columns(2)
+    with trend_col:
+        with st.container(border=True):
+            st.subheader("Financial trend")
+            st.caption("Follow settlement activity over the applied date range.")
+            metric = st.selectbox(
+                "Financial analysis trend",
+                ("Released Amount", "Product Sales with Statement Evidence", "Settlement Difference", "Charges", "Refund Amount", "Adjustments"),
+                key="analysis_financial_trend",
+            )
+            _render_trend(_financial_trend_frame(report, metric), metric=metric, report=report, financial=True, key="financial")
+    with breakdown_col:
+        _render_settlement_breakdown(report)
+    _render_reconciliation_summary(report)
     st.subheader("Native Statement component breakdown")
+    st.caption("Signed components retain their original settlement meaning.")
     components = report.component_totals
     impact_components = tuple(row for row in components if row.component_name.casefold() != "product price")
     if components:
@@ -403,7 +498,6 @@ def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
             )
     else:
         st.info("No committed ORDER-level Statement components are available for this selection.", icon=":material/info:")
-    _render_reconciliation_summary(report)
     _render_order_inspector(report)
     st.subheader("Order reconciliation")
     st.dataframe(
@@ -564,7 +658,7 @@ def _trend_chart(frame: pd.DataFrame, *, metric: str, report: ShopeeAnalysisRepo
     y_title = f"{metric} ({currency_symbol(report.presentation.currency_code)})" if money else metric
     return (
         alt.Chart(frame)
-        .mark_line(point=True, strokeWidth=2.5)
+        .mark_line(point=True, strokeWidth=2.5, color="#287a5a")
         .encode(
             x=alt.X(
                 "Date:T",
@@ -594,7 +688,7 @@ def _render_signed_bar(
     chart = (
         alt.Chart(chart_frame)
         .transform_calculate(_signed_value=f"datum['{amount}']")
-        .mark_bar()
+        .mark_bar(cornerRadiusEnd=3)
         .encode(
             y=alt.Y(f"{category}:N", sort=category_sort, title=None, axis=alt.Axis(labelLimit=210)),
             x=alt.X(f"{amount}:Q", title=f"Amount ({currency_symbol(currency)})", axis=alt.Axis(gridColor="#e5e7eb")),
@@ -610,7 +704,7 @@ def _render_ranked_bar(frame: pd.DataFrame, *, label: str, metric: str, currency
     tooltip = [alt.Tooltip("Full product:N", title="Product"), alt.Tooltip(f"{metric}:Q", format=",.2f")]
     chart = (
         alt.Chart(frame)
-        .mark_bar(color="#287a5a")
+        .mark_bar(color="#287a5a", cornerRadiusEnd=3)
         .encode(
             y=alt.Y(f"{label}:N", sort=alt.SortField(metric, order="descending"), title=None, axis=alt.Axis(labelLimit=220)),
             x=alt.X(f"{metric}:Q", title=f"{metric} ({currency_symbol(currency)})" if currency else metric),

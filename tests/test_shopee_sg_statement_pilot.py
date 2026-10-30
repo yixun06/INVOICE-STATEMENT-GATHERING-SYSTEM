@@ -24,6 +24,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitState,
     preview_active_statement_state,
     validate_active_statement_state,
+    _canonicalize_bundle_monetary_value,
 )
 from src.invoice_app.services.shopee_weekly_statement_service import (
     ALREADY_IMPORTED,
@@ -712,13 +713,170 @@ def test_sg_conflicting_settlement_evidence_blocks_review_and_fresh_precommit():
         persisted_platform="Shopee SG",
         semantic_overlap_dedupe=True,
     )
-    state = StatementCommitState(
-        orders={},
-        committed_statements=(
-            CommittedStatementReference("prior-hash", base.statement_period_from, base.statement_period_to),
-        ),
-        committed_order_evidence=evidence,
+    committed_plan = prepare_full_order_existence_statement_commit_plan(
+        base,
+        audit=replace(_audit(), statement_batch_id="prior-batch"),
+        full_order_ids=("SG-ORDER-1",),
+        validation_passed=True,
+        persisted_platform="Shopee SG",
+        semantic_overlap_dedupe=True,
     )
+    state = _committed_state(committed_plan)
     assert validate_active_statement_state(plan, state) == (
         "SETTLEMENT_EVIDENCE_CONFLICT:SG-ORDER-1",
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (Decimal("0"), "0"),
+        (Decimal("0.0"), "0"),
+        (Decimal("0.00"), "0"),
+        (Decimal("-0.00"), "0"),
+        (Decimal("107.4"), "107.4"),
+        (Decimal("107.40"), "107.4"),
+        (Decimal("100"), "100"),
+        (Decimal("100.00"), "100"),
+        (Decimal("-6.340"), "-6.34"),
+    ),
+)
+def test_complete_bundle_money_identity_ignores_insignificant_decimal_scale(value, expected):
+    assert _canonicalize_bundle_monetary_value(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        (Decimal("107.40"), Decimal("107.41")),
+        (Decimal("0"), Decimal("0.01")),
+        (Decimal("-6.34"), Decimal("-6.35")),
+    ),
+)
+def test_complete_bundle_money_identity_preserves_genuine_numeric_differences(left, right):
+    assert _canonicalize_bundle_monetary_value(left) != _canonicalize_bundle_monetary_value(right)
+
+
+def test_complete_bundle_money_identity_preserves_blank_null_and_invalid_values():
+    assert _canonicalize_bundle_monetary_value(None) is None
+    assert _canonicalize_bundle_monetary_value("") == ""
+    assert _canonicalize_bundle_monetary_value("not-a-money-value") == "not-a-money-value"
+    assert _canonicalize_bundle_monetary_value("") != _canonicalize_bundle_monetary_value(Decimal("0"))
+
+
+def _source_scale_rows(rows, headers, monetary_fields):
+    positions = {name: index for index, name in enumerate(headers)}
+    normalized = []
+    for row in rows:
+        values = list(row)
+        for field in monetary_fields:
+            index = positions[field]
+            if values[index] == "":
+                continue
+            amount = Decimal(values[index])
+            values[index] = "0" if amount == 0 else format(amount.normalize(), "f")
+        normalized.append(tuple(values))
+    return tuple(normalized)
+
+
+def _replace_first_bundle_field(rows, headers, field, value):
+    index = headers.index(field)
+    updated = list(rows)
+    first = list(updated[0])
+    first[index] = value
+    updated[0] = tuple(first)
+    return tuple(updated)
+
+
+@pytest.mark.parametrize("platform", ("Shopee", "Shopee SG"))
+@pytest.mark.parametrize("sku_rows", (1, 2))
+def test_complete_bundle_exact_duplicate_accepts_source_and_numeric_storage_scale(platform, sku_rows):
+    plan = prepare_full_order_existence_statement_commit_plan(
+        _statement() if sku_rows == 1 else replace(
+            _statement(),
+            income_rows=(
+                _statement().order_rows[0],
+                _statement().sku_rows[0],
+                replace(_statement().sku_rows[0], sequence_no="3", source_row_number=4),
+            ),
+        ),
+        audit=_audit(),
+        full_order_ids=("SG-ORDER-1",),
+        validation_passed=True,
+        persisted_platform=platform,
+        semantic_overlap_dedupe=True,
+    )
+    source_plan = replace(
+        plan,
+        rows=_source_scale_rows(
+            plan.rows,
+            STATEMENT_DATA_HEADERS,
+            {
+                "total_released_amount",
+                "statement_product_price",
+                "statement_refund_amount",
+                "statement_net_selling_amount",
+            },
+        ),
+        financial_component_rows=_source_scale_rows(
+            plan.financial_component_rows,
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+            {"component_amount"},
+        ),
+    )
+
+    result = preview_active_statement_state(source_plan, _committed_state(plan))
+
+    assert result.status == "ALREADY_IMPORTED"
+    assert result.exact_duplicate_order_ids == ("SG-ORDER-1",)
+    assert result.conflict_order_ids == ()
+
+
+def test_complete_bundle_still_conflicts_for_changed_order_or_component_amount():
+    plan = prepare_full_order_existence_statement_commit_plan(
+        _statement(),
+        audit=_audit(),
+        full_order_ids=("SG-ORDER-1",),
+        validation_passed=True,
+        persisted_platform="Shopee",
+        semantic_overlap_dedupe=True,
+    )
+    changed_order = replace(
+        plan,
+        rows=_replace_first_bundle_field(
+            plan.rows, STATEMENT_DATA_HEADERS, "total_released_amount", "9.91"
+        ),
+    )
+    changed_component = replace(
+        plan,
+        financial_component_rows=_replace_first_bundle_field(
+            plan.financial_component_rows,
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+            "component_amount",
+            "0.01",
+        ),
+    )
+    state = _committed_state(plan)
+
+    assert preview_active_statement_state(changed_order, state).status == "CONFLICT"
+    assert preview_active_statement_state(changed_component, state).status == "CONFLICT"
+
+
+def test_adjustment_fingerprint_already_uses_numeric_money_identity_across_scale():
+    plan = prepare_full_order_existence_statement_commit_plan(
+        _statement(),
+        audit=_audit(),
+        full_order_ids=("SG-ORDER-1",),
+        validation_passed=True,
+        persisted_platform="Shopee",
+        semantic_overlap_dedupe=True,
+    )
+    persisted_adjustment = replace(
+        plan.order_adjustments[0], adjustment_amount=Decimal("-1.000")
+    )
+    state = replace(_committed_state(plan), order_adjustments=(persisted_adjustment,))
+
+    result = preview_active_statement_state(plan, state)
+
+    assert result.skipped_adjustment_rows == 1
+    assert result.conflicting_adjustment_rows == 0

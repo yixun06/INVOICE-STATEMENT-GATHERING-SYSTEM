@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.invoice_app.services.exception_presentation import (
@@ -20,7 +21,15 @@ from src.invoice_app.services.import_result_contract import (
     ValidationResult,
 )
 from src.invoice_app.services.validation_recovery import REMOVE_STAGED_SOURCE
-from src.invoice_app.services.market_context import SHOPEE_MY
+from src.invoice_app.services.market_context import SHOPEE_MY, SHOPEE_SG
+from src.invoice_app.services.shopee_statement_persistence import (
+    StatementCommitOutcome,
+    StatementWriteFailureDiagnostic,
+    StatementWriteTargetDiagnostic,
+)
+from src.invoice_app.services.shopee_statement_import import (
+    expected_full_order_proof_rule_version,
+)
 from src.invoice_app.ui import data_import
 
 
@@ -239,6 +248,274 @@ class _FakeStreamlit:
         raise AssertionError("No action was clicked in this test.")
 
 
+class _CommitSessionState(dict):
+    """Small mapping that matches Streamlit's item and attribute access."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as error:
+            raise AttributeError(key) from error
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
+class _CommitFakeStreamlit(_FakeStreamlit):
+    def __init__(self):
+        super().__init__()
+        self.session_state = _CommitSessionState()
+        self.reruns = 0
+        self.warnings: list[str] = []
+
+    def button(self, label, **_kwargs):
+        self.buttons.append(label)
+        return label == "Commit Statement"
+
+    def warning(self, message, **_kwargs):
+        self.warnings.append(message)
+
+    def rerun(self):
+        self.reruns += 1
+
+
+class _RebuildFakeStreamlit(_CommitFakeStreamlit):
+    def button(self, label, **_kwargs):
+        self.buttons.append(label)
+        return label == "Rebuild reconciliation"
+
+
+@pytest.mark.parametrize(
+    ("market_context", "committed", "outcome", "reasons", "completed", "stale", "error"),
+    (
+        (SHOPEE_MY, True, StatementCommitOutcome.COMMITTED, (), True, False, False),
+        (SHOPEE_SG, True, StatementCommitOutcome.COMMITTED, (), True, False, False),
+        (
+            SHOPEE_MY,
+            False,
+            StatementCommitOutcome.ALREADY_IMPORTED,
+            ("ALREADY_IMPORTED", "NO_NEW_FACTS"),
+            True,
+            False,
+            False,
+        ),
+        (
+            SHOPEE_SG,
+            False,
+            StatementCommitOutcome.ALREADY_IMPORTED,
+            ("ALREADY_IMPORTED", "NO_NEW_FACTS"),
+            True,
+            False,
+            False,
+        ),
+        (
+            SHOPEE_MY,
+            False,
+            StatementCommitOutcome.STALE_REVIEW,
+            ("STALE_REVIEW:FULL_ORDER_CURRENT_CHANGED",),
+            False,
+            True,
+            False,
+        ),
+        (
+            SHOPEE_SG,
+            False,
+            StatementCommitOutcome.CONFLICT,
+            ("SETTLEMENT_EVIDENCE_CONFLICT",),
+            False,
+            True,
+            False,
+        ),
+        (
+            SHOPEE_MY,
+            False,
+            StatementCommitOutcome.INCOMPLETE_UNSAFE,
+            ("INCOMPLETE_UNSAFE",),
+            False,
+            True,
+            False,
+        ),
+        (
+            SHOPEE_SG,
+            False,
+            StatementCommitOutcome.WRITE_FAILED,
+            ("WRITE_NOT_APPLIED",),
+            False,
+            False,
+            True,
+        ),
+    ),
+)
+def test_statement_commit_ui_maps_authoritative_outcomes_without_step_three_reset(
+    monkeypatch,
+    market_context,
+    committed,
+    outcome,
+    reasons,
+    completed,
+    stale,
+    error,
+):
+    """MY and SG consume one commit outcome contract without UI reclassification."""
+
+    fake = _CommitFakeStreamlit()
+    stage = object()
+    review = SimpleNamespace(commit_ready=True, stage=stage)
+    fake.session_state.update(
+        {
+            "weekly_statement_stage": stage,
+            "weekly_statement_review": review,
+        }
+    )
+    settings = SimpleNamespace(
+        create_statement_writer=lambda: object(),
+        create_full_order_current_repository=lambda: object(),
+    )
+    set_steps: list[int] = []
+
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(
+        data_import,
+        "statement_stage_review_consistency",
+        lambda _state: SimpleNamespace(coherent=True, state="coherent"),
+    )
+    monkeypatch.setattr(data_import, "_weekly_review", lambda: review)
+    monkeypatch.setattr(data_import, "_statement_review_stale", lambda: False)
+    monkeypatch.setattr(
+        data_import, "_required_persistence_market_context", lambda: market_context
+    )
+    monkeypatch.setattr(
+        data_import, "load_configured_product_price_master", lambda *_args, **_kwargs: (None, "test")
+    )
+    monkeypatch.setattr(data_import, "configured_uat2_data_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(
+        data_import,
+        "check_statement_review_currency",
+        lambda *_args, **_kwargs: SimpleNamespace(is_current=True),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "commit_statement_review",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            committed=committed, reasons=reasons, outcome=outcome
+        ),
+    )
+    monkeypatch.setattr(data_import, "_set_step", lambda step: set_steps.append(step))
+
+    data_import._render_statement_commit(ready=True)
+
+    assert fake.session_state["weekly_statement_stage"] is stage
+    assert fake.session_state["weekly_statement_review"] is review
+    assert set_steps == []
+    assert bool(fake.session_state.get("weekly_statement_commit_completed")) is completed
+    assert bool(fake.session_state.get("weekly_statement_commit_noop")) is (
+        outcome is StatementCommitOutcome.ALREADY_IMPORTED
+    )
+    assert bool(fake.session_state.get("weekly_statement_review_stale_reason")) is stale
+    assert bool(fake.errors) is error
+    assert fake.reruns == (0 if outcome is StatementCommitOutcome.WRITE_FAILED else 1)
+
+
+def test_write_not_applied_keeps_step_five_and_records_redacted_diagnostic(monkeypatch):
+    fake = _CommitFakeStreamlit()
+    stage = object()
+    review = SimpleNamespace(commit_ready=True, stage=stage)
+    fake.session_state.update(
+        {"weekly_statement_stage": stage, "weekly_statement_review": review}
+    )
+    diagnostic = StatementWriteFailureDiagnostic(
+        category="HTTP_503_UNAVAILABLE",
+        exception_type="HttpError",
+        http_status=503,
+        api_reason="serviceUnavailable",
+        message="Service unavailable",
+        request_method="spreadsheets.values.batchUpdate",
+        operation_type="STATEMENT_VALUES_BATCH_UPDATE",
+        payload_bytes=321,
+        value_range_count=4,
+        total_planned_cells=654,
+        elapsed_milliseconds=8,
+        targets=(StatementWriteTargetDiagnostic("Statement_Data", 2, 40, 80),),
+    )
+    settings = SimpleNamespace(
+        create_statement_writer=lambda: object(),
+        create_full_order_current_repository=lambda: object(),
+    )
+    monkeypatch.setenv("INVOICEGATHER_STATEMENT_STATE_DIAGNOSTICS", "1")
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(
+        data_import,
+        "statement_stage_review_consistency",
+        lambda _state: SimpleNamespace(coherent=True, state="coherent"),
+    )
+    monkeypatch.setattr(data_import, "_weekly_review", lambda: review)
+    monkeypatch.setattr(data_import, "_statement_review_stale", lambda: False)
+    monkeypatch.setattr(
+        data_import, "_required_persistence_market_context", lambda: SHOPEE_MY
+    )
+    monkeypatch.setattr(
+        data_import,
+        "load_configured_product_price_master",
+        lambda *_args, **_kwargs: (None, "test"),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "configured_uat2_data_settings",
+        lambda *_args, **_kwargs: settings,
+    )
+    monkeypatch.setattr(
+        data_import,
+        "check_statement_review_currency",
+        lambda *_args, **_kwargs: SimpleNamespace(is_current=True),
+    )
+    monkeypatch.setattr(
+        data_import,
+        "commit_statement_review",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            committed=False,
+            reasons=("WRITE_NOT_APPLIED",),
+            outcome=StatementCommitOutcome.WRITE_FAILED,
+            write_failure_diagnostic=diagnostic,
+        ),
+    )
+
+    data_import._render_statement_commit(ready=True)
+
+    entries = fake.session_state["statement_workflow_transition_log"]
+    assert fake.errors
+    assert fake.reruns == 0
+    assert fake.session_state["weekly_statement_stage"] is stage
+    assert any("HTTP_503_UNAVAILABLE" in entry["after"] for entry in entries)
+
+
+@pytest.mark.parametrize("market_context", (SHOPEE_MY, SHOPEE_SG))
+def test_unavailable_reconciliation_exposes_shared_rebuild_action(
+    monkeypatch, market_context
+):
+    """MY and SG can rebuild a missing preflight without re-uploading source bytes."""
+
+    fake = _RebuildFakeStreamlit()
+    review = SimpleNamespace(stage=object())
+    fake.session_state["weekly_statement_review"] = review
+    rebuilds: list[object] = []
+
+    monkeypatch.setattr(data_import, "st", fake)
+    monkeypatch.setattr(
+        data_import,
+        "_refresh_statement_review",
+        lambda candidate: rebuilds.append(candidate) is None,
+    )
+
+    data_import._render_statement_reconciliation_rebuild_action(
+        review,
+        key=f"{market_context.key.value}_rebuild",
+    )
+
+    assert fake.buttons == ["Rebuild reconciliation"]
+    assert rebuilds == [review]
+    assert fake.reruns == 1
+
+
 def test_needs_attention_renderer_is_one_compact_queue(monkeypatch):
     issues = (
         _issue("ORDER-1: product identity is unresolved."),
@@ -385,11 +662,11 @@ def test_ready_statement_keeps_existing_success_path(monkeypatch):
     assert fake.successes == []
 
 
-def test_statement_refresh_loads_fresh_product_master_and_replaces_session_review(
+def test_statement_refresh_rebuilds_current_gate_without_product_master(
     monkeypatch,
 ):
     fake = _FakeStreamlit()
-    old_review = SimpleNamespace(stage="old stage")
+    old_review = SimpleNamespace(stage="old stage", source_bytes=b"statement")
     refreshed = SimpleNamespace(stage="fresh stage")
     fake.session_state.update(
         {
@@ -427,7 +704,7 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
         assert review is old_review
         assert kwargs == {
             "writer": "fresh writer",
-            "product_master": "fresh master",
+            "product_master": None,
             "full_order_repository": "fresh Full Order repository",
             "market_context": SHOPEE_MY,
         }
@@ -438,11 +715,32 @@ def test_statement_refresh_loads_fresh_product_master_and_replaces_session_revie
     monkeypatch.setattr(data_import, "_required_persistence_market_context", lambda: SHOPEE_MY)
 
     assert data_import._refresh_statement_review(old_review) is True
-    assert events == ["cache cleared", "review rebuilt"]
+    assert events == ["review rebuilt"]
     assert fake.session_state["weekly_statement_review"] is refreshed
     assert fake.session_state["weekly_statement_stage"] == "fresh stage"
     assert "weekly_statement_review_stale_reason" not in fake.session_state
     assert "statement_exception_queue_selected" not in fake.session_state
+
+
+def test_statement_refresh_fails_closed_when_staged_source_bytes_are_missing(
+    monkeypatch,
+):
+    fake = _FakeStreamlit()
+    old_review = SimpleNamespace(stage="old stage", source_bytes=None)
+    fake.session_state.update(
+        {
+            "weekly_statement_review": old_review,
+            "weekly_statement_stage": old_review.stage,
+        }
+    )
+    monkeypatch.setattr(data_import, "st", fake)
+
+    assert data_import._refresh_statement_review(old_review) is False
+    assert fake.session_state["weekly_statement_review"] is old_review
+    assert fake.session_state["weekly_statement_stage"] == "old stage"
+    assert fake.errors == [
+        "The staged Statement source is no longer available. Re-upload the Statement before validation can be refreshed."
+    ]
 
 
 def test_statement_review_with_older_full_order_proof_rule_requires_refresh(monkeypatch):
@@ -464,8 +762,8 @@ def test_statement_review_with_current_full_order_proof_rule_remains_current(mon
     fake = _FakeStreamlit()
     review = SimpleNamespace(
         evidence_version=SimpleNamespace(
-            full_order_proof_rule_version=(
-                data_import.FULL_ORDER_STATEMENT_PROOF_RULE_VERSION
+            full_order_proof_rule_version=expected_full_order_proof_rule_version(
+                SHOPEE_MY
             )
         )
     )

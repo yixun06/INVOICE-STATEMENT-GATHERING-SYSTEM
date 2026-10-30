@@ -15,13 +15,17 @@ from src.invoice_app.domain.historical_invoice import (
     InvoiceBundle,
 )
 from src.invoice_app.services.data_import_state import (
+    STATEMENT_WORKFLOW_STEP_KEY,
     begin_next_full_order_upload,
     clear_statement_upload_attempt,
     has_unfinished_session_work,
     invoice_upload_downstream_eligibility,
+    mark_statement_review_stale,
     mark_statement_review_stale_after_invoice_commit,
     replace_statement_review_after_refresh,
     reset_invoice_upload_attempt,
+    restore_statement_workflow_step,
+    set_statement_workflow_step,
     statement_stage_review_consistency,
 )
 from src.invoice_app.services.historical_invoice_intake import (
@@ -145,6 +149,7 @@ def _seed_old_invoice_batch(app: AppTest, *, attempt: str, step: int) -> None:
     ("attempt", "step"),
     (("selected", 4), ("failed", 4), ("interrupted", 5)),
 )
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice import surface")
 def test_old_ready_invoice_batch_cannot_bypass_current_upload(
     tmp_path, monkeypatch, attempt: str, step: int
 ):
@@ -186,6 +191,7 @@ def test_resolved_or_previously_resolved_invoice_upload_allows_normal_downstream
 
 
 @pytest.mark.parametrize("step", (4, 5))
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice import surface")
 def test_resolved_upload_with_current_new_classification_allows_downstream_happy_path(
     tmp_path, monkeypatch, step: int
 ):
@@ -219,6 +225,7 @@ def test_resolved_upload_with_current_new_classification_allows_downstream_happy
         assert commit.proto.type == "primary"
 
 
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice import surface")
 def test_current_unresolved_upload_overrides_valid_new_historical_classification(
     tmp_path, monkeypatch
 ):
@@ -293,6 +300,7 @@ def test_begin_next_full_order_upload_discards_only_the_prior_full_order_context
 
 
 @pytest.mark.parametrize("attempt", ("failed", "interrupted"))
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice import surface")
 def test_failed_or_interrupted_upload_exposes_executable_narrow_recovery(
     tmp_path, monkeypatch, attempt: str
 ):
@@ -321,6 +329,7 @@ def test_failed_or_interrupted_upload_exposes_executable_narrow_recovery(
     assert state["batch_id"] == "old-ready-batch"
 
 
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice import surface")
 def test_invoice_selected_back_is_truthful_and_keeps_processed_staging(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
@@ -349,6 +358,9 @@ def test_statement_selected_back_is_truthful_and_keeps_unrelated_staging(tmp_pat
     for key, value in {
         "authenticated": True,
         "navigation": "Data Import",
+        "data_import.active_platform": "shopee_my",
+        "data_import.active_market": "shopee_my",
+        "data_import.show_platform_selector": False,
         "import_source_type": "Shopee Weekly Statement",
         "data_import_step": 2,
         "orders": invoice_orders,
@@ -397,6 +409,49 @@ def test_coherent_statement_stage_review_pair_is_accepted():
     assert consistency.state == "coherent"
 
 
+def test_statement_review_checkpoint_prevents_a_rerun_cursor_regression():
+    stage = object()
+    state = {
+        "weekly_statement_stage": stage,
+        "weekly_statement_review": SimpleNamespace(stage=stage),
+        "data_import_step": 5,
+    }
+
+    assert restore_statement_workflow_step(state, 5) == 5
+    assert state[STATEMENT_WORKFLOW_STEP_KEY] == 5
+
+    # A normal hydration/rerun may restore only the low-level cursor. The
+    # coherent review still owns the Review & Commit destination.
+    state["data_import_step"] = 3
+    assert restore_statement_workflow_step(state, 3) == 5
+
+    # An explicit Back action is authoritative and deliberately lowers the
+    # checkpoint for the subsequent rerun.
+    assert set_statement_workflow_step(state, 4) == 4
+    assert restore_statement_workflow_step(state, 4) == 4
+
+
+def test_stale_statement_review_stays_explicit_until_refresh_replaces_it():
+    old_stage = object()
+    old_review = SimpleNamespace(stage=old_stage)
+    state = {
+        "weekly_statement_stage": old_stage,
+        "weekly_statement_review": old_review,
+        "data_import_step": 5,
+        STATEMENT_WORKFLOW_STEP_KEY: 5,
+    }
+
+    assert mark_statement_review_stale(state, "Full Order evidence changed.")
+    assert state["weekly_statement_review_stale_reason"] == "Full Order evidence changed."
+    assert restore_statement_workflow_step(state, 3) == 5
+
+    refreshed = SimpleNamespace(stage=object())
+    replace_statement_review_after_refresh(state, refreshed)
+
+    assert "weekly_statement_review_stale_reason" not in state
+    assert restore_statement_workflow_step(state, 3) == 5
+
+
 def test_statement_recheck_pair_restores_consistency_after_partial_state_is_cleared():
     state = {"weekly_statement_stage": object()}
     assert not statement_stage_review_consistency(state).coherent
@@ -411,14 +466,18 @@ def test_statement_recheck_pair_restores_consistency_after_partial_state_is_clea
 
 @pytest.mark.parametrize("step", (2, 3, 4, 5))
 @pytest.mark.parametrize("partial", ("stage_only", "review_only"))
+@pytest.mark.parametrize("market", ("shopee_my", "shopee_sg"))
 def test_direct_statement_destinations_block_partial_state(
-    tmp_path, monkeypatch, step: int, partial: str
+    tmp_path, monkeypatch, step: int, partial: str, market: str
 ):
     monkeypatch.chdir(tmp_path)
     app = AppTest.from_file(str(APP_PATH))
     for key, value in {
         "authenticated": True,
         "navigation": "Data Import",
+        "data_import.active_platform": market,
+        "data_import.active_market": market,
+        "data_import.show_platform_selector": False,
         "import_source_type": "Shopee Weekly Statement",
         "data_import_step": step,
         (
@@ -716,5 +775,5 @@ def test_confirmed_discard_clears_stale_activity_and_restores_navigation(tmp_pat
     assert "workflow_activity" not in state
     assert "workflow_navigation_blocked" not in state
     assert "batch_id" not in state
-    assert any(button.label == "Cross Platform Summary" for button in app.button)
+    assert any(button.label == "Consolidated Product Summary" for button in app.button)
     assert all(button.label != "Dashboard" for button in app.button)

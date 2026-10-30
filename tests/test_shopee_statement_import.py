@@ -1403,6 +1403,84 @@ def test_sg_statement_review_cannot_fallback_to_my_full_order(monkeypatch):
     assert ready.commit_ready is True, (ready.blockers, ready.persistence_blockers)
 
 
+@pytest.mark.parametrize(
+    ("market_context", "other_market"),
+    ((SHOPEE_MY, "shopee_sg"), (SHOPEE_SG, "shopee_my")),
+)
+def test_statement_full_order_gate_never_resolves_same_order_id_from_other_market(
+    monkeypatch,
+    market_context,
+    other_market,
+):
+    """The Full Order existence proof stays on canonical market/order identity."""
+
+    statement = _statement_for_order_ids(("SAME-ID",))
+    monkeypatch.setattr(
+        "src.invoice_app.services.shopee_statement_import.stage_shopee_weekly_statement",
+        lambda *args, existing_orders=(), existing_statements=(), **kwargs: (
+            stage_parsed_shopee_weekly_statement(
+                statement,
+                existing_orders=existing_orders,
+                existing_statements=existing_statements,
+            )
+        ),
+    )
+    base_snapshot = _full_order_snapshot_from_items(
+        ("SAME-ID",),
+        (replace(_item(), order_id="SAME-ID"),),
+    )
+    other_snapshot = FullOrderCurrentSnapshot(
+        tuple(replace(order, market=other_market) for order in base_snapshot.orders),
+        tuple(replace(item, market=other_market) for item in base_snapshot.items),
+    )
+    matching_snapshot = FullOrderCurrentSnapshot(
+        tuple(
+            replace(order, market=market_context.key.value)
+            for order in base_snapshot.orders
+        ),
+        tuple(
+            replace(item, market=market_context.key.value)
+            for item in base_snapshot.items
+        ),
+    )
+    writer = _Writer(order=None, items=())
+
+    blocked = review_statement_upload(
+        b"same-order-id-cross-market",
+        source_filename="statement.xlsx",
+        batch_id=f"{market_context.key.value}-wrong-market",
+        uploaded_by="admin",
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=_FullOrderCurrentRepository(other_snapshot),
+        market_context=market_context,
+        now=lambda: NOW,
+    )
+    ready = review_statement_upload(
+        b"same-order-id-cross-market",
+        source_filename="statement.xlsx",
+        batch_id=f"{market_context.key.value}-matching-market",
+        uploaded_by="admin",
+        writer=writer,
+        product_master=_master(),
+        full_order_repository=_FullOrderCurrentRepository(matching_snapshot),
+        market_context=market_context,
+        now=lambda: NOW,
+    )
+
+    assert blocked.commit_ready is False
+    assert blocked.evidence_coverage is not None
+    assert [item.order_id for item in blocked.evidence_coverage.additional_evidence] == [
+        "SAME-ID"
+    ]
+    assert ready.commit_ready is True, (ready.blockers, ready.persistence_blockers)
+    assert ready.plan is not None
+    platform_index = STATEMENT_DATA_HEADERS.index("platform")
+    assert {row[platform_index] for row in ready.plan.rows} == {
+        market_context.persisted_platform
+    }
+
+
 def test_clean_full_order_current_statement_commit_writes_no_canonical_invoice_rows(
     monkeypatch,
 ):

@@ -38,6 +38,7 @@ _STAGED_STATEMENT_KEYS = (
     "weekly_statement_issue_order_id",
     "weekly_statement_issue_order_click",
     "weekly_statement_commit_completed",
+    "weekly_statement_commit_noop",
 )
 _INVOICE_STAGING_KEYS = (
     "batch_id",

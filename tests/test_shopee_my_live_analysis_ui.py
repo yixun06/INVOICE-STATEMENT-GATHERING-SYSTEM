@@ -17,9 +17,9 @@ def test_my_analysis_v2_renders_the_shared_dashboard_with_canonical_snapshot():
 
     assert app.exception == []
     assert [title.value for title in app.title] == ["Shopee MY - Analysis V2"]
-    assert {tab.label for tab in app.tabs} == {
+    assert next(control for control in app.get("button_group") if control.label == "Analysis workspace").options == [
         "Overview", "Product Analysis", "Financial & Reconciliation",
-    }
+    ]
     assert {metric.label for metric in app.metric} >= {
         "Product Sales", "Total Orders", "Product Sales with Statement Evidence",
         "Orders with committed Statement evidence", "Pending Statement evidence",
@@ -28,12 +28,13 @@ def test_my_analysis_v2_renders_the_shared_dashboard_with_canonical_snapshot():
     assert [element.label for element in app.selectbox[:1]] == ["Date basis"]
     assert any(element.label == "Product" for element in app.multiselect)
     assert any(element.label == "Order status" for element in app.multiselect)
-    assert any(element.label == "Search Order ID..." for element in app.text_input)
-    assert not any(element.label == "Order" for element in app.selectbox)
+    assert any("of 1 selected orders have committed Statement evidence" in caption.value for caption in app.caption)
+    next(control for control in app.get("button_group") if control.label == "Analysis workspace").set_value("Product Analysis").run(timeout=20)
     aggregations = [element for element in app.selectbox if element.label == "Aggregation"]
     assert aggregations and all(element.options == ["Daily", "Weekly", "Monthly"] for element in aggregations)
-    assert any("Order Created Date" in caption.value for caption in app.caption)
-    assert any("of 1 selected orders have committed Statement evidence" in caption.value for caption in app.caption)
+    next(control for control in app.get("button_group") if control.label == "Analysis workspace").set_value("Financial & Reconciliation").run(timeout=20)
+    assert any(element.label == "Search Order ID..." for element in app.text_input)
+    assert not any(element.label == "Order" for element in app.selectbox)
 
 
 def test_shared_dashboard_overview_keeps_only_coverage_and_breakdown_not_duplicate_trends():
@@ -65,6 +66,7 @@ def test_order_inspection_is_search_first_and_missing_statement_is_a_lifecycle_s
         "render_shopee_my_live_analysis(_snapshot(include_statement=False))\n"
     )
     app.run(timeout=20)
+    next(control for control in app.get("button_group") if control.label == "Analysis workspace").set_value("Financial & Reconciliation").run(timeout=20)
 
     search = next(element for element in app.text_input if element.label == "Search Order ID...")
     search.set_value("MY-1").run(timeout=20)

@@ -70,20 +70,19 @@ def _source_selector(app: AppTest):
     return next(control for control in app.get("button_group") if control.label == "Import workflow")
 
 
-def test_data_import_starts_with_a_four_platform_card_chooser(tmp_path, monkeypatch):
+def test_data_import_starts_with_the_two_shopee_market_chooser(tmp_path, monkeypatch):
     app = _data_import_app(tmp_path, monkeypatch)
 
     assert app.exception == []
     assert "Choose a platform" in {title.value for title in app.title}
-    assert {"Shopee MY", "Shopee SG", "Lazada", "TikTok"} <= {
+    assert {"Shopee MY", "Shopee SG"} == {
         item.value for item in app.subheader
     }
     assert {
         "Enter Shopee MY",
         "Enter Shopee SG",
-        "Enter Lazada",
-        "Enter TikTok",
     } <= {button.label for button in app.button}
+    assert {"Enter Lazada", "Enter TikTok"}.isdisjoint({button.label for button in app.button})
     assert {"Zenxin Website", "ZENXIN"}.isdisjoint(
         {item.value for item in app.subheader}
     )
@@ -92,7 +91,7 @@ def test_data_import_starts_with_a_four_platform_card_chooser(tmp_path, monkeypa
 
 @pytest.mark.parametrize(
     "platform_name",
-    ["Shopee MY", "Shopee SG", "Lazada", "TikTok"],
+    ["Shopee MY", "Shopee SG"],
 )
 def test_every_platform_enters_the_shared_data_import_shell(tmp_path, monkeypatch, platform_name):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), platform_name)
@@ -100,34 +99,32 @@ def test_every_platform_enters_the_shared_data_import_shell(tmp_path, monkeypatc
     assert app.exception == []
     assert f"{platform_name} · Data Import" in {item.value for item in app.title}
     assert _source_selector(app).options == [
-        "Invoice Import",
         "Full Order Import",
-        "Weekly Statement",
-        "Monthly Statement",
+        "Statement",
     ]
 
 
-def test_shopee_my_keeps_all_four_current_source_workflows_available(tmp_path, monkeypatch):
+def test_shopee_my_keeps_the_two_current_source_workflows_available(tmp_path, monkeypatch):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee MY")
     selector = _source_selector(app)
 
     for source in (
-        "Invoice Import",
         "Full Order Import",
-        "Weekly Statement",
-        "Monthly Statement",
+        "Statement",
     ):
         selector.set_value(source).run(timeout=20)
         continue_button = next(button for button in app.button if button.label == "Continue to upload")
         assert continue_button.disabled is False
 
 
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice/PDF import surface")
 def test_shopee_cancelled_order_v1_real_pdf_completes_data_import_ui(tmp_path, monkeypatch):
     pdf_path = Path(r"D:\download material\cancel pdf.pdf")
     if not pdf_path.exists():
         pytest.skip("Local approved Shopee cancelled-order PDF is unavailable.")
 
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee MY")
+    _source_selector(app).set_value("Invoice Import").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(timeout=20)
     app.file_uploader[0].set_value((pdf_path.name, pdf_path.read_bytes(), "application/pdf")).run(
         timeout=60
@@ -157,10 +154,11 @@ def test_shopee_cancelled_order_v1_real_pdf_completes_data_import_ui(tmp_path, m
 @pytest.mark.parametrize(
     ("platform_name", "source", "message"),
     (
-        ("Lazada", "Weekly Statement", "not available for Lazada yet"),
+        ("Lazada", "Statement", "not available for Lazada yet"),
         ("TikTok", "Monthly Statement", "not available for TikTok yet"),
     ),
 )
+@pytest.mark.skip(reason="Phase 1 removed Lazada and TikTok from the import chooser")
 def test_unsupported_platform_source_stays_in_shared_shell_without_upload(
     tmp_path, monkeypatch, platform_name, source, message
 ):
@@ -174,10 +172,13 @@ def test_unsupported_platform_source_stays_in_shared_shell_without_upload(
     assert app.session_state.filtered_state.get("data_import_step") == 1
 
 
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice/PDF import surface")
 def test_shopee_sg_invoice_import_opens_the_shared_pdf_zip_upload(tmp_path, monkeypatch):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
 
-    assert _source_selector(app).value == "Invoice Import"
+    assert _source_selector(app).value is None
+    assert not any(button.label == "Continue to upload" for button in app.button)
+    _source_selector(app).set_value("Invoice Import").run(timeout=20)
     continue_button = next(
         button for button in app.button if button.label == "Continue to upload"
     )
@@ -189,6 +190,54 @@ def test_shopee_sg_invoice_import_opens_the_shared_pdf_zip_upload(tmp_path, monk
     assert len(app.file_uploader) == 1
 
 
+@pytest.mark.parametrize("source_label", (None, "Retired workflow"))
+def test_source_selection_missing_or_unknown_widget_value_requires_explicit_choice(
+    tmp_path, monkeypatch, source_label
+):
+    app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee MY")
+    app.session_state["weekly_statement_selected_source"] = source_label
+
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert app.session_state.filtered_state.get("import_source_type") is None
+    assert not any(button.label == "Continue to upload" for button in app.button)
+    assert any("Choose an import workflow" in notice.value for notice in app.info)
+
+
+def test_statement_source_restores_missing_source_widget_from_persisted_identity(
+    tmp_path, monkeypatch
+):
+    state = {
+        "batch_id": "statement-batch",
+        "weekly_statement_stage": object(),
+        "weekly_statement_selected_source": None,
+    }
+
+    assert data_import._restore_evidenced_source_type(state) == data_import.SHOPEE_WEEKLY_STATEMENT
+
+    app = AppTest.from_file(str(APP_PATH))
+    for key, value in {
+        "authenticated": True,
+        "navigation": "Data Import",
+        data_import.ACTIVE_IMPORT_PLATFORM_KEY: "shopee_sg",
+        ACTIVE_IMPORT_MARKET_KEY: "shopee_sg",
+        data_import.SHOW_PLATFORM_SELECTOR_KEY: False,
+        "import_source_type": data_import.SHOPEE_WEEKLY_STATEMENT,
+        "weekly_statement_selected_source": None,
+        "data_import_step": 1,
+    }.items():
+        app.session_state[key] = value
+    monkeypatch.chdir(tmp_path)
+
+    # A valid persisted source is enough to restore the UI label; no source is
+    # guessed from the missing widget value.
+    app.run(timeout=20)
+
+    assert app.exception == []
+    assert _source_selector(app).value == "Statement"
+
+
 @pytest.mark.parametrize(
     ("platform_key", "market_key", "persisted_platform", "currency_format"),
     (
@@ -196,6 +245,7 @@ def test_shopee_sg_invoice_import_opens_the_shared_pdf_zip_upload(tmp_path, monk
         ("shopee_sg", "shopee_sg", "Shopee SG", "S$ %,.2f"),
     ),
 )
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice batch panels")
 def test_current_batch_money_uses_the_selected_market_currency(
     tmp_path,
     monkeypatch,
@@ -257,6 +307,7 @@ def test_current_batch_money_uses_the_selected_market_currency(
     assert f'"format": "{currency_format}"' in app.dataframe[-1].proto.columns
 
 
+@pytest.mark.skip(reason="Phase 1 removed the legacy Invoice batch panels")
 def test_sg_manual_review_metric_is_pending_until_product_listing_reconcile(
     tmp_path, monkeypatch
 ):
@@ -303,8 +354,10 @@ def test_sg_manual_review_money_uses_sgd_including_negative_values(monkeypatch):
     assert summary == ("S$ -123.45", "S$ 1,000.50", "S$ 1,123.95")
 
 
+@pytest.mark.skip(reason="Phase 1 removed the SG Invoice test workflow")
 def test_shopee_sg_review_is_test_only_without_commit_control(tmp_path, monkeypatch):
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
+    _source_selector(app).set_value("Invoice Import").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(
         timeout=20
     )
@@ -327,6 +380,7 @@ def test_shopee_sg_review_is_test_only_without_commit_control(tmp_path, monkeypa
     assert not any("Commit Accepted" in button.label for button in app.button)
 
 
+@pytest.mark.skip(reason="Phase 1 removed the SG Invoice test workflow")
 def test_shopee_sg_reconcile_fails_closed_when_google_listing_is_unconfigured(
     tmp_path, monkeypatch
 ):
@@ -350,6 +404,7 @@ def test_shopee_sg_reconcile_fails_closed_when_google_listing_is_unconfigured(
         monkeypatch.delenv(name, raising=False)
     product_master_source.clear_product_master_source_cache()
     app = _enter_platform(_data_import_app(tmp_path, monkeypatch), "Shopee SG")
+    _source_selector(app).set_value("Invoice Import").run(timeout=20)
     next(button for button in app.button if button.label == "Continue to upload").click().run(
         timeout=20
     )
@@ -449,8 +504,6 @@ def test_back_returns_to_chooser_without_discarding_the_active_batch(tmp_path, m
     (
         ("shopee_my", "shopee_my", "Shopee SG"),
         ("shopee_sg", "shopee_sg", "Shopee MY"),
-        ("shopee_my", "shopee_my", "Lazada"),
-        ("lazada", None, "TikTok"),
     ),
 )
 def test_active_batch_platform_switch_renders_controlled_conflict(
@@ -650,7 +703,8 @@ def test_active_platform_reentering_its_own_shell_preserves_the_batch(tmp_path, 
     assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_my"
 
 
-def test_active_batch_blocks_switch_until_safe_discard_then_enters_target(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_type", [data_import.SHOPEE_FULL_ORDER_LIST, data_import.SHOPEE_WEEKLY_STATEMENT])
+def test_active_batch_blocks_switch_until_safe_discard_then_enters_target(tmp_path, monkeypatch, source_type):
     app = AppTest.from_file(str(APP_PATH))
     for key, value in {
         "authenticated": True,
@@ -659,7 +713,7 @@ def test_active_batch_blocks_switch_until_safe_discard_then_enters_target(tmp_pa
         "orders": [{"platform": "Shopee", "order_id": "SHP-1"}],
         "products": [],
         "reviews": [],
-        "import_source_type": data_import.PLATFORM_ORDERS,
+        "import_source_type": source_type,
         "data_import_step": 2,
         data_import.ACTIVE_IMPORT_PLATFORM_KEY: "shopee_my",
         data_import.SHOW_PLATFORM_SELECTOR_KEY: True,
@@ -669,23 +723,23 @@ def test_active_batch_blocks_switch_until_safe_discard_then_enters_target(tmp_pa
     monkeypatch.chdir(tmp_path)
     app.run(timeout=20)
 
-    next(button for button in app.button if button.label == "Enter Lazada").click().run(timeout=20)
+    next(button for button in app.button if button.label == "Enter Shopee SG").click().run(timeout=20)
     assert "Current import is still active" in {item.value for item in app.subheader}
     assert app.session_state.filtered_state["batch_id"] == "my-active-batch"
 
     next(
         button
         for button in app.button
-        if button.label == "Discard current import and switch to Lazada"
+        if button.label == "Discard current import and switch to Shopee SG"
     ).click().run(timeout=20)
     next(button for button in app.button if button.key == "confirm_discard_current_batch").click().run(timeout=20)
 
     state = app.session_state.filtered_state
     assert app.exception == []
-    assert "Lazada · Data Import" in {title.value for title in app.title}
+    assert "Shopee SG · Data Import" in {title.value for title in app.title}
     assert "batch_id" not in state
-    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "lazada"
-    assert ACTIVE_IMPORT_MARKET_KEY not in state
+    assert state[data_import.ACTIVE_IMPORT_PLATFORM_KEY] == "shopee_sg"
+    assert state[ACTIVE_IMPORT_MARKET_KEY] == "shopee_sg"
 
 
 @pytest.mark.parametrize(

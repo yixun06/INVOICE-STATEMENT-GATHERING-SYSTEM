@@ -71,7 +71,10 @@ from src.invoice_app.services.workflow_navigation import (
     end_workflow_activity,
     request_navigation,
 )
-from src.invoice_app.services.data_import_state import has_unfinished_session_work
+from src.invoice_app.services.data_import_state import (
+    has_unfinished_session_work,
+    mark_statement_review_stale,
+)
 from src.invoice_app.services.market_context import has_active_import_batch
 from src.invoice_app.services.exporter import (
     export_all_products_report,
@@ -84,6 +87,7 @@ from src.invoice_app.ui.data_import import (
     DataImportPlatform,
     POST_DISCARD_PLATFORM_SWITCH_KEY,
     PLATFORM_ORDERS,
+    SHOPEE_FULL_ORDER_LIST,
     SHOPEE_SG_PRODUCT_RESOLUTION_EVALUATED_KEY,
     SHOPEE_WEEKLY_STATEMENT,
     active_data_import_platform,
@@ -96,14 +100,6 @@ from src.invoice_app.ui.data_import import (
 )
 from src.invoice_app.ui.settlement_test_lab import (
     reset_settlement_test_lab_state,
-)
-from src.invoice_app.ui.weekly_billing import (
-    WEEKLY_BILLING_PAGE,
-    render_weekly_billing,
-)
-from src.invoice_app.ui.monthly_billing import (
-    MONTHLY_BILLING_PAGE,
-    render_monthly_billing,
 )
 from src.invoice_app.ui.cross_platform_product_summary import (
     render_cross_platform_product_summary,
@@ -216,18 +212,15 @@ DATE_COLUMNS = {
 }
 PINNED_COLUMNS = {"platform", "order_id", "product_name", "seller_sku"}
 LIVE_ANALYSIS_NAVIGATION_PAGES = [
-    "Consolidated Product Summary",
     "Shopee MY",
     "Shopee SG",
     "Lazada",
     "TikTok",
 ]
-UAT2_NAVIGATION_PAGES = [WEEKLY_BILLING_PAGE, MONTHLY_BILLING_PAGE]
+SYNC_SALES_NAVIGATION_PAGES = ["Consolidated Product Summary"]
 DEVELOPMENT_NAVIGATION_PAGES: list[str] = []
 NAVIGATION_ICONS = {
     DATA_IMPORT_PAGE: "upload_file",
-    WEEKLY_BILLING_PAGE: "calendar_month",
-    MONTHLY_BILLING_PAGE: "calendar_view_month",
     "Consolidated Product Summary": "inventory_2",
     "Shopee MY": "storefront",
     "Shopee SG": "local_mall",
@@ -659,11 +652,11 @@ def show_sidebar(pdf_count: int) -> str:
             }
 
             section[data-testid="stSidebar"] .sidebar-section-label {
-                margin: 0.8rem 0 0.32rem;
-                color: #77837b;
-                font-size: 0.72rem;
-                font-weight: 600;
-                letter-spacing: 0.04em;
+                margin: 1rem 0 0.35rem;
+                color: #617468;
+                font-size: 0.68rem;
+                font-weight: 700;
+                letter-spacing: 0.08em;
                 line-height: 1.2;
                 text-transform: uppercase;
             }
@@ -761,12 +754,23 @@ def show_sidebar(pdf_count: int) -> str:
                 min-height: 1.95rem;
                 height: 1.95rem;
                 padding: 0 0.58rem;
-                border-color: #14532d;
-                background: #14532d;
-                color: #ffffff;
+                border-color: #b8d0b4;
+                background: #e4f1df;
+                color: #14532d;
                 box-shadow: none;
                 font-size: 0.78rem;
                 font-weight: 600;
+            }
+
+            section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {
+                border-color: #7fa477;
+                background: #d8ead3;
+                color: #14532d;
+            }
+
+            section[data-testid="stSidebar"] [data-testid="stButton"] button:focus-visible {
+                outline: 2px solid #14532d;
+                outline-offset: 2px;
             }
 
             section[data-testid="stSidebar"] .sidebar-batch-summary {
@@ -809,7 +813,7 @@ def show_sidebar(pdf_count: int) -> str:
             navigation = "Shopee MY"
         if navigation not in {
             DATA_IMPORT_PAGE,
-            *UAT2_NAVIGATION_PAGES,
+            *SYNC_SALES_NAVIGATION_PAGES,
             *LIVE_ANALYSIS_NAVIGATION_PAGES,
             *DEVELOPMENT_NAVIGATION_PAGES,
         }:
@@ -831,9 +835,9 @@ def show_sidebar(pdf_count: int) -> str:
                     width="stretch",
                 )
 
-        render_navigation_section("ADMIN", [DATA_IMPORT_PAGE])
-        render_navigation_section("BILLING & ACCOUNTING", UAT2_NAVIGATION_PAGES)
-        render_navigation_section("LIVE ANALYSIS", LIVE_ANALYSIS_NAVIGATION_PAGES)
+        render_navigation_section("DATA IMPORT", [DATA_IMPORT_PAGE])
+        render_navigation_section("ZEONIQ SYNC SALES", SYNC_SALES_NAVIGATION_PAGES)
+        render_navigation_section("LIVE ANALYSIS DASHBOARD", LIVE_ANALYSIS_NAVIGATION_PAGES)
 
         st.html('<p class="sidebar-section-label">Product Master</p>')
         refresh_message = st.session_state.pop("product_master_refresh_message", None)
@@ -863,7 +867,8 @@ def show_sidebar(pdf_count: int) -> str:
                     f"({len(price_master.records)} records)."
                 )
                 if st.session_state.get("weekly_statement_review") is not None:
-                    st.session_state.weekly_statement_review_stale_reason = (
+                    mark_statement_review_stale(
+                        st.session_state,
                         "Product Master was refreshed after this Statement review. "
                         "Refresh validation before continuing."
                     )
@@ -871,7 +876,16 @@ def show_sidebar(pdf_count: int) -> str:
 
         st.html('<p class="sidebar-section-label">Current batch</p>')
         if has_active_import_batch(st.session_state):
-            st.html(f'<div class="sidebar-batch-summary"><span class="material-symbols-rounded">picture_as_pdf</span>{pdf_count} PDFs processed</div>')
+            canonical_file_count = int(
+                st.session_state.get("full_order_review") is not None
+                or st.session_state.get("weekly_statement_stage") is not None
+            )
+            file_count = (
+                canonical_file_count
+                if st.session_state.get("import_source_type") in {SHOPEE_FULL_ORDER_LIST, SHOPEE_WEEKLY_STATEMENT}
+                else pdf_count
+            )
+            st.html(f'<div class="sidebar-batch-summary"><span class="material-symbols-rounded">description</span>{file_count} files processed</div>')
         else:
             st.html('<div class="sidebar-batch-summary">No active batch</div>')
 
@@ -879,6 +893,7 @@ def show_sidebar(pdf_count: int) -> str:
             st.session_state.pending_batch_discard_confirmation = True
             st.rerun()
 
+        st.html('<p class="sidebar-section-label">Session</p>')
         if st.button("Logout", icon=":material/logout:", width="stretch"):
             if _has_unfinished_session_work():
                 st.session_state.pending_logout_confirmation = True
@@ -2068,17 +2083,13 @@ if selected_page == DATA_IMPORT_PAGE:
         render_platform_orders_validation_data=show_current_batch_validation_data,
         discard_current_batch=request_batch_discard_confirmation,
     )
-elif selected_page == WEEKLY_BILLING_PAGE:
-    render_weekly_billing()
-elif selected_page == MONTHLY_BILLING_PAGE:
-    render_monthly_billing()
 elif selected_page == "Consolidated Product Summary":
     render_cross_platform_product_summary()
 elif selected_page == "Shopee MY":
     render_shopee_my_live_analysis()
 elif selected_page == "Shopee SG":
     render_shopee_sg_analysis()
-elif selected_page == "TikTok":
+elif selected_page in {"Lazada", "TikTok"}:
     st.title(selected_page)
     st.info(f"{selected_page} analysis is not configured yet.")
 else:
