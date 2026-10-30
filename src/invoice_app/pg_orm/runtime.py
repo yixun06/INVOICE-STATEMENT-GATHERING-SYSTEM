@@ -59,10 +59,13 @@ class PostgresRuntimeConfig:
             raise PostgresRuntimeUnavailable(
                 f"Refusing non-local PostgreSQL {consumer} target: {self.host!r}."
             )
-        if self.port != 5433 or self.database != "invoicegather":
+        if not (
+            (self.port == 5433 and self.database == "invoicegather")
+            or (self.host == "127.0.0.1" and self.port == 55434 and self.database == "invoicegather_uat2_import")
+        ):
             raise PostgresRuntimeUnavailable(
                 f"Refusing unapproved PostgreSQL {consumer} target; expected "
-                "localhost:5433/invoicegather."
+                "localhost:5433/invoicegather or 127.0.0.1:55434/invoicegather_uat2_import."
             )
 
     def engine(self) -> Engine:
