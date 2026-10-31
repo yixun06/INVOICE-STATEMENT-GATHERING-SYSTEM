@@ -1,5 +1,12 @@
 # InvoiceGather Project Status
 
+## Canonical integration and deployment policy
+
+- Product Owner decision: `main` is the canonical integration and deployment branch.
+- Workflow: feature/fix branch -> implementation -> focused tests -> Product Owner UAT where required -> checkpoint -> merge into main -> deploy main.
+- Unaccepted experiments do not merge into main. Keep `deploy/uat2-postgres-profile` as a historical safety branch until deployment from main is verified.
+- Deployment migration to main is pending; the branch policy alone does not verify or change the running service.
+
 ### Shopee Analysis final minor polish — ready for PO review (2026-10-30)
 
 - Tightened native spacing between the filters and shared module content; the
