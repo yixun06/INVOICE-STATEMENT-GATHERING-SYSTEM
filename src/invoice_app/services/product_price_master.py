@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from functools import lru_cache
@@ -521,8 +521,11 @@ class ProductPriceMaster:
         self, candidates: tuple[ProductPriceMasterRecord, ...], stage: str,
     ) -> ProductPriceLookupResult:
         if len(candidates) == 1:
-            return self._matched_identity(candidates, status=PriceLookupStatus.MATCHED, matched_by=stage)
-        consensus = self._full_order_canonical_consensus(candidates)
+            result = self._matched_identity(candidates, status=PriceLookupStatus.MATCHED, matched_by=stage)
+            if _is_confirmed_my_zero_price_gift(candidates[0]):
+                return replace(result, unit_price_usolf=candidates[0].unit_price_usolf)
+            return result
+        consensus = self._full_order_canonical_consensus(candidates, allow_my_gift=True)
         if consensus is not None:
             return consensus
         return self._conflict(
@@ -530,7 +533,7 @@ class ProductPriceMaster:
         )
 
     def _full_order_canonical_consensus(
-        self, records: tuple[ProductPriceMasterRecord, ...]
+        self, records: tuple[ProductPriceMasterRecord, ...], *, allow_my_gift: bool = False
     ) -> ProductPriceLookupResult | None:
         if len(records) < 2:
             return None
@@ -542,7 +545,8 @@ class ProductPriceMaster:
         if len(outputs) != 1:
             return None
         sku, nav, usolf, resolve_sku = next(iter(outputs))
-        if not sku or not nav or usolf is None or usolf <= 0:
+        gift_zero = allow_my_gift and all(_is_confirmed_my_zero_price_gift(r) for r in records)
+        if not sku or not nav or usolf is None or (usolf <= 0 and not gift_zero):
             return None
         prices = {r.unit_selling_price for r in records}
         return ProductPriceLookupResult(
@@ -1049,6 +1053,19 @@ def _resolved_usolf_price(
         return None
     price = next(iter(prices))
     return price if price is not None and price > 0 else None
+
+
+def _is_confirmed_my_zero_price_gift(record: ProductPriceMasterRecord) -> bool:
+    """Accept zero only for the Product Owner-confirmed MY Listing identity."""
+    return (
+        _full_order_identity_text(record.product_name) == _full_order_identity_text("[Not for sale] Mini Trial Pack")
+        and not _full_order_identity_text(record.variation_name)
+        and normalize_sku_text(record.seller_sku) == "5000000"
+        and normalize_sku_text(record.parent_sku) == normalize_sku_text("Disc")
+        and record.nav_code == "5000000"
+        and record.resolve_sku == "5000000-free gift"
+        and record.unit_price_usolf == Decimal("0")
+    )
 
 
 def _matches_verified_erp_identity_equivalence(
