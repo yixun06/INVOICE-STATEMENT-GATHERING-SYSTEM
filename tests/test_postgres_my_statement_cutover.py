@@ -9,7 +9,7 @@ from time import monotonic
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Numeric, delete, func, select, text
+from sqlalchemy import Integer, MetaData, Numeric, create_engine, delete, event, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
@@ -51,6 +51,7 @@ from src.invoice_app.services.uat2_persistence_schema import (
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_HEADERS,
     SHOPEE_FULL_ORDER_CURRENT_ORDERS_TAB,
     STATEMENT_DATA_TAB,
+    STATEMENT_FINANCIAL_COMPONENT_HEADERS,
     STATEMENT_FINANCIAL_COMPONENTS_TAB,
     STATEMENT_DATA_HEADERS,
     STATEMENT_SUMMARY_TAB,
@@ -287,6 +288,137 @@ def _statement_table_counts(repository: PostgresStatementRepository) -> tuple[in
         )
 
 
+def _readback_test_engine():
+    """Isolated SQLite tables with the same fields and constraints as the ORM."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata = MetaData()
+    for model in (StatementData, StatementFinancialComponent, StatementSummary, OrderAdjustment):
+        table = model.__table__.to_metadata(metadata)
+        if "id" in table.c:
+            table.c.id.type = Integer()
+    metadata.create_all(engine)
+    return engine
+
+
+def test_bulk_readback_verifies_four_domains_and_preserves_blank_numeric_semantics() -> None:
+    engine = _readback_test_engine()
+    plan = _rollback_control_plan()
+    with engine.begin() as connection:
+        postgres_statement_repository._insert_plan(connection, plan)
+        postgres_statement_repository._verify_inserted(connection, plan)
+    assert postgres_statement_repository._verification_cell(Numeric(12, 2), None) == ""
+    assert postgres_statement_repository._verification_cell(Numeric(12, 2), "") == ""
+    assert postgres_statement_repository._verification_cell(Numeric(12, 2), Decimal("-0.00")) == "0"
+
+
+@pytest.mark.parametrize("failure", ["missing", "text", "numeric"])
+def test_bulk_readback_mismatch_raises_and_rolls_back(failure: str) -> None:
+    engine = _readback_test_engine()
+    plan = _rollback_control_plan()
+    rows = list(plan.financial_component_rows)
+    if failure == "missing":
+        row = list(rows[0])
+        row[STATEMENT_FINANCIAL_COMPONENT_HEADERS.index("component_name")] = "absent"
+    else:
+        row = list(rows[0])
+        field = "component_note" if failure == "text" else "component_amount"
+        row[STATEMENT_FINANCIAL_COMPONENT_HEADERS.index(field)] = "changed" if failure == "text" else "999.99"
+    changed = replace(plan, financial_component_rows=(tuple(row), *rows[1:]))
+    with pytest.raises(StatementCommitBlocked):
+        with engine.begin() as connection:
+            postgres_statement_repository._insert_plan(connection, plan)
+            postgres_statement_repository._verify_inserted(connection, changed)
+    with engine.connect() as connection:
+        for model in (StatementData, StatementFinancialComponent, StatementSummary, OrderAdjustment):
+            assert connection.execute(select(func.count()).select_from(model.__table__)).scalar_one() == 0
+
+
+def test_batch_readback_accepts_financial_component_numeric_scale() -> None:
+    engine = _readback_test_engine()
+    plan = _rollback_control_plan()
+    rows = list(plan.financial_component_rows)
+    amount_index = STATEMENT_FINANCIAL_COMPONENT_HEADERS.index("component_amount")
+    row = list(rows[0])
+    assert row[amount_index]
+    row[amount_index] = str(Decimal(row[amount_index]).quantize(Decimal("0.00")))
+    expected = replace(plan, financial_component_rows=(tuple(row), *rows[1:]))
+    with engine.begin() as connection:
+        postgres_statement_repository._insert_plan(connection, plan)
+        postgres_statement_repository._verify_inserted(connection, expected)
+
+
+def test_bulk_readback_unique_constraint_rejects_duplicate_identity() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    engine = _readback_test_engine()
+    plan = _rollback_control_plan()
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            postgres_statement_repository._insert_plan(connection, plan)
+            postgres_statement_repository._insert_values(
+                connection, StatementFinancialComponent, STATEMENT_FINANCIAL_COMPONENT_HEADERS,
+                (plan.financial_component_rows[0],),
+            )
+
+
+def test_bulk_readback_rejects_duplicate_returned_identity() -> None:
+    engine = _readback_test_engine()
+    plan = _rollback_control_plan()
+
+    class DuplicateResult:
+        def __init__(self, result):
+            self.result = result
+
+        def mappings(self):
+            rows = list(self.result.mappings())
+            return rows + rows[:1]
+
+    class DuplicateConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement):
+            return DuplicateResult(self.connection.execute(statement))
+
+    with engine.begin() as connection:
+        postgres_statement_repository._insert_plan(connection, plan)
+        with pytest.raises(StatementCommitBlocked, match="stable identity"):
+            postgres_statement_repository._verify_keys(
+                DuplicateConnection(connection), StatementData,
+                ("statement_batch_id", "record_type", "sequence_no"),
+                STATEMENT_DATA_HEADERS, plan.rows,
+            )
+
+
+@pytest.mark.parametrize(("size", "expected_selects"), [(10, 1), (1000, 1)])
+def test_bulk_component_readback_has_bounded_queries(size: int, expected_selects: int) -> None:
+    engine = _readback_test_engine()
+    template = _rollback_control_plan().financial_component_rows[0]
+    source_row_index = STATEMENT_FINANCIAL_COMPONENT_HEADERS.index("statement_source_row_number")
+    rows = []
+    for index in range(size):
+        row = list(template)
+        row[source_row_index] = str(index + 1)
+        rows.append(tuple(row))
+    calls = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def count_selects(_conn, _cursor, statement, _params, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            calls.append(statement)
+
+    with engine.begin() as connection:
+        postgres_statement_repository._insert_values(
+            connection, StatementFinancialComponent, STATEMENT_FINANCIAL_COMPONENT_HEADERS, rows
+        )
+        postgres_statement_repository._verify_keys(
+            connection, StatementFinancialComponent,
+            ("statement_batch_id", "statement_source_sheet", "statement_source_row_number", "component_name"),
+            STATEMENT_FINANCIAL_COMPONENT_HEADERS, rows,
+        )
+    assert len(calls) == expected_selects
+
+
 def test_postgres_plan_readback_verifies_all_four_domains_then_rolls_back() -> None:
     """Expected fields—not merely keys—are authoritatively readable before commit."""
 
@@ -432,8 +564,8 @@ def test_postgres_writer_rolls_back_each_four_domain_insert_failure(
     before = _statement_table_counts(repository)
     monkeypatch.setattr(
         repository,
-        "_read_state",
-        lambda _connection: StatementCommitState(
+        "_read_candidate_state",
+        lambda _connection, _plan: StatementCommitState(
             orders={},
             items=(),
             committed_statements=(),

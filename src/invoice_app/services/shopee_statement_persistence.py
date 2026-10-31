@@ -7,6 +7,7 @@ contract against authoritative persisted state.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
@@ -16,6 +17,7 @@ from hashlib import sha256
 import json
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
+from src.invoice_app.services.statement_performance import measured, measure
 from src.invoice_app.domain.historical_invoice import (
     CanonicalInvoiceItem,
     CanonicalInvoiceOrder,
@@ -766,6 +768,43 @@ def prepare_full_order_statement_commit_plan(
     )
 
 
+class StatementSourcePlanContext:
+    """One private source proof, never a database snapshot or classification.
+
+    Repository and review own separate instances. Equality against an isolated
+    copy detects mutation of nested source mappings; no hash-only trust shortcut.
+    Only the audit time varies on reuse, and every serialized occurrence is rebound.
+    """
+    def __init__(self) -> None:
+        self._entry: tuple[StatementCommitPlan, str, bool] | None = None
+
+    def get(
+        self, statement: ParsedShopeeWeeklyStatement, audit: StatementBatchAudit,
+        platform: str, semantic: bool,
+    ) -> StatementCommitPlan | None:
+        entry = self._entry
+        if entry is None:
+            return None
+        old, old_platform, old_semantic = entry
+        if (old.statement != statement or old_platform != platform or old_semantic != semantic
+                or replace(old.audit, committed_at=audit.committed_at) != audit):
+            return None
+        def retime(rows, headers):
+            index = headers.index("committed_at")
+            value = _serialize(audit.committed_at)
+            return tuple((*row[:index], value, *row[index + 1:]) for row in rows)
+        return replace(old, statement=deepcopy(statement), audit=audit,
+                       rows=retime(old.rows, STATEMENT_DATA_HEADERS),
+                       financial_component_rows=retime(old.financial_component_rows, STATEMENT_FINANCIAL_COMPONENT_HEADERS),
+                       summary_rows=retime(old.summary_rows, STATEMENT_SUMMARY_HEADERS),
+                       order_adjustments=tuple(replace(item, first_observed_at=audit.committed_at)
+                                               for item in old.order_adjustments))
+
+    def retain(self, plan: StatementCommitPlan, platform: str, semantic: bool) -> None:
+        self._entry = (deepcopy(plan), platform, semantic)
+
+
+@measured("candidate_plan_prepare")
 def prepare_full_order_existence_statement_commit_plan(
     statement: ParsedShopeeWeeklyStatement,
     *,
@@ -774,6 +813,7 @@ def prepare_full_order_existence_statement_commit_plan(
     validation_passed: bool,
     persisted_platform: str,
     semantic_overlap_dedupe: bool = False,
+    source_context: StatementSourcePlanContext | None = None,
 ) -> StatementCommitPlan:
     """Persist source settlement facts after exact Current-order existence proof.
 
@@ -786,53 +826,63 @@ def prepare_full_order_existence_statement_commit_plan(
         raise StatementCommitBlocked("Statement internal validation has not passed.")
     if not audit.statement_batch_id.strip():
         raise ValueError("statement_batch_id is required.")
-    _validate_statement_row_identity(statement)
+    reused = (source_context.get(statement, audit, persisted_platform, semantic_overlap_dedupe)
+              if source_context is not None else None)
+    if reused is None:
+        _validate_statement_row_identity(statement)
     covered = {str(order_id).strip() for order_id in full_order_ids if str(order_id).strip()}
     missing = [row.order_id for row in statement.order_rows if row.order_id not in covered]
     if missing:
         raise StatementCommitBlocked(
             "Statement target Order ID is missing from Full Order Current: " + missing[0]
         )
-    comparisons = tuple(
-        StatementOrderComparison(
-            order_id=row.order_id,
-            comparison_source="Full Order Current",
-            comparison_amount=None,
-            difference=None,
-            reconciliation_status="FULL_ORDER_EXISTS",
-            payout_completed_date=row.payout_completed_date,
+    if reused is not None:
+        with measure("candidate_plan_reuse"):
+            return reused
+    with measure("candidate_plan_build"):
+        comparisons = tuple(
+            StatementOrderComparison(
+                order_id=row.order_id,
+                comparison_source="Full Order Current",
+                comparison_amount=None,
+                difference=None,
+                reconciliation_status="FULL_ORDER_EXISTS",
+                payout_completed_date=row.payout_completed_date,
+            )
+            for row in statement.order_rows
         )
-        for row in statement.order_rows
-    )
-    rows = [
-        _order_row(statement, audit, row, comparison, persisted_platform=persisted_platform)
-        for row, comparison in zip(statement.order_rows, comparisons)
-    ]
-    rows.extend(
-        _unallocated_sku_row(statement, audit, row, persisted_platform=persisted_platform)
-        for row in statement.sku_rows
-    )
-    rows.extend(
-        _adjustment_row(statement, audit, adjustment, persisted_platform=persisted_platform)
-        for adjustment in statement.adjustments
-    )
-    return StatementCommitPlan(
-        statement=statement,
-        audit=audit,
-        rows=tuple(rows),
-        financial_component_rows=_financial_component_rows(
-            statement, audit, persisted_platform=persisted_platform
-        ),
-        order_comparisons=comparisons,
-        invoice_order_updates=(),
-        invoice_item_updates=(),
-        summary_rows=_summary_rows(statement, audit, persisted_platform=persisted_platform),
-        order_adjustments=_order_adjustment_events(
-            statement, audit, persisted_platform=persisted_platform
-        ),
-        authority="FULL_ORDER_CURRENT",
-        semantic_overlap_dedupe=semantic_overlap_dedupe,
-    )
+        rows = [
+            _order_row(statement, audit, row, comparison, persisted_platform=persisted_platform)
+            for row, comparison in zip(statement.order_rows, comparisons)
+        ]
+        rows.extend(
+            _unallocated_sku_row(statement, audit, row, persisted_platform=persisted_platform)
+            for row in statement.sku_rows
+        )
+        rows.extend(
+            _adjustment_row(statement, audit, adjustment, persisted_platform=persisted_platform)
+            for adjustment in statement.adjustments
+        )
+        plan = StatementCommitPlan(
+            statement=statement,
+            audit=audit,
+            rows=tuple(rows),
+            financial_component_rows=_financial_component_rows(
+                statement, audit, persisted_platform=persisted_platform
+            ),
+            order_comparisons=comparisons,
+            invoice_order_updates=(),
+            invoice_item_updates=(),
+            summary_rows=_summary_rows(statement, audit, persisted_platform=persisted_platform),
+            order_adjustments=_order_adjustment_events(
+                statement, audit, persisted_platform=persisted_platform
+            ),
+            authority="FULL_ORDER_CURRENT",
+            semantic_overlap_dedupe=semantic_overlap_dedupe,
+        )
+        if source_context is not None:
+            source_context.retain(plan, persisted_platform, semantic_overlap_dedupe)
+        return plan
 
 
 def validate_active_statement_state(
@@ -844,6 +894,7 @@ def validate_active_statement_state(
     return preview_active_statement_state(plan, state).blocker_codes
 
 
+@measured("classification")
 def preview_active_statement_state(
     plan: StatementCommitPlan,
     state: StatementCommitState,
@@ -1021,6 +1072,7 @@ def _classify_order_bundles(
     duplicate: list[str] = []
     conflict: list[str] = []
     unsafe: list[str] = []
+    semantic_comparisons = 0
     for order_id in tuple(
         dict.fromkeys(row.order_id for row in plan.statement.order_rows if row.order_id)
     ):
@@ -1030,34 +1082,29 @@ def _classify_order_bundles(
             unsafe.append(order_id)
         elif not candidates:
             new.append(order_id)
-        elif all(
-            _bundles_are_semantically_equivalent(
-                source_bundle,
-                candidate,
-                incoming_service_fee_component_headers=incoming_service_fee_component_headers,
-            )
-            for candidate in candidates
-        ):
-            duplicate.append(order_id)
-        elif any(
-            _bundles_are_semantically_equivalent(
-                source_bundle,
-                candidate,
-                incoming_service_fee_component_headers=incoming_service_fee_component_headers,
-            )
-            for candidate in candidates
-        ):
-            unsafe.append(order_id)
-        elif any(
-            _bundle_shape(candidate.bundle) != _bundle_shape(source_bundle)
-            for candidate in candidates
-        ):
-            unsafe.append(order_id)
         else:
-            conflict.append(order_id)
-    return tuple(new), tuple(duplicate), tuple(conflict), tuple(unsafe)
+            semantic_comparisons += len(candidates)
+            equivalent = tuple(
+                _bundles_are_semantically_equivalent(
+                    source_bundle, candidate,
+                    incoming_service_fee_component_headers=incoming_service_fee_component_headers,
+                ) for candidate in candidates
+            )
+            if all(equivalent):
+                duplicate.append(order_id)
+            elif any(equivalent):
+                unsafe.append(order_id)
+            else:
+                source_shape = _bundle_shape(source_bundle)
+                if any(_bundle_shape(candidate.bundle) != source_shape for candidate in candidates):
+                    unsafe.append(order_id)
+                else:
+                    conflict.append(order_id)
+    with measure("classification_comparisons", semantic_comparisons=semantic_comparisons):
+        return tuple(new), tuple(duplicate), tuple(conflict), tuple(unsafe)
 
 
+@measured("bundle_build")
 def _bundle_map(
     rows: Iterable[tuple[str, ...]],
     components: Iterable[tuple[str, ...]],
@@ -1489,7 +1536,7 @@ def _validate_statement_row_identity(statement: ParsedShopeeWeeklyStatement) -> 
             "Statement source sequence is missing for record type(s): "
             + ", ".join(sorted(set(blank)))
         )
-    duplicates = sorted({identity for identity in identities if identities.count(identity) > 1})
+    duplicates = sorted(identity for identity, count in Counter(identities).items() if count > 1)
     if duplicates:
         raise StatementCommitBlocked(
             "Statement stable row identity is duplicated: " + ", ".join(
@@ -2051,6 +2098,7 @@ def _financial_component_row(
     )
 
 
+@measured("source_index_build")
 def _validate_financial_component_rows(
     rows: Sequence[tuple[str, ...]], statement: ParsedShopeeWeeklyStatement
 ) -> None:
@@ -2058,6 +2106,13 @@ def _validate_financial_component_rows(
         header: index
         for index, header in enumerate(STATEMENT_FINANCIAL_COMPONENT_HEADERS)
     }
+    # Existential predicates intentionally retain their exact original key shapes.
+    income_sources = {(row.view_by, row.sequence_no, str(row.source_row_number))
+                      for row in statement.income_rows}
+    detail_sources = {(row.sequence_no, row.order_id, str(row.source_row_number))
+                      for row in statement.service_fee_details}
+    shipping_sources = {(row.order_id, str(row.source_row_number))
+                        for row in statement.shipping_fee_discrepancies}
     identities: set[tuple[str, str, str, str]] = set()
     for row in rows:
         if len(row) != len(STATEMENT_FINANCIAL_COMPONENT_HEADERS):
@@ -2095,36 +2150,19 @@ def _validate_financial_component_rows(
             expected_view = "Order" if record_type == "ORDER" else "Sku"
             if source_sheet != "Income" or not sequence_no or not order_id:
                 raise StatementCommitBlocked("Income financial component row lacks traceable source identity.")
-            if not any(
-                source_row.view_by == expected_view
-                and source_row.sequence_no == sequence_no
-                and str(source_row.source_row_number)
-                == row[positions["statement_source_row_number"]]
-                for source_row in statement.income_rows
-            ):
+            if (expected_view, sequence_no, row[positions["statement_source_row_number"]]) not in income_sources:
                 raise StatementCommitBlocked("Income financial component row cannot be traced to a Statement source row.")
         elif record_type == "SERVICE_FEE_DETAIL":
             if source_sheet != "Service Fee Details" or not sequence_no or not order_id:
                 raise StatementCommitBlocked("Service Fee Detail component row lacks traceable source identity.")
-            if not any(
-                detail.sequence_no == sequence_no
-                and detail.order_id == order_id
-                and str(detail.source_row_number)
-                == row[positions["statement_source_row_number"]]
-                for detail in statement.service_fee_details
-            ):
+            if (sequence_no, order_id, row[positions["statement_source_row_number"]]) not in detail_sources:
                 raise StatementCommitBlocked(
                     "Service Fee Detail component row cannot be traced to a Statement source row."
                 )
         elif (
             source_sheet != "Shipping Fee Discrepancy"
             or not order_id
-            or not any(
-                discrepancy.order_id == order_id
-                and str(discrepancy.source_row_number)
-                == row[positions["statement_source_row_number"]]
-                for discrepancy in statement.shipping_fee_discrepancies
-            )
+            or (order_id, row[positions["statement_source_row_number"]]) not in shipping_sources
         ):
             raise StatementCommitBlocked(
                 "Shipping discrepancy component row cannot be traced to a Statement source row."

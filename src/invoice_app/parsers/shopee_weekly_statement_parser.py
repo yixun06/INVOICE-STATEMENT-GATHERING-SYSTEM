@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.invoice_app.services.statement_performance import measured
+
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -170,6 +172,8 @@ class ShopeeStatementParseError(ValueError):
         self.source_filename = source_filename
         self.file_hash = file_hash
 
+
+@measured("source_parse")
 def parse_shopee_statement(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
@@ -864,7 +868,7 @@ def _parse_adjustment_rows(
             _record_issue(issues, code="invalid_adjustment_amount", sheet="Adjustment", row_number=row_number, column="Adjustment Amount", value=row[positions["Adjustment Amount"]])
         if complete_date is None:
             _record_issue(issues, code="invalid_adjustment_complete_date", sheet="Adjustment", row_number=row_number, column="Adjustment Complete Date", value=row[positions["Adjustment Complete Date"]])
-        if payout_date is None and contract.adjustment_payout_date_required:
+        if payout_date is None and contract.adjustment_payout_date_required and _text(row[positions["Payout Completed Date"]]):
             _record_issue(issues, code="invalid_adjustment_payout_date", sheet="Adjustment", row_number=row_number, column="Payout Completed Date", value=row[positions["Payout Completed Date"]])
         parsed.append(SettlementAdjustment(
             sequence_no=_text(row[positions["Sequence No."]]),

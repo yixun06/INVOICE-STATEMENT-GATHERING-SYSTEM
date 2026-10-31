@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
-from sqlalchemy import Integer, Numeric, select, text
+from sqlalchemy import Integer, Numeric, and_, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from src.invoice_app.services.statement_performance import measured, measure, log_elapsed
 from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment, EvidenceStatus
 from src.invoice_app.pg_orm.pg_models import (
     OrderAdjustment,
@@ -34,6 +36,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitPlan,
     StatementCommitPreflight,
     StatementCommitState,
+    StatementSourcePlanContext,
     _canonicalize_bundle_monetary_value,
     prepare_full_order_existence_statement_commit_plan,
     preview_active_statement_state,
@@ -63,6 +66,7 @@ class PostgresStatementRepository:
             raise ValueError(
                 "PostgreSQL Statement runtime requires an explicitly supported market platform."
             )
+        self._source_context = StatementSourcePlanContext()
         self._engine = engine
         self._persisted_platform = persisted_platform
 
@@ -109,8 +113,11 @@ class PostgresStatementRepository:
 
     def preview_statement_batch(self, plan: StatementCommitPlan) -> StatementCommitPreflight:
         _validate_plan_market(plan, self._persisted_platform)
-        with self._engine.connect() as connection:
-            return self._preflight(plan, self._read_state(connection))[0]
+        prepared = self._prepare_plan(plan)
+        with measure("candidate_state_connection"):
+            connection_context = self._engine.connect()
+        with connection_context as connection:
+            return self._preflight(plan, self._read_candidate_state(connection, prepared), prepared)[0]
 
     def write_statement_batch(self, plan: StatementCommitPlan) -> None:
         """Classify and commit an active market plan in one serializable transaction.
@@ -121,6 +128,7 @@ class PostgresStatementRepository:
         """
 
         _validate_plan_market(plan, self._persisted_platform)
+        prepared = self._prepare_plan(plan)
         try:
             with self._engine.connect().execution_options(
                 isolation_level="SERIALIZABLE"
@@ -130,7 +138,10 @@ class PostgresStatementRepository:
                         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
                         {"key": _STATEMENT_ADVISORY_LOCKS[self._persisted_platform]},
                     )
-                    preview, effective = self._preflight(plan, self._read_state(connection))
+                    with measure("transaction_preflight"):
+                        preview, effective = self._preflight(
+                            plan, self._read_candidate_state(connection, prepared), prepared
+                        )
                     if not preview.eligible or effective is None:
                         raise StatementCommitBlocked(
                             "Fresh PostgreSQL Statement preflight failed: "
@@ -198,14 +209,21 @@ class PostgresStatementRepository:
                 ).mappings()
             )
 
+    @measured("repository_preflight")
     def _preflight(
-        self, plan: StatementCommitPlan, state: StatementCommitState
+        self, plan: StatementCommitPlan, state: StatementCommitState,
+        prepared: StatementCommitPlan | None = None,
     ) -> tuple[StatementCommitPreflight, StatementCommitPlan | None]:
+        prepared = prepared or self._prepare_plan(plan)
+        preview = preview_active_statement_state(prepared, state)
+        return preview, preview.proposed_plan
+
+    def _prepare_plan(self, plan: StatementCommitPlan) -> StatementCommitPlan:
         if plan.authority != "FULL_ORDER_CURRENT":
             raise StatementCommitBlocked(
                 "PostgreSQL Statement runtime accepts only the active Full Order Current contract."
             )
-        prepared = prepare_full_order_existence_statement_commit_plan(
+        return prepare_full_order_existence_statement_commit_plan(
             plan.statement,
             audit=plan.audit,
             full_order_ids=tuple(
@@ -214,10 +232,93 @@ class PostgresStatementRepository:
             validation_passed=True,
             persisted_platform=self._persisted_platform,
             semantic_overlap_dedupe=True,
+            source_context=self._source_context,
         )
-        preview = preview_active_statement_state(prepared, state)
-        return preview, preview.proposed_plan
 
+    def _read_candidate_state(
+        self, connection: Connection, plan: StatementCommitPlan
+    ) -> StatementCommitState:
+        """Load only exact incoming order bundles and adjustment identities.
+
+        Empty order IDs cannot enter _bundle_map; adjustment rows are classified
+        independently through Order_Adjustments, including unlinked events.
+        """
+        queries = 0
+        data_rows: list[tuple[str, ...]] = []
+        component_rows: list[tuple[str, ...]] = []
+        adjustments: dict[str, CanonicalOrderAdjustment] = {}
+        with measure("statement_state_load", state_scope="scoped") as counts:
+            with measure("candidate_state_key_prepare"):
+                order_ids = tuple(dict.fromkeys(
+                    row.order_id for row in plan.statement.order_rows if row.order_id
+                ))
+                events = plan.order_adjustments
+                fingerprints = tuple(dict.fromkeys(event.adjustment_event_fingerprint for event in events))
+                identities = tuple(dict.fromkeys(
+                    (event.linked_order_id, event.adjustment_type, event.adjustment_complete_date.isoformat())
+                    for event in events
+                ))
+            counts["candidate_orders"] = len(order_ids)
+            # The existing order_id indexes support these exact lookups. A
+            # bounded IN list avoids driver parameter limits on large uploads.
+            for chunk in _chunks(order_ids):
+                with measure("candidate_statement_query_build", candidate_orders=len(order_ids)):
+                    query = select(StatementData.__table__).where(
+                            StatementData.platform == self._persisted_platform,
+                            StatementData.commit_status == "COMMITTED",
+                            StatementData.order_id.in_(chunk),
+                        ).order_by(StatementData.id)
+                _timed_candidate_rows(connection, query, "statement", data_rows,
+                                      lambda row: _model_cells(row, STATEMENT_DATA_HEADERS), len(order_ids))
+                queries += 1
+                with measure("candidate_component_query_build", candidate_orders=len(order_ids)):
+                    query = select(StatementFinancialComponent.__table__).where(
+                            StatementFinancialComponent.platform == self._persisted_platform,
+                            StatementFinancialComponent.commit_status == "COMMITTED",
+                            StatementFinancialComponent.order_id.in_(chunk),
+                        ).order_by(StatementFinancialComponent.id)
+                _timed_candidate_rows(connection, query, "component", component_rows,
+                                      lambda row: _model_cells(row, STATEMENT_FINANCIAL_COMPONENT_HEADERS), len(order_ids))
+                queries += 1
+
+            for chunk in _chunks(fingerprints):
+                with measure("candidate_adjustment_query_build"):
+                    query = select(OrderAdjustment.__table__).where(
+                        OrderAdjustment.platform == self._persisted_platform,
+                        OrderAdjustment.adjustment_event_fingerprint.in_(chunk),
+                    )
+                converted = []
+                _timed_candidate_rows(connection, query, "adjustment", converted, _adjustment_from_model, len(order_ids))
+                with measure("candidate_adjustment_assembly", rows_returned=len(converted)):
+                    for event in converted:
+                        adjustments[event.adjustment_event_fingerprint] = event
+                queries += 1
+
+            for chunk in _chunks(identities, size=200):
+                with measure("candidate_adjustment_query_build"):
+                    clauses = tuple(and_(
+                        _nullable_match(OrderAdjustment.linked_order_id, linked_order_id),
+                        _nullable_match(OrderAdjustment.adjustment_type, adjustment_type),
+                        OrderAdjustment.adjustment_complete_date == completed_on,
+                    ) for linked_order_id, adjustment_type, completed_on in chunk)
+                    query = select(OrderAdjustment.__table__).where(
+                        OrderAdjustment.platform == self._persisted_platform,
+                        or_(*clauses),
+                    )
+                converted = []
+                _timed_candidate_rows(connection, query, "adjustment", converted, _adjustment_from_model, len(order_ids))
+                with measure("candidate_adjustment_assembly", rows_returned=len(converted)):
+                    for event in converted:
+                        adjustments[event.adjustment_event_fingerprint] = event
+                queries += 1
+            counts.update(statement_rows_loaded=len(data_rows),
+                          component_rows_loaded=len(component_rows),
+                          adjustment_rows_loaded=len(adjustments),
+                          state_load_queries=queries)
+            with measure("candidate_state_final_assembly"):
+                return _commit_state_from_rows(data_rows, component_rows, tuple(adjustments.values()))
+
+    @measured("legacy_statement_state_load")
     def _read_state(self, connection: Connection) -> StatementCommitState:
         data_rows = tuple(
             _model_cells(row, STATEMENT_DATA_HEADERS)
@@ -243,35 +344,77 @@ class PostgresStatementRepository:
                 .order_by(OrderAdjustment.adjustment_event_fingerprint)
             ).mappings()
         )
-        positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
-        references: list[CommittedStatementReference] = []
-        seen: set[tuple[str, str, str]] = set()
-        for values in data_rows:
-            if values[positions["commit_status"]] != "COMMITTED":
-                continue
-            key = (
-                values[positions["statement_file_hash"]],
-                values[positions["statement_period_from"]],
-                values[positions["statement_period_to"]],
-            )
-            if not all(key) or key in seen:
-                continue
-            seen.add(key)
-            references.append(
-                CommittedStatementReference(
-                    file_hash=key[0],
-                    statement_period_from=_date(key[1], "statement_period_from"),
-                    statement_period_to=_date(key[2], "statement_period_to"),
-                )
-            )
-        return StatementCommitState(
-            orders={},
-            items=(),
-            committed_statements=tuple(references),
-            order_adjustments=adjustment_rows,
-            committed_statement_rows=data_rows,
-            committed_financial_component_rows=component_rows,
+        return _commit_state_from_rows(data_rows, component_rows, adjustment_rows)
+
+
+def _timed_candidate_rows(connection, query, domain, output, convert, candidate_orders):
+    with measure(f"candidate_{domain}_execute", candidate_orders=candidate_orders):
+        mappings = connection.execute(query).mappings()
+    fetch = conversion = assembly = 0.0
+    total = 0
+    while True:
+        start = perf_counter()
+        batch = mappings.fetchmany(1000)
+        fetch += perf_counter() - start
+        if not batch:
+            break
+        start = perf_counter()
+        converted = [convert(row) for row in batch]
+        conversion += perf_counter() - start
+        start = perf_counter()
+        output.extend(converted)
+        assembly += perf_counter() - start
+        total += len(batch)
+    counts = dict(candidate_orders=candidate_orders, rows_returned=total, converted_rows=total)
+    log_elapsed(f"candidate_{domain}_fetch", fetch, **counts)
+    log_elapsed(f"candidate_{domain}_model_cells", conversion, **counts)
+    log_elapsed(f"candidate_{domain}_assembly", assembly, **counts)
+
+
+def _chunks(values: Sequence[Any], *, size: int = 5000) -> Iterable[Sequence[Any]]:
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def _nullable_match(column: Any, value: str) -> Any:
+    # Historical imports can represent a blank link/type as either NULL or ''.
+    return or_(column.is_(None), column == "") if not value else column == value
+
+
+def _commit_state_from_rows(
+    data_rows: Sequence[tuple[str, ...]],
+    component_rows: Sequence[tuple[str, ...]],
+    adjustment_rows: Sequence[CanonicalOrderAdjustment],
+) -> StatementCommitState:
+    positions = {name: index for index, name in enumerate(STATEMENT_DATA_HEADERS)}
+    references: list[CommittedStatementReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for values in data_rows:
+        if values[positions["commit_status"]] != "COMMITTED":
+            continue
+        key = (
+            values[positions["statement_file_hash"]],
+            values[positions["statement_period_from"]],
+            values[positions["statement_period_to"]],
         )
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        references.append(
+            CommittedStatementReference(
+                file_hash=key[0],
+                statement_period_from=_date(key[1], "statement_period_from"),
+                statement_period_to=_date(key[2], "statement_period_to"),
+            )
+        )
+    return StatementCommitState(
+        orders={},
+        items=(),
+        committed_statements=tuple(references),
+        order_adjustments=tuple(adjustment_rows),
+        committed_statement_rows=tuple(data_rows),
+        committed_financial_component_rows=tuple(component_rows),
+    )
 
 
 def _validate_plan_market(plan: StatementCommitPlan, platform: str) -> None:
@@ -283,6 +426,7 @@ def _validate_plan_market(plan: StatementCommitPlan, platform: str) -> None:
             )
 
 
+@measured("insert")
 def _insert_plan(connection: Connection, plan: StatementCommitPlan) -> None:
     _insert_values(connection, StatementData, STATEMENT_DATA_HEADERS, plan.rows)
     _insert_values(
@@ -316,6 +460,7 @@ def _insert_values(
     connection.execute(table.insert(), records)
 
 
+@measured("post_insert_readback")
 def _verify_inserted(connection: Connection, plan: StatementCommitPlan) -> None:
     _verify_keys(
         connection,
@@ -358,25 +503,46 @@ def _verify_keys(
     if not expected:
         return
     table = model.__table__
+    positions = tuple(headers.index(name) for name in key_names)
+    key_columns = tuple(table.c[name] for name in key_names)
+    expected_by_key: dict[tuple[Any, ...], list[Sequence[str]]] = {}
     for row in expected:
-        clauses = [
-            table.c[name] == _database_value(table.c[name].type, row[headers.index(name)])
-            for name in key_names
-        ]
-        found = connection.execute(
-            select(*(table.c[name] for name in headers)).where(*clauses)
-        ).mappings().all()
+        key = tuple(
+            _database_value(column.type, row[position])
+            for column, position in zip(key_columns, positions)
+        )
+        expected_by_key.setdefault(key, []).append(row)
+
+    # Every insert plan owns one batch. Read it once per domain inside the same
+    # transaction, then verify every expected stable key and every original cell.
+    batch_position = headers.index("statement_batch_id")
+    batches = {row[batch_position] for row in expected}
+    if len(batches) != 1 or not next(iter(batches)):
+        raise StatementCommitBlocked("PostgreSQL Statement readback requires one nonblank batch identity.")
+    batch_id = next(iter(batches))
+    found_by_key: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+    for actual in connection.execute(
+        select(*(table.c[name] for name in headers)).where(table.c.statement_batch_id == batch_id)
+    ).mappings():
+        key = tuple(actual[name] for name in key_names)
+        if key in expected_by_key:
+            found_by_key.setdefault(key, []).append(actual)
+    for key, expected_rows in expected_by_key.items():
+        found = found_by_key.get(key, [])
+        row = expected_rows[0]
         if len(found) != 1:
             raise StatementCommitBlocked(
-                f"PostgreSQL Statement readback did not verify stable identity {tuple(row[headers.index(name)] for name in key_names)!r}."
+                f"PostgreSQL Statement readback did not verify stable identity {tuple(row[position] for position in positions)!r}."
             )
         actual = _verification_cells(table, headers, found[0])
-        expected_cells = _verification_cells(table, headers, row)
-        if actual != expected_cells:
-            raise StatementCommitBlocked(
-                "PostgreSQL Statement readback did not verify every expected committed fact for "
-                f"{tuple(row[headers.index(name)] for name in key_names)!r}."
-            )
+        for row in expected_rows:
+            if actual != _verification_cells(table, headers, row):
+                raise StatementCommitBlocked(
+                    "PostgreSQL Statement readback did not verify every expected committed fact for "
+                    f"{tuple(row[position] for position in positions)!r}."
+                )
+    with measure("verification_queries", verification_selects=1):
+        pass
 
 
 def _verification_cells(

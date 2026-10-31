@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.invoice_app.services.statement_performance import measured
+
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -298,6 +300,8 @@ def stage_parsed_shopee_weekly_statement(
         adjustment_reconciliations=adjustment_reconciliations,
     )
 
+
+@measured("source_validation")
 def validate_shopee_weekly_statement(
     statement: ParsedShopeeWeeklyStatement,
 ) -> tuple[ValidationIssue, ...]:

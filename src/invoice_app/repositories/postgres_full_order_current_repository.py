@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from sqlalchemy import Engine, exists, insert, select, update
 from sqlalchemy.engine import Connection
@@ -65,6 +65,25 @@ class PostgresFullOrderCurrentRepository:
     def read_snapshot(self) -> FullOrderCurrentSnapshot:
         with self._engine.connect() as connection:
             return self._read_snapshot(connection)
+
+    def read_order_ids(self, order_ids: Iterable[str], *, market: str) -> frozenset[str]:
+        """Fresh exact market/ID coverage, with no item reconstruction."""
+        from src.invoice_app.services.statement_performance import measure
+        if market != self._market:
+            raise HistoricalInvoiceStorageError("Full Order coverage market mismatch.")
+        requested = tuple(dict.fromkeys(order_ids))
+        found = set()
+        with measure("full_order_scoped_query", full_order_items_loaded=0) as counts:
+            if requested:
+                with self._engine.connect() as connection:
+                    for offset in range(0, len(requested), 500):
+                        found.update(connection.scalars(select(PgOrder.order_id).where(
+                            PgOrder.market == self._market,
+                            PgOrder.order_id.in_(requested[offset:offset + 500]),
+                        )))
+            counts["queries"] = (len(requested) + 499) // 500
+            counts["full_order_orders_loaded"] = len(found)
+        return frozenset(found)
 
     def has_order(self, order_id: str) -> bool:
         """Market-scoped existence lookup for callers that do not need a snapshot."""

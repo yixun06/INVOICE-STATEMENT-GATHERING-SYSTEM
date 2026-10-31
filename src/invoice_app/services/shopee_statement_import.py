@@ -6,7 +6,9 @@ matching, persistence planning, or Google Sheets write rules.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -14,6 +16,8 @@ import json
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
 
+from src.invoice_app.services.statement_performance import measured, measure
+from src.invoice_app.services import shopee_weekly_statement_service as source_rules
 from src.invoice_app.parsers.shopee_weekly_statement_parser import (
     INCOME_COMPONENT_COLUMNS,
     ParsedShopeeWeeklyStatement,
@@ -58,6 +62,7 @@ from src.invoice_app.services.shopee_statement_persistence import (
     StatementCommitBlocked,
     StatementCommitOutcome,
     StatementCommitPlan,
+    StatementSourcePlanContext,
     StatementCommitPreflight,
     StatementWriteNotApplied,
     prepare_full_order_statement_commit_plan,
@@ -143,6 +148,24 @@ class StatementReviewCurrency:
     changed_evidence: tuple[str, ...]
 
 
+# Increment when parser or source validation rules change.
+_SOURCE_RULE_VERSION = "STATEMENT_SOURCE_V1"
+
+
+@dataclass(frozen=True)
+class _StatementSourceArtifact:
+    key: tuple
+    stage: StagedShopeeWeeklyStatement
+    plans: StatementSourcePlanContext = field(default_factory=StatementSourcePlanContext, compare=False)
+
+
+def _source_key(source_bytes: bytes, filename: str, context: MarketContext) -> tuple:
+    return (sha256(source_bytes).hexdigest(), filename, context.key,
+            context.statement_source_contract, context.statement_semantic_overlap_dedupe,
+            _SOURCE_RULE_VERSION, stage_shopee_weekly_statement,
+            source_rules.parse_shopee_statement, source_rules.validate_shopee_weekly_statement)
+
+
 @dataclass(frozen=True)
 class StatementImportReview:
     batch_id: str
@@ -169,6 +192,7 @@ class StatementImportReview:
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None
     active_gate: str = "V2"
     commit_preflight: StatementCommitPreflight | None = None
+    source_artifact: _StatementSourceArtifact | None = None
 
     @property
     def ready(self) -> bool:
@@ -236,7 +260,7 @@ def review_statement_upload(
 
     uploaded_at = now()
     source_bytes = _source_bytes(source)
-    state = writer.reload_active_commit_state()
+    state = None if market_context.statement_order_existence_gate else writer.reload_active_commit_state()
     stage = stage_shopee_weekly_statement(
         source_bytes,
         source_filename=source_filename,
@@ -253,6 +277,8 @@ def review_statement_upload(
         semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
     )
     full_order_orders, full_order_items, full_order_blockers, evidence_coverage = (
+        ((), (), (), None) if (market_context.statement_order_existence_gate
+                              and not stage.validation_issues and not stage.rejection_reasons) else
         _statement_inputs_with_full_order(
             stage.statement,
             product_master=product_master,
@@ -261,7 +287,10 @@ def review_statement_upload(
             market_context=market_context,
         )
     )
-    return _build_review(
+    artifact = (_StatementSourceArtifact(
+        _source_key(source_bytes, source_filename, market_context), deepcopy(stage))
+        if market_context.statement_order_existence_gate else None)
+    result = _build_review(
         stage,
         batch_id=batch_id,
         uploaded_at=uploaded_at,
@@ -277,10 +306,13 @@ def review_statement_upload(
         evidence_coverage=evidence_coverage,
         market_context=market_context,
         full_order_repository=full_order_repository,
+        source_context=artifact.plans if artifact else None,
         writer=writer,
     )
+    return replace(result, source_artifact=artifact)
 
 
+@measured("review_refresh")
 def refresh_statement_review(
     review: StatementImportReview,
     *,
@@ -297,23 +329,32 @@ def refresh_statement_review(
     if review.source_bytes is None:
         return review
     full_order_repository = full_order_repository or review.full_order_repository
-    state = writer.reload_active_commit_state()
-    stage = stage_shopee_weekly_statement(
-        review.source_bytes,
-        source_filename=review.stage.source_filename,
-        existing_statements=(
-            () if market_context.statement_order_existence_gate
-            else state.committed_statements
-        ),
-        existing_order_evidence=(
-            () if market_context.statement_order_existence_gate
-            else state.committed_order_evidence
-        ),
-        evaluate_legacy_order_reconciliation=False,
-        source_contract=market_context.statement_source_contract,
-        semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
-    )
+    state = None if market_context.statement_order_existence_gate else writer.reload_active_commit_state()
+    artifact = review.source_artifact
+    key = _source_key(review.source_bytes, review.stage.source_filename, market_context)
+    if market_context.statement_order_existence_gate and artifact is not None and artifact.key == key:
+        stage = deepcopy(artifact.stage)
+    else:
+        stage = stage_shopee_weekly_statement(
+            review.source_bytes,
+            source_filename=review.stage.source_filename,
+            existing_statements=(
+                () if market_context.statement_order_existence_gate
+                else state.committed_statements
+            ),
+            existing_order_evidence=(
+                () if market_context.statement_order_existence_gate
+                else state.committed_order_evidence
+            ),
+            evaluate_legacy_order_reconciliation=False,
+            source_contract=market_context.statement_source_contract,
+            semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
+        )
+        artifact = (_StatementSourceArtifact(key, deepcopy(stage))
+                    if market_context.statement_order_existence_gate else None)
     full_order_orders, full_order_items, full_order_blockers, evidence_coverage = (
+        ((), (), (), None) if (market_context.statement_order_existence_gate
+                              and not stage.validation_issues and not stage.rejection_reasons) else
         _statement_inputs_with_full_order(
             stage.statement,
             product_master=product_master,
@@ -322,7 +363,7 @@ def refresh_statement_review(
             market_context=market_context,
         )
     )
-    return _build_review(
+    result = _build_review(
         stage,
         batch_id=review.batch_id,
         uploaded_at=review.uploaded_at,
@@ -338,10 +379,13 @@ def refresh_statement_review(
         evidence_coverage=evidence_coverage,
         market_context=market_context,
         full_order_repository=full_order_repository,
+        source_context=artifact.plans if artifact else None,
         writer=writer,
     )
+    return replace(result, source_artifact=artifact)
 
 
+@measured("total_commit")
 def commit_statement_review(
     review: StatementImportReview,
     *,
@@ -470,6 +514,7 @@ def _commit_outcome_from_preflight(
     return StatementCommitOutcome.BLOCKED
 
 
+@measured("pre_commit_refresh")
 def check_statement_review_currency(
     review: StatementImportReview,
     *,
@@ -524,6 +569,7 @@ def _build_review(
     market_context: MarketContext = SHOPEE_MY,
     full_order_repository: ShopeeFullOrderCurrentRepository | None = None,
     writer: ActiveStatementRepository,
+    source_context: StatementSourcePlanContext | None = None,
 ) -> StatementImportReview:
     statement = stage.statement
     empty_matches = StatementItemMatchBatch((), False)
@@ -638,6 +684,7 @@ def _build_review(
             full_order_repository=full_order_repository,
             now=now,
             writer=writer,
+            source_context=source_context,
         )
     if product_master is None:
         raise StatementCommitBlocked("Product Master is required by the configured Statement gate.")
@@ -731,6 +778,7 @@ def _build_review(
     )
 
 
+@measured("review_model_build")
 def _build_order_existence_review(
     stage: StagedShopeeWeeklyStatement,
     *,
@@ -744,6 +792,7 @@ def _build_order_existence_review(
     full_order_repository: ShopeeFullOrderCurrentRepository | None,
     now: Callable[[], datetime],
     writer: ActiveStatementRepository,
+    source_context: StatementSourcePlanContext | None = None,
 ) -> StatementImportReview:
     """Build the exact Current-order existence gate without legacy evidence."""
 
@@ -769,10 +818,16 @@ def _build_order_existence_review(
                     row.order_id for row in statement.order_rows if row.order_id
                 ),
                 validation_passed=True,
+                source_context=source_context,
                 persisted_platform=market_context.persisted_platform,
                 semantic_overlap_dedupe=market_context.statement_semantic_overlap_dedupe,
             )
             commit_preflight = writer.preview_statement_batch(candidate_plan)
+            _, _, full_order_blockers, evidence_coverage = _statement_inputs_with_full_order(
+                statement, product_master=None, full_order_repository=full_order_repository,
+                imported_at=uploaded_at, market_context=market_context,
+                required_order_ids=commit_preflight.new_order_ids,
+            )
             filtered_coverage = _coverage_for_order_ids(
                 evidence_coverage, commit_preflight.new_order_ids
             )
@@ -888,6 +943,7 @@ def classify_statement_invoice_coverage(
     )
 
 
+@measured("full_order_coverage")
 def _statement_inputs_with_full_order(
     statement: ParsedShopeeWeeklyStatement | None,
     *,
@@ -895,6 +951,7 @@ def _statement_inputs_with_full_order(
     full_order_repository: ShopeeFullOrderCurrentRepository | None,
     imported_at: datetime | None = None,
     market_context: MarketContext = SHOPEE_MY,
+    required_order_ids: tuple[str, ...] | None = None,
 ) -> tuple[
     tuple[CanonicalInvoiceOrder, ...],
     tuple[CanonicalInvoiceItem, ...],
@@ -906,6 +963,10 @@ def _statement_inputs_with_full_order(
     statement_order_ids = tuple(
         dict.fromkeys(row.order_id for row in statement.order_rows if row.order_id)
     )
+    if required_order_ids is not None:
+        statement_order_ids = tuple(dict.fromkeys(required_order_ids))
+    if not statement_order_ids and market_context.statement_order_existence_gate:
+        return (), (), (), StatementEvidenceCoverage((), (), (), ())
     if full_order_repository is None:
         requirements = tuple(
             StatementEvidenceRequirement(
@@ -922,7 +983,16 @@ def _statement_inputs_with_full_order(
             StatementEvidenceCoverage(statement_order_ids, (), (), requirements),
         )
     try:
-        snapshot = full_order_repository.read_snapshot()
+        scoped_reader = getattr(full_order_repository, "read_order_ids", None)
+        if market_context.statement_order_existence_gate and callable(scoped_reader):
+            available = set(scoped_reader(statement_order_ids, market=market_context.key.value))
+        else:
+            with measure("full_order_snapshot") as counts:
+                snapshot = full_order_repository.read_snapshot()
+                counts["full_order_orders_loaded"] = len(snapshot.orders)
+                counts["full_order_items_loaded"] = len(snapshot.items)
+            available = {order.order_id for order in snapshot.orders
+                         if order.market == market_context.key.value}
     except Exception as error:
         requirements = tuple(
             StatementEvidenceRequirement(
@@ -939,11 +1009,6 @@ def _statement_inputs_with_full_order(
             StatementEvidenceCoverage(statement_order_ids, (), (), requirements),
         )
     if market_context.statement_order_existence_gate:
-        available = {
-            order.order_id
-            for order in snapshot.orders
-            if order.market == market_context.key.value
-        }
         requirements = tuple(
             StatementEvidenceRequirement(
                 order_id,

@@ -14,8 +14,11 @@ from hashlib import sha256
 import io
 import re
 from typing import Any, Callable, Mapping, MutableMapping
+from uuid import uuid4
 
 import streamlit as st
+
+from src.invoice_app.services.statement_performance import measure
 
 from ..utils.monetary import format_currency
 
@@ -1183,57 +1186,64 @@ def _render_weekly_statement_upload() -> None:
         clear_statement_upload_attempt(st.session_state)
         st.rerun()
     if stage_clicked and uploaded_file is not None:
-        st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
-        begin_workflow_activity(st.session_state, "Validating")
-        try:
-            context = _required_persistence_market_context()
-            settings = configured_uat2_data_settings(
-                context, require_explicit_context=True
-            )
-            master = (
-                None
-                if context.statement_order_existence_gate
-                else load_configured_product_price_master(context)[0]
-            )
-            review = review_statement_upload(
-                uploaded_file,
-                source_filename=uploaded_file.name,
-                batch_id=st.session_state.batch_id,
-                uploaded_by=str(st.session_state.get("authenticated_username") or "Admin"),
-                writer=settings.create_statement_writer(),
-                product_master=master,
-                full_order_repository=settings.create_full_order_current_repository(),
-                market_context=context,
-            )
-            record_statement_workflow_transition(
-                st.session_state,
-                key="weekly_statement_review",
-                before=st.session_state.get("weekly_statement_review"),
-                after=review,
-                reason="statement_upload_validation_success",
-            )
-            record_statement_workflow_transition(
-                st.session_state,
-                key="weekly_statement_stage",
-                before=st.session_state.get("weekly_statement_stage"),
-                after=review.stage,
-                reason="statement_upload_validation_success",
-            )
-            st.session_state.weekly_statement_review = review
-            st.session_state.weekly_statement_stage = review.stage
-            st.session_state.pop("weekly_statement_review_stale_reason", None)
-            st.session_state.pop("weekly_statement_upload_selected", None)
-        except (
-            HistoricalInvoiceStorageError,
-            MarketConfigurationUnavailable,
-            ProductMasterSourceError,
-            StatementCommitBlocked,
-        ) as error:
-            st.error(f"Statement validation is unavailable: {error}")
-        finally:
-            end_workflow_activity(st.session_state)
+        invocation = uuid4().hex
+        with measure("check_statement_invocation", invocation=invocation):
+            pass
+        with measure("check_statement_total", _success=False, invocation=invocation) as check_counts:
+            st.session_state.batch_id = st.session_state.get("batch_id") or create_batch_id()
+            begin_workflow_activity(st.session_state, "Validating")
+            try:
+                context = _required_persistence_market_context()
+                settings = configured_uat2_data_settings(
+                    context, require_explicit_context=True
+                )
+                master = (
+                    None
+                    if context.statement_order_existence_gate
+                    else load_configured_product_price_master(context)[0]
+                )
+                review = review_statement_upload(
+                    uploaded_file,
+                    source_filename=uploaded_file.name,
+                    batch_id=st.session_state.batch_id,
+                    uploaded_by=str(st.session_state.get("authenticated_username") or "Admin"),
+                    writer=settings.create_statement_writer(),
+                    product_master=master,
+                    full_order_repository=settings.create_full_order_current_repository(),
+                    market_context=context,
+                )
+                record_statement_workflow_transition(
+                    st.session_state,
+                    key="weekly_statement_review",
+                    before=st.session_state.get("weekly_statement_review"),
+                    after=review,
+                    reason="statement_upload_validation_success",
+                )
+                record_statement_workflow_transition(
+                    st.session_state,
+                    key="weekly_statement_stage",
+                    before=st.session_state.get("weekly_statement_stage"),
+                    after=review.stage,
+                    reason="statement_upload_validation_success",
+                )
+                with measure("review_session_state_write"):
+                    st.session_state.weekly_statement_review = review
+                    st.session_state.weekly_statement_stage = review.stage
+                    st.session_state.pop("weekly_statement_review_stale_reason", None)
+                    st.session_state.pop("weekly_statement_upload_selected", None)
+                check_counts["_success"] = True
+            except (
+                HistoricalInvoiceStorageError,
+                MarketConfigurationUnavailable,
+                ProductMasterSourceError,
+                StatementCommitBlocked,
+            ) as error:
+                st.error(f"Statement validation is unavailable: {error}")
+            finally:
+                end_workflow_activity(st.session_state)
+            if _weekly_review() is not None:
+                _set_step(3)
         if _weekly_review() is not None:
-            _set_step(3)
             st.rerun()
     if st.button("Back", icon=":material/arrow_back:", key="statement_upload_back"):
         if uploaded_file is not None:
