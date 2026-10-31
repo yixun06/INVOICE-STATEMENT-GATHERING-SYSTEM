@@ -40,6 +40,15 @@ def test_equal_persisted_tuple_allows_distinct_listing_prices():
     assert result.source_rows == (1, 2)
 
 
+def test_confirmed_zero_gift_duplicate_candidates_require_complete_agreement():
+    gift = row(product_name="[Not for sale] Mini Trial Pack", variation_name="", seller_sku="5000000", parent_sku="Disc", nav_code="5000000", unit_price_usolf="0.00", resolve_sku="5000000-free gift")
+    result = lookup([gift, gift], name=gift["product_name"], variation="", sku="5000000", parent="Disc")
+    assert result.matched_by == "full_order_canonical_consensus"
+    assert result.unit_price_usolf == Decimal("0.00")
+    conflict = lookup([gift, gift | {"resolve_sku": "OTHER"}], name=gift["product_name"], variation="", sku="5000000", parent="Disc")
+    assert conflict.status == PriceLookupStatus.PRICING_CONFLICT
+
+
 @pytest.mark.parametrize("change", [{"nav_code": "NAV-2"}, {"unit_price_usolf": "13"}, {"resolve_sku": "POS-2"}])
 def test_identical_identity_with_different_canonical_output_fails_closed(change):
     assert lookup([row(), row(**change)]).status == PriceLookupStatus.PRICING_CONFLICT

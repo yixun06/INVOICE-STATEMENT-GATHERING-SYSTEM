@@ -672,6 +672,55 @@ def test_my_full_order_persists_usolf_price_not_pm_price_and_preserves_subtotal(
     assert batch.items[0].product_subtotal == Decimal("10.25")
 
 
+def _confirmed_gift_master(**changes):
+    row = {
+        "product_name": "[Not for sale] Mini Trial Pack", "variation_name": "",
+        "seller_sku": "5000000", "parent_sku": "Disc", "nav_code": "5000000",
+        "resolve_sku": "5000000-free gift", "unit_selling_price": "0.00",
+        "unit_price_usolf": "0.00",
+    }
+    row.update(changes)
+    return ProductPriceMaster.from_rows([row])
+
+
+def _gift_parsed(market=SHOPEE_MY):
+    row = list(_rows()[0])
+    row[4:8] = ["Disc", "[Not for sale] Mini Trial Pack", "5000000", ""]
+    row[-1] = "SG" if market == SHOPEE_SG else "MY"
+    return parse_shopee_full_order(_workbook_bytes([row]), source_filename="gift.xlsx", market=market)
+
+
+def test_confirmed_my_gift_zero_survives_enrichment_and_repository_roundtrip():
+    batch = adapt_shopee_full_order(_gift_parsed(), product_master=_confirmed_gift_master())
+    assert batch.syncable
+    item = batch.items[0]
+    assert (item.resolved_seller_sku, item.nav, item.unit_price, item.resolve_sku) == (
+        "5000000", "5000000", Decimal("0.00"), "5000000-free gift"
+    )
+    repository = ShopeeFullOrderCurrentRepository(spreadsheet_id="fake", gateway=_Gateway())
+    repository.sync(batch)
+    persisted = repository.read_snapshot().items[0]
+    assert (persisted.unit_price, persisted.resolve_sku) == (Decimal("0.00"), "5000000-free gift")
+
+
+@pytest.mark.parametrize("changes", [
+    {"unit_price_usolf": ""}, {"unit_price_usolf": "bad"}, {"unit_price_usolf": "-0.01"},
+    {"product_name": "Another free gift"}, {"variation_name": "Other"},
+    {"seller_sku": "5000001"}, {"parent_sku": "Other"}, {"nav_code": "5000001"},
+    {"resolve_sku": "5000000-free gift;OTHER"},
+])
+def test_my_gift_exception_rejects_invalid_price_or_unconfirmed_identity(changes):
+    batch = adapt_shopee_full_order(_gift_parsed(), product_master=_confirmed_gift_master(**changes))
+    assert not batch.syncable
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+
+
+def test_confirmed_my_gift_does_not_enable_sg_zero():
+    batch = adapt_shopee_full_order(_gift_parsed(SHOPEE_SG), product_master=_confirmed_gift_master())
+    assert not batch.syncable
+    assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+
+
 @pytest.mark.parametrize("usolf_price", ("", "not-a-number", "0"))
 def test_my_full_order_blocks_when_matched_pm_usolf_is_missing_or_invalid(usolf_price):
     parsed = parse_shopee_full_order(
