@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
 from sqlalchemy import Engine, exists, insert, select, update
@@ -119,7 +120,7 @@ class PostgresFullOrderCurrentRepository:
                 )
             self._write_expected(connection, before, expected, result)
             after = self._read_snapshot(connection)
-            if not _same_snapshot(after, expected):
+            if not _same_postgres_snapshot(after, expected):
                 raise HistoricalInvoiceStorageError(
                     "PostgreSQL Full Order sync readback did not match the intended snapshot."
                 )
@@ -149,7 +150,7 @@ class PostgresFullOrderCurrentRepository:
                 )
             )
             self._write_expected(connection, before, expected, result)
-            if not _same_snapshot(self._read_snapshot(connection), expected):
+            if not _same_postgres_snapshot(self._read_snapshot(connection), expected):
                 raise HistoricalInvoiceStorageError(
                     "PostgreSQL Full Order missing-only readback did not match the intended snapshot."
                 )
@@ -259,6 +260,47 @@ def _identity_set(rows: tuple[FullOrderCurrentItem, ...]) -> set[tuple[str, str,
     return {(row.market, row.order_id, row.item_index) for row in rows}
 
 
+def _canonical_money(value: object) -> Decimal | None:
+    """Normalize decimal scale exactly, without rounding or float conversion."""
+    if value is None:
+        return None
+    if isinstance(value, (float, bool)) or (isinstance(value, str) and not value.strip()):
+        raise HistoricalInvoiceStorageError("PostgreSQL Full Order monetary value is invalid.")
+    try:
+        amount = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise HistoricalInvoiceStorageError("PostgreSQL Full Order monetary value is invalid.") from error
+    if not amount.is_finite():
+        raise HistoricalInvoiceStorageError("PostgreSQL Full Order monetary value is invalid.")
+    if amount.is_zero():
+        return Decimal(0)
+    sign, digits, exponent = amount.as_tuple()
+    digits = list(digits)
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return Decimal((sign, tuple(digits), exponent))
+
+
+def _same_postgres_snapshot(left: FullOrderCurrentSnapshot, right: FullOrderCurrentSnapshot) -> bool:
+    def normalized(snapshot: FullOrderCurrentSnapshot) -> FullOrderCurrentSnapshot:
+        return FullOrderCurrentSnapshot(
+            orders=snapshot.orders,
+            items=tuple(replace(item, unit_price=_canonical_money(item.unit_price),
+                                product_subtotal=_canonical_money(item.product_subtotal))
+                        for item in snapshot.items),
+        )
+    return _same_snapshot(normalized(left), normalized(right))
+
+
+def _required_money(value: object, field: str) -> Decimal:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise HistoricalInvoiceStorageError(f"PostgreSQL Full Order Current has missing {field}.")
+    amount = _canonical_money(value)
+    assert amount is not None
+    return value if isinstance(value, Decimal) else Decimal(value)
+
+
 def _order_from_row(row: Mapping[str, object]) -> FullOrderCurrentOrder:
     return FullOrderCurrentOrder(
         market=str(row["market"]),
@@ -282,12 +324,16 @@ def _item_from_row(row: Mapping[str, object]) -> FullOrderCurrentItem:
         nav=str(row["nav"] or ""),
         product_name=str(row["product_name"] or ""),
         variation=str(row["variation"] or ""),
-        quantity=int(row["quantity"] or 0),
-        unit_price=Decimal(row["unit_price"] or 0),
-        product_subtotal=Decimal(row["product_subtotal"] or 0),
+        quantity=int(row["quantity"]) if row["quantity"] is not None else _missing_quantity(),
+        unit_price=_required_money(row["unit_price"], "unit_price"),
+        product_subtotal=_required_money(row["product_subtotal"], "product_subtotal"),
         return_refund_status=str(row["return_refund_status"] or ""),
         resolve_sku=str(row["resolve_sku"] or ""),
     )
+
+
+def _missing_quantity() -> int:
+    raise HistoricalInvoiceStorageError("PostgreSQL Full Order Current has missing quantity.")
 
 
 def _order_values(row: FullOrderCurrentOrder) -> dict[str, object]:
