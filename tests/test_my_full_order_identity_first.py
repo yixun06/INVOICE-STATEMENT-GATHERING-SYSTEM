@@ -49,6 +49,15 @@ def test_confirmed_zero_gift_duplicate_candidates_require_complete_agreement():
     assert conflict.status == PriceLookupStatus.PRICING_CONFLICT
 
 
+def test_zero_gift_permission_does_not_depend_on_other_listing_fields():
+    gift = row(product_name="Another item", variation_name="Special", seller_sku="OTHER",
+               parent_sku="OTHER-PARENT", nav_code="OTHER-NAV", unit_price_usolf="0",
+               resolve_sku="5000000-free gift")
+    result = lookup([gift], name="Another item", variation="Special", sku="OTHER", parent="OTHER-PARENT")
+    assert result.status == PriceLookupStatus.MATCHED
+    assert result.unit_price_usolf == Decimal("0")
+
+
 @pytest.mark.parametrize("change", [{"nav_code": "NAV-2"}, {"unit_price_usolf": "13"}, {"resolve_sku": "POS-2"}])
 def test_identical_identity_with_different_canonical_output_fails_closed(change):
     assert lookup([row(), row(**change)]).status == PriceLookupStatus.PRICING_CONFLICT

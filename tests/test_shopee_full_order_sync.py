@@ -683,9 +683,9 @@ def _confirmed_gift_master(**changes):
     return ProductPriceMaster.from_rows([row])
 
 
-def _gift_parsed(market=SHOPEE_MY):
+def _gift_parsed(market=SHOPEE_MY, product_name="[Not for sale] Mini Trial Pack"):
     row = list(_rows()[0])
-    row[4:8] = ["Disc", "[Not for sale] Mini Trial Pack", "5000000", ""]
+    row[4:8] = ["Disc", product_name, "5000000", ""]
     row[-1] = "SG" if market == SHOPEE_SG else "MY"
     return parse_shopee_full_order(_workbook_bytes([row]), source_filename="gift.xlsx", market=market)
 
@@ -705,14 +705,26 @@ def test_confirmed_my_gift_zero_survives_enrichment_and_repository_roundtrip():
 
 @pytest.mark.parametrize("changes", [
     {"unit_price_usolf": ""}, {"unit_price_usolf": "bad"}, {"unit_price_usolf": "-0.01"},
-    {"product_name": "Another free gift"}, {"variation_name": "Other"},
-    {"seller_sku": "5000001"}, {"parent_sku": "Other"}, {"nav_code": "5000001"},
+    {"resolve_sku": "ordinary-sku"}, {"resolve_sku": "5000000-free gift-extra"},
+    {"resolve_sku": "ABC-5000000-free gift"}, {"resolve_sku": "5000000"},
     {"resolve_sku": "5000000-free gift;OTHER"},
 ])
-def test_my_gift_exception_rejects_invalid_price_or_unconfirmed_identity(changes):
+def test_my_gift_exception_rejects_invalid_price_or_nonexact_resolved_sku(changes):
     batch = adapt_shopee_full_order(_gift_parsed(), product_master=_confirmed_gift_master(**changes))
     assert not batch.syncable
     assert batch.issues[0].code == PM_ENRICHMENT_REQUIRED
+
+
+def test_mystery_gift_zero_uses_canonical_resolved_sku():
+    name = "Assorted Mystery Free Gift of Simply Natural"
+    batch = adapt_shopee_full_order(
+        _gift_parsed(product_name=name),
+        product_master=_confirmed_gift_master(product_name=name),
+    )
+    assert batch.syncable
+    assert (batch.items[0].resolve_sku, batch.items[0].unit_price) == (
+        "5000000-free gift", Decimal("0.00")
+    )
 
 
 def test_confirmed_my_gift_does_not_enable_sg_zero():

@@ -1146,8 +1146,10 @@ nav        = NAV CODE from that same resolved PM evidence
 unit_price = UNIT PRICE USOLF from that same resolved PM evidence
 ```
 
-`UNIT PRICE USOLF` must be a single positive numeric value. Missing, invalid,
-zero, or conflicting USOLF evidence blocks Full Order Current persistence as
+`UNIT PRICE USOLF` normally must be a single positive numeric value. For MY
+only, exact whole Resolved SKU `5000000-free gift` authorizes numeric zero
+USOLF for any listing; it does not relax identity or candidate consensus.
+Missing, invalid, negative, other zero, or conflicting USOLF evidence blocks Full Order Current persistence as
 `PM_ENRICHMENT_REQUIRED`; do not fall back to `Price`, source selling price, or
 another PM row. Shopee SG Full Order uses its separate deterministic exact
 normalized Product Name + Variation rule, with Seller SKU only as exact-

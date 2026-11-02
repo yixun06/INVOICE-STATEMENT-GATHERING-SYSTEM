@@ -1056,14 +1056,9 @@ def _resolved_usolf_price(
 
 
 def _is_confirmed_my_zero_price_gift(record: ProductPriceMasterRecord) -> bool:
-    """Accept zero only for the Product Owner-confirmed MY Listing identity."""
+    """Accept zero only for the Product Owner-confirmed MY resolved SKU."""
     return (
-        _full_order_identity_text(record.product_name) == _full_order_identity_text("[Not for sale] Mini Trial Pack")
-        and not _full_order_identity_text(record.variation_name)
-        and normalize_sku_text(record.seller_sku) == "5000000"
-        and normalize_sku_text(record.parent_sku) == normalize_sku_text("Disc")
-        and record.nav_code == "5000000"
-        and record.resolve_sku == "5000000-free gift"
+        record.resolve_sku == "5000000-free gift"
         and record.unit_price_usolf == Decimal("0")
     )
 
