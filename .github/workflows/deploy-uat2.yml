@@ -43,6 +43,26 @@ jobs:
           printf '%s\n' "$UAT2_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Diagnose UAT2 network reachability
+        shell: bash
+        env:
+          UAT2_HOST: ${{ vars.UAT2_HOST }}
+        run: |
+          set -euo pipefail
+
+          echo "=== Tailscale status ==="
+          tailscale status || true
+
+          echo "=== Tailscale ping ==="
+          tailscale ping --c=1 --timeout=10s "$UAT2_HOST" || true
+
+          echo "=== TCP/22 check ==="
+          if timeout 10 bash -c 'cat < /dev/null > /dev/tcp/$1/22' _ "$UAT2_HOST"; then
+            echo "TCP_22_REACHABLE"
+          else
+            echo "TCP_22_UNREACHABLE"
+          fi
+
       - name: Verify SSH connectivity
         shell: bash
         env:
@@ -55,6 +75,7 @@ jobs:
             -i ~/.ssh/id_ed25519 \
             -o IdentitiesOnly=yes \
             -o PasswordAuthentication=no \
+            -o ConnectTimeout=10 \
             "$UAT2_USER@$UAT2_HOST" \
             "echo SSH_DEPLOY_KEY_OK"
 
