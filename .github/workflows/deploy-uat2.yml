@@ -1,0 +1,74 @@
+﻿name: Deploy UAT2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: invoicegather-uat2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy InvoiceGather UAT2
+    runs-on: ubuntu-latest
+    environment: uat2
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:github-ci
+
+      - name: Configure SSH deploy key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.UAT2_SSH_PRIVATE_KEY }}
+          UAT2_HOST: ${{ vars.UAT2_HOST }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H "$UAT2_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Verify SSH connectivity
+        shell: bash
+        env:
+          UAT2_HOST: ${{ vars.UAT2_HOST }}
+          UAT2_USER: ${{ vars.UAT2_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i ~/.ssh/id_ed25519 \
+            -o IdentitiesOnly=yes \
+            -o PasswordAuthentication=no \
+            "$UAT2_USER@$UAT2_HOST" \
+            "echo SSH_DEPLOY_KEY_OK"
+
+      - name: Deploy current main SHA
+        shell: bash
+        env:
+          UAT2_HOST: ${{ vars.UAT2_HOST }}
+          UAT2_USER: ${{ vars.UAT2_USER }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i ~/.ssh/id_ed25519 \
+            -o IdentitiesOnly=yes \
+            -o PasswordAuthentication=no \
+            "$UAT2_USER@$UAT2_HOST" \
+            "/home/vboxuser/webapps/ecom_sync_sales_tool/uat2/bin/deploy.sh $TARGET_SHA"
