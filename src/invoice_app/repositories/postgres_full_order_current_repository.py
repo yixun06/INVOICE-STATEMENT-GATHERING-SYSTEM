@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from src.invoice_app.services import analysis_perf as perf
+
+import logging
+import os
 from datetime import date, datetime, timezone
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
@@ -124,7 +128,8 @@ class PostgresFullOrderCurrentRepository:
                 raise HistoricalInvoiceStorageError(
                     "PostgreSQL Full Order sync readback did not match the intended snapshot."
                 )
-            return result
+        self._sync_disposable_fact_after_commit()
+        return result
 
     def sync_missing_only(self, batch: FullOrderCurrentBatch) -> FullOrderSyncResult:
         """Safely add verified missing market orders without replacing existing facts."""
@@ -154,25 +159,38 @@ class PostgresFullOrderCurrentRepository:
                 raise HistoricalInvoiceStorageError(
                     "PostgreSQL Full Order missing-only readback did not match the intended snapshot."
                 )
-            return result
+        self._sync_disposable_fact_after_commit()
+        return result
+
+    def _sync_disposable_fact_after_commit(self) -> None:
+        """Opt-in Fact hook; a failure cannot undo the committed source write."""
+        from src.invoice_app.pg_orm.runtime import is_authorized_fact_server
+        test_enabled = (os.environ.get('INVOICEGATHER_TEST_FULL_ORDER_FACT_SYNC') == '1'
+                and (self._engine.url.host, self._engine.url.port, self._engine.url.database) ==
+                    ('127.0.0.1', 5433, 'invoicegather_fact_atomicity_test'))
+        server_enabled = (os.environ.get('INVOICEGATHER_FACT_AUTO_SYNC') == '1'
+                          and is_authorized_fact_server(self._engine.url))
+        if (os.environ.get('INVOICEGATHER_FACT_AUTO_SYNC') == '1'
+                and os.environ.get('INVOICEGATHER_FACT_SERVER_ENABLED') == '1' and not server_enabled):
+            logging.getLogger(__name__).error('Full Order committed; Fact server target rejected; sync not performed')
+        if not (test_enabled or server_enabled):
+            return
+        try:
+            from src.invoice_app.services.incremental_financial_fact import sync_test_facts
+            with self._engine.begin() as connection:
+                sync_test_facts(connection, resolve_market_context(self._market))
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                'Full Order committed; %s fact sync pending retry (%s)',
+                'server' if server_enabled else 'disposable', type(error).__name__)
 
     def _read_snapshot(self, connection: Connection) -> FullOrderCurrentSnapshot:
-        orders = tuple(
-            _order_from_row(row)
-            for row in connection.execute(
-                select(*PgOrder.__table__.c)
-                .where(PgOrder.market == self._market)
-                .order_by(PgOrder.order_id)
-            ).mappings()
-        )
-        items = tuple(
-            _item_from_row(row)
-            for row in connection.execute(
-                select(*PgItem.__table__.c)
-                .where(PgItem.market == self._market)
-                .order_by(PgItem.order_id, PgItem.item_index)
-            ).mappings()
-        )
+        orders = perf.read_rows(connection, select(*PgOrder.__table__.c)
+            .where(PgOrder.market == self._market).order_by(PgOrder.order_id),
+            _order_from_row, "full_order_orders")
+        items = perf.read_rows(connection, select(*PgItem.__table__.c)
+            .where(PgItem.market == self._market).order_by(PgItem.order_id, PgItem.item_index),
+            _item_from_row, "full_order_items")
         order_keys = {(row.market, row.order_id) for row in orders}
         if any((row.market, row.order_id) not in order_keys for row in items):
             raise HistoricalInvoiceStorageError(

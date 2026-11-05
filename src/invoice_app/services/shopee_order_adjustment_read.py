@@ -50,10 +50,11 @@ def read_committed_order_adjustments(
             "Statement reader market does not match the requested adjustment market."
         )
     requested = {_normalized_order_id(value) for value in order_ids if _normalized_order_id(value)}
-    state = statement_reader.reload_active_commit_state()
+    reader = getattr(statement_reader, "read_order_adjustments", None)
+    source_events = reader(None if not requested else requested) if callable(reader) else statement_reader.reload_active_commit_state().order_adjustments
     events = tuple(
         event
-        for event in state.order_adjustments
+        for event in source_events
         if event.platform == context.persisted_platform
         and (not requested or _normalized_order_id(event.linked_order_id) in requested)
     )

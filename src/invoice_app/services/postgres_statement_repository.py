@@ -8,6 +8,11 @@ Statement tab and never falls back when PostgreSQL is unavailable.
 
 from __future__ import annotations
 
+from src.invoice_app.services import analysis_perf as perf
+
+import os
+import logging
+
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from time import perf_counter
@@ -82,29 +87,41 @@ class PostgresStatementRepository:
         """Compatibility entry point; active Statement never reads Invoice/PDF state."""
         return self.reload_active_commit_state()
 
+    def read_order_adjustments(self, order_ids: Iterable[str] | None = None) -> tuple[CanonicalOrderAdjustment, ...]:
+        """None reads the market; an empty scope reads nothing; IDs filter in memory."""
+        requested = None if order_ids is None else {str(value).strip() for value in order_ids if str(value).strip()}
+        if requested is not None and not requested:
+            return ()
+        with measure("analysis_adjustments", queries=1) as counts:
+            with self._engine.connect() as connection:
+                events = perf.read_rows(connection,
+                    select(OrderAdjustment.__table__).where(OrderAdjustment.platform == self._persisted_platform),
+                    _adjustment_from_model, "order_adjustments")
+            counts["rows_returned"] = len(events)
+        return tuple(event for event in events if requested is None or str(event.linked_order_id or "").strip() in requested)
+
+    @measured("analysis_statement_facts")
     def read_committed_financial_facts(self) -> CommittedStatementFinancialFacts:
         with self._engine.connect() as connection:
-            order_rows = connection.execute(
-                select(StatementData.__table__).where(
-                    StatementData.platform == self._persisted_platform,
-                    StatementData.validation_status == "PASSED",
-                    StatementData.commit_status == "COMMITTED",
-                    StatementData.record_type == "ORDER",
-                )
-            ).mappings()
-            orders = tuple(_order_fact(row) for row in order_rows)
-            component_rows = connection.execute(
-                select(StatementFinancialComponent.__table__).where(
-                    StatementFinancialComponent.platform == self._persisted_platform,
-                    StatementFinancialComponent.commit_status == "COMMITTED",
-                    # Text-only Shipping Fee Discrepancy reasons are retained in
-                    # the immutable native ledger/readback state. They are not
-                    # financial facts: the shared projection contract requires a
-                    # Decimal component amount and never allocates text evidence.
-                    StatementFinancialComponent.component_amount.is_not(None),
-                )
-            ).mappings()
-            components = tuple(_component_fact(row) for row in component_rows)
+            orders = perf.read_rows(connection, select(StatementData.__table__).where(
+                StatementData.platform == self._persisted_platform,
+                StatementData.validation_status == "PASSED",
+                StatementData.commit_status == "COMMITTED",
+                StatementData.record_type == "ORDER",
+            ), _order_fact, "statement_orders")
+            component_columns = (StatementFinancialComponent.record_type, StatementFinancialComponent.order_id,
+                StatementFinancialComponent.component_name, StatementFinancialComponent.component_amount,
+                StatementFinancialComponent.statement_batch_id, StatementFinancialComponent.statement_file_hash,
+                StatementFinancialComponent.statement_source_sheet, StatementFinancialComponent.statement_source_row_number,
+                StatementFinancialComponent.sequence_no, StatementFinancialComponent.payout_completed_date)
+            component_select = (select(*component_columns)
+                if os.environ.get("INVOICEGATHER_COMPACT_COMPONENT_READ") == "1"
+                else select(StatementFinancialComponent.__table__))
+            components = perf.read_rows(connection, component_select.where(
+                StatementFinancialComponent.platform == self._persisted_platform,
+                StatementFinancialComponent.commit_status == "COMMITTED",
+                StatementFinancialComponent.component_amount.is_not(None),
+            ), _component_fact, "financial_components")
         return CommittedStatementFinancialFacts(
             platform=self._persisted_platform,
             order_facts=orders,
@@ -164,6 +181,30 @@ class PostgresStatementRepository:
             raise StatementCommitBlocked(
                 "PostgreSQL Statement transaction rolled back; no Google Sheets fallback is permitted."
             ) from error
+
+        # Opt-in Fact integration only. The authoritative Statement
+        # transaction above has already committed; sync failure must not turn
+        # that successful source commit into a reported Statement failure.
+        from src.invoice_app.pg_orm.runtime import is_authorized_fact_server
+        test_enabled = (os.environ.get('INVOICEGATHER_TEST_STATEMENT_FACT_SYNC') == '1'
+                and (self._engine.url.host, self._engine.url.port, self._engine.url.database) ==
+                    ('127.0.0.1', 5433, 'invoicegather_fact_atomicity_test'))
+        server_enabled = (os.environ.get('INVOICEGATHER_FACT_AUTO_SYNC') == '1'
+                          and is_authorized_fact_server(self._engine.url))
+        if (os.environ.get('INVOICEGATHER_FACT_AUTO_SYNC') == '1'
+                and os.environ.get('INVOICEGATHER_FACT_SERVER_ENABLED') == '1' and not server_enabled):
+            logging.getLogger(__name__).error('Statement committed; Fact server target rejected; sync not performed')
+        if test_enabled or server_enabled:
+            try:
+                from src.invoice_app.services.incremental_financial_fact import sync_test_facts
+                from src.invoice_app.services.market_context import SHOPEE_MY, SHOPEE_SG
+                context = SHOPEE_MY if self._persisted_platform == _MY_PLATFORM else SHOPEE_SG
+                with self._engine.begin() as connection:
+                    sync_test_facts(connection, context)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    'Statement committed; %s fact sync pending retry (%s)',
+                    'server' if server_enabled else 'disposable', type(error).__name__)
 
     def weekly_statement_rows(self) -> Mapping[str, tuple[tuple[str, ...], ...]]:
         """Return only this market's Statement-owned rows for an approved projector."""

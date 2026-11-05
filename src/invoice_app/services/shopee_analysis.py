@@ -7,6 +7,8 @@ dependency and never allocates order-level settlement facts to product rows.
 
 from __future__ import annotations
 
+from src.invoice_app.services import analysis_perf as perf
+
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -74,6 +76,10 @@ class ShopeeAnalysisSnapshot:
     market: str
     current: FullOrderCurrentSnapshot
     projections: tuple[OrderFinancialProjection, ...]
+    source_revision: int | None = None
+    cache_token: str | None = None
+    cache_created_monotonic: float | None = None
+    cache_target_id: str | None = None
 
     def __post_init__(self) -> None:
         foreign_orders = {order.market for order in self.current.orders if order.market != self.market}
@@ -295,6 +301,10 @@ class ShopeeAnalysisReport:
         return next((row for row in self.rows if row.order_id == normalized), None)
 
 
+from src.invoice_app.services.statement_performance import measured, measure
+
+@measured("analysis_snapshot")
+@perf.timed("load_shopee_analysis_snapshot")
 def load_shopee_analysis_snapshot(
     *,
     market_context: MarketContext,
@@ -304,11 +314,14 @@ def load_shopee_analysis_snapshot(
     """Load one market's canonical Full Order and financial projections only."""
 
     context = resolve_market_context(market_context)
-    current = full_order_repository.read_snapshot()
+    with measure("analysis_full_order") as counts:
+        current = full_order_repository.read_snapshot()
+        counts.update(orders=len(current.orders), items=len(current.items))
     projections = read_order_financial_projections(
         market_context=context,
         full_order_repository=full_order_repository,
         statement_reader=statement_reader,
+        current_snapshot=current,
     )
     return ShopeeAnalysisSnapshot(
         presentation=ShopeeAnalysisPresentation(
@@ -322,24 +335,32 @@ def load_shopee_analysis_snapshot(
     )
 
 
+@perf.timed("product_options")
 def product_options(snapshot: ShopeeAnalysisSnapshot) -> tuple[AnalysisProductOption, ...]:
     values: dict[str, AnalysisProductOption] = {}
     for item in snapshot.current.items:
         key, description, variation, nav, seller_sku, unit_price = _item_identity(item)
-        label = " · ".join(part for part in (description, variation, f"SKU {seller_sku}", f"NAV {nav}") if part)
+        label = " Â· ".join(part for part in (description, variation, f"SKU {seller_sku}", f"NAV {nav}") if part)
         values[key] = AnalysisProductOption(key, label)
     return tuple(sorted(values.values(), key=lambda value: value.label.casefold()))
 
 
+@perf.timed("available_statuses")
 def available_statuses(snapshot: ShopeeAnalysisSnapshot) -> tuple[str, ...]:
+    from src.invoice_app.services.financial_fact_poc import FactSnapshot
+    rows = snapshot.current.orders if isinstance(snapshot, FactSnapshot) else snapshot.projections
     return tuple(sorted({
         row.order_status
-        for row in snapshot.projections
+        for row in rows
         if row.order_status and _is_eligible_status(row.order_status)
     }))
 
 
+@perf.timed("available_fee_types")
 def available_fee_types(snapshot: ShopeeAnalysisSnapshot) -> tuple[str, ...]:
+    from src.invoice_app.services.financial_fact_poc import FactSnapshot
+    if isinstance(snapshot, FactSnapshot):
+        return snapshot.fee_names
     return tuple(sorted({
         component.component_name
         for projection in snapshot.projections

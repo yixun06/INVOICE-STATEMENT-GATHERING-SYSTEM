@@ -17,6 +17,25 @@ class PostgresRuntimeUnavailable(HistoricalInvoiceStorageError):
     """The approved local PostgreSQL runtime cannot be used safely."""
 
 
+def is_authorized_fact_server(url) -> bool:
+    """Explicit Fact opt-in plus exact configured and generally allowed target."""
+    if os.environ.get('INVOICEGATHER_FACT_SERVER_ENABLED') != '1' or os.environ.get('INVOICEGATHER_ATOMICITY_TEST_MODE') == '1':
+        return False
+    configured = (os.environ.get('INVOICEGATHER_PG_HOST'), os.environ.get('INVOICEGATHER_PG_PORT'),
+                  os.environ.get('INVOICEGATHER_PG_DATABASE'))
+    actual = (url.host, str(url.port), url.database)
+    # This is the existing explicit server-side UAT2 PostgreSQL allowlist entry.
+    return configured == actual == ('127.0.0.1', '55434', 'invoicegather_uat2_import')
+
+
+def assert_fact_server_target(connection):
+    from sqlalchemy import text
+    if not is_authorized_fact_server(connection.engine.url):
+        raise PostgresRuntimeUnavailable('Fact server target is not explicitly authorized')
+    if connection.execute(text('SELECT current_database(), current_schema()')).one() != ('invoicegather_uat2_import', 'public'):
+        raise PostgresRuntimeUnavailable('Fact server database or schema identity mismatch')
+
+
 @dataclass(frozen=True)
 class PostgresRuntimeConfig:
     """External-only connection settings for the local approved target."""
@@ -55,20 +74,30 @@ class PostgresRuntimeConfig:
         return config
 
     def assert_authorized_target(self, *, consumer: str = "Statement") -> None:
+        if os.environ.get('INVOICEGATHER_ATOMICITY_TEST_MODE') == '1':
+            if (self.host, self.port, self.database) != ('127.0.0.1', 5433, 'invoicegather_fact_atomicity_test'):
+                raise PostgresRuntimeUnavailable('Isolated upload test mode requires its exact test target.')
+            return
         if self.host not in {"127.0.0.1", "localhost", "::1"}:
             raise PostgresRuntimeUnavailable(
                 f"Refusing non-local PostgreSQL {consumer} target: {self.host!r}."
             )
         if not (
             (self.port == 5433 and self.database == "invoicegather")
+            or (self.host == "127.0.0.1" and self.port == 5433 and self.database == "invoicegather_perf_uat")
+            or (self.host == "127.0.0.1" and self.port == 5433 and self.database == "invoicegather_perf_scale")
             or (self.host == "127.0.0.1" and self.port == 55434 and self.database == "invoicegather_uat2_import")
         ):
             raise PostgresRuntimeUnavailable(
                 f"Refusing unapproved PostgreSQL {consumer} target; expected "
-                "localhost:5433/invoicegather or 127.0.0.1:55434/invoicegather_uat2_import."
+                "localhost:5433/invoicegather, 127.0.0.1:5433/invoicegather_perf_uat or invoicegather_perf_scale, "
+                "or 127.0.0.1:55434/invoicegather_uat2_import."
             )
 
     def engine(self) -> Engine:
+        isolated = os.environ.get('INVOICEGATHER_ATOMICITY_TEST_MODE') == '1'
+        if isolated:
+            self.assert_authorized_target()
         return create_engine(
             URL.create(
                 "postgresql+psycopg2",
@@ -79,4 +108,5 @@ class PostgresRuntimeConfig:
                 database=self.database,
             ),
             pool_pre_ping=True,
+            connect_args={'options': '-c search_path=ig_real_upload_uat'} if isolated else {},
         )

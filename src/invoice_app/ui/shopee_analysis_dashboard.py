@@ -9,6 +9,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from src.invoice_app.services import analysis_perf as perf
+
 from src.invoice_app.services.shopee_analysis import (
     AnalysisDateBasis,
     ReconciliationStatus,
@@ -68,10 +70,43 @@ ANALYSIS_NAV_CSS = """
 """
 
 
-def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot) -> None:
+def _snapshot_derived(snapshot: ShopeeAnalysisSnapshot) -> dict:
+    """Session-local derived values, invalidated whenever cache recomputes."""
+    if snapshot.cache_token is None:
+        return {}
+    key = f"_analysis_derived_{snapshot.market}"
+    identity = (snapshot.market, snapshot.source_revision, snapshot.cache_token)
+    cached = st.session_state.get(key)
+    if cached is None or cached["identity"] != identity:
+        cached = {"identity": identity}
+        st.session_state[key] = cached
+    return cached
+
+
+def _derived_value(cache: dict, key: str, factory):
+    if key not in cache:
+        cache[key] = factory()
+    else:
+        with perf.stage("reuse_" + key):
+            pass
+    return cache[key]
+
+
+def _derived_report(cache: dict, snapshot: ShopeeAnalysisSnapshot, filters: ShopeeAnalysisFilters, report_loader=None):
+    if cache.get("report_filters") != filters or "report" not in cache:
+        cache["report"] = report_loader(snapshot, filters) if report_loader else build_shopee_analysis(snapshot, filters)
+        cache["report_filters"] = filters
+    else:
+        with perf.stage("reuse_report"):
+            pass
+    return cache["report"]
+
+
+def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot, detail_loader=None, report_loader=None) -> None:
     """Render a market-neutral dashboard without repository or table knowledge."""
 
     presentation = snapshot.presentation
+    derived = _snapshot_derived(snapshot)
     st.title(f"{presentation.market_label} - Analysis V2")
     st.caption(
         "Canonical Full Order product facts and committed Statement settlement evidence. "
@@ -79,10 +114,12 @@ def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot) -> None:
     )
     st.html(ANALYSIS_NAV_CSS)
     with st.container(gap="xsmall"):
-        filters = _render_filters(snapshot)
+        with perf.stage("filters"):
+            filters = _render_filters(snapshot, derived)
         if filters is None:
             return
-        report = build_shopee_analysis(snapshot, filters)
+        with perf.stage("report_build"):
+            report = _derived_report(derived, snapshot, filters, report_loader)
         with st.container(key="analysis_modules", gap="xsmall"):
             module_key = f"analysis_module_{presentation.market_label}"
             modules = ("Overview", "Product Analysis", "Financial & Reconciliation")
@@ -92,20 +129,30 @@ def render_shopee_analysis_dashboard(snapshot: ShopeeAnalysisSnapshot) -> None:
                 "Analysis workspace", modules, key=module_key, required=True,
                 label_visibility="collapsed", width="stretch", persist_state="session",
             )
+            if perf.enabled():
+                marker = f"_analysis_perf_module_{presentation.market_label}"
+                previous = st.session_state.get(marker)
+                if previous is not None and previous != selected_module:
+                    perf.update(trigger="MODULE_CHANGE")
+                st.session_state[marker] = selected_module
             if selected_module == "Overview":
                 _render_overview(report)
             elif selected_module == "Product Analysis":
-                _render_product_analysis(report)
+                with perf.stage("product_module"):
+                    _render_product_analysis(report)
             else:
-                _render_financial_analysis(report)
+                with perf.stage("financial_module"):
+                    _render_financial_analysis(report, detail_loader=detail_loader)
 
 
-def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters | None:
+def _render_filters(snapshot: ShopeeAnalysisSnapshot, derived: dict | None = None) -> ShopeeAnalysisFilters | None:
     presentation = snapshot.presentation
+    if derived is None:
+        derived = {}
     prefix = f"{presentation.market_label}_analysis_"
     applied_key = prefix + "applied_filters"
     default_basis = tuple(AnalysisDateBasis)[0]
-    default_dates = snapshot.available_dates(default_basis)
+    default_dates = _derived_value(derived, "dates_" + default_basis.name, lambda: snapshot.available_dates(default_basis))
     if applied_key not in st.session_state and default_dates:
         st.session_state[applied_key] = ShopeeAnalysisFilters(
             date_basis=default_basis, from_date=default_dates[0], to_date=default_dates[-1]
@@ -119,7 +166,7 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
                 "Date basis", tuple(AnalysisDateBasis), format_func=lambda value: value.value,
                 key=f"{presentation.market_label}_analysis_date_basis",
             )
-        dates = snapshot.available_dates(basis)
+        dates = _derived_value(derived, "dates_" + basis.name, lambda: snapshot.available_dates(basis))
         if not dates:
             st.info("No canonical dates are available for this source authority.", icon=":material/info:")
             if st.button("Reset filters", key=prefix + "reset_empty"):
@@ -134,7 +181,7 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
                 "Date range", value=(minimum, maximum), min_value=minimum, max_value=maximum,
                 key=f"{presentation.market_label}_analysis_date_range_{basis.name}",
             )
-        options = product_options(snapshot)
+        options = _derived_value(derived, "product_options", lambda: product_options(snapshot))
         option_map = {option.label: option.key for option in options}
         audience_controls = st.columns((2, 1.5))
         with audience_controls[0]:
@@ -144,7 +191,7 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
             )
         with audience_controls[1]:
             selected_statuses = st.multiselect(
-                "Order status", available_statuses(snapshot), placeholder="All eligible statuses",
+                "Order status", _derived_value(derived, "statuses", lambda: available_statuses(snapshot)), placeholder="All eligible statuses",
                 key=f"{presentation.market_label}_analysis_statuses",
             )
         with st.expander("More filters"):
@@ -156,7 +203,7 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
                 key=f"{presentation.market_label}_analysis_settlement_states",
             )
             fee_types = third.multiselect(
-                "Fee or component type", available_fee_types(snapshot),
+                "Fee or component type", _derived_value(derived, "fee_types", lambda: available_fee_types(snapshot)),
                 key=f"{presentation.market_label}_analysis_fee_types",
             )
             fourth, fifth = st.columns(2)
@@ -176,12 +223,14 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
                 reset_clicked = st.button("Reset filters", key=prefix + "reset")
                 apply_clicked = st.button("Apply filters", type="primary", key=prefix + "apply")
         if reset_clicked:
+            perf.update(trigger="RESET")
             for key in list(st.session_state):
                 if key.startswith(prefix):
                     del st.session_state[key]
             st.rerun()
     if not isinstance(current_range, tuple) or len(current_range) != 2:
         if apply_clicked:
+            perf.update(trigger="APPLY")
             st.error("Select a valid From and To date.")
         return st.session_state.get(applied_key)
     try:
@@ -199,6 +248,7 @@ def _render_filters(snapshot: ShopeeAnalysisSnapshot) -> ShopeeAnalysisFilters |
         )
     except ValueError as error:
         if apply_clicked:
+            perf.update(trigger="APPLY")
             st.error(str(error))
         return st.session_state.get(applied_key)
     if apply_clicked:
@@ -451,7 +501,7 @@ def _render_product_analysis(report: ShopeeAnalysisReport) -> None:
     )
 
 
-def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
+def _render_financial_analysis(report: ShopeeAnalysisReport, detail_loader=None) -> None:
     currency = report.presentation.currency_code
     if not report.rows:
         st.info("No canonical orders match the selected filters.", icon=":material/info:")
@@ -498,7 +548,10 @@ def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
             )
     else:
         st.info("No committed ORDER-level Statement components are available for this selection.", icon=":material/info:")
-    _render_order_inspector(report)
+    if detail_loader is None:
+        _render_order_inspector(report)
+    else:
+        _render_order_inspector(report, detail_loader=detail_loader)
     st.subheader("Order reconciliation")
     st.dataframe(
         pd.DataFrame({
@@ -517,7 +570,7 @@ def _render_financial_analysis(report: ShopeeAnalysisReport) -> None:
     )
 
 
-def _render_order_inspector(report: ShopeeAnalysisReport) -> None:
+def _render_order_inspector(report: ShopeeAnalysisReport, detail_loader=None) -> None:
     currency = report.presentation.currency_code
     with st.container(border=True):
         st.subheader("Inspect an Order")
@@ -542,6 +595,15 @@ def _render_order_inspector(report: ShopeeAnalysisReport) -> None:
         row = report.order(order_id)
         if row is None:
             return
+        components = row.financial_components
+        if detail_loader is not None:
+            from src.invoice_app.services.dashboard_financial_summary import DashboardRefreshRequired
+            from types import SimpleNamespace
+            try:
+                components = tuple(SimpleNamespace(**item) for item in detail_loader(order_id))
+            except DashboardRefreshRequired:
+                st.warning("Refresh Required: financial data changed. Reload the dashboard before viewing details.")
+                return
         st.caption(row.reconciliation_reason)
         left, right = st.columns(2)
         with left:
@@ -571,9 +633,9 @@ def _render_order_inspector(report: ShopeeAnalysisReport) -> None:
                 st.caption(f"Released amount: {_money(row.released_amount, currency)} | Payout date: {row.payout_completed_date or '-'}")
                 st.dataframe(
                     pd.DataFrame({
-                        "Record type": [item.record_type for item in row.financial_components],
-                        "Component": [item.component_name for item in row.financial_components],
-                        "Amount": [item.component_amount for item in row.financial_components],
+                        "Record type": [item.record_type for item in components],
+                        "Component": [item.component_name for item in components],
+                        "Amount": [item.component_amount for item in components],
                     }), hide_index=True,
                     column_config={"Amount": st.column_config.NumberColumn(format=streamlit_currency_format(currency))},
                 )
@@ -722,6 +784,7 @@ def _product_chart_label(value: str, *, limit: int = 42) -> str:
     return compact if len(compact) <= limit else compact[:limit - 1].rstrip() + "…"
 
 
+@perf.timed("product_trend_frame")
 def _product_trend_frame(report: ShopeeAnalysisReport, metric: str) -> pd.DataFrame:
     grouped: dict[date, dict[str, Decimal]] = {}
     for row in report.rows:
@@ -735,6 +798,7 @@ def _product_trend_frame(report: ShopeeAnalysisReport, metric: str) -> pd.DataFr
     return _trend_frame(grouped, metric, report)
 
 
+@perf.timed("financial_trend_frame")
 def _financial_trend_frame(report: ShopeeAnalysisReport, metric: str) -> pd.DataFrame:
     source_metric = FINANCIAL_METRIC_FIELDS.get(metric, metric)
     grouped: dict[date, dict[str, Decimal]] = {}
