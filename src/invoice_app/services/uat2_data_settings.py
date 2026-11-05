@@ -299,6 +299,13 @@ def configured_uat2_data_settings(
     for key in values:
         if configured.get(key) not in (None, ""):
             values[key] = str(configured[key])
+    if os.environ.get('INVOICEGATHER_ATOMICITY_TEST_MODE') == '1' and (
+        values['full_order_backend'].strip() != POSTGRES_FULL_ORDER_BACKEND
+        or values['statement_backend'].strip() != POSTGRES_STATEMENT_BACKEND
+    ):
+        raise HistoricalInvoiceStorageError(
+            'Isolated upload test requires PostgreSQL Full Order and Statement backends.'
+        )
     service_account = configured.get("google_service_account")
     if not values["google_spreadsheet_id"].strip():
         raise MarketConfigurationUnavailable(

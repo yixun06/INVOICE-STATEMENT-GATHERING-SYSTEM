@@ -8,12 +8,15 @@ released-plus-adjustment "net income" calculation is part of this boundary.
 
 from __future__ import annotations
 
+from src.invoice_app.services import analysis_perf as perf
+
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import Enum
 from typing import Iterable, Protocol
+from src.invoice_app.services.statement_performance import measured
 
 from src.invoice_app.domain.order_adjustment import CanonicalOrderAdjustment
 from src.invoice_app.repositories.shopee_full_order_current_repository import (
@@ -89,12 +92,15 @@ class OrderFinancialProjection:
     adjustment_events: tuple[CanonicalOrderAdjustment, ...]
 
 
+@measured("analysis_projection")
+@perf.timed("read_order_financial_projections")
 def read_order_financial_projections(
     *,
     market_context: MarketContext,
     full_order_repository: ShopeeFullOrderCurrentRepository,
     statement_reader: OrderFinancialProjectionStatementReader,
     order_ids: Iterable[str] = (),
+    current_snapshot: FullOrderCurrentSnapshot | None = None,
 ) -> tuple[OrderFinancialProjection, ...]:
     """Read canonical financial views for one market and optional exact order IDs.
 
@@ -111,7 +117,10 @@ def read_order_financial_projections(
         statement_reader=statement_reader,
         order_ids=order_ids,
     )
-    orders = _orders_for_market(full_order_repository.read_snapshot(), context.key.value)
+    snapshot = current_snapshot if current_snapshot is not None else full_order_repository.read_snapshot()
+    if current_snapshot is not None and any(row.market != context.key.value for row in (*snapshot.orders, *snapshot.items)):
+        raise OrderFinancialProjectionError("Full Order snapshot market mismatch.")
+    orders = _orders_for_market(snapshot, context.key.value)
     statement_by_order = {record.order_id: record for record in financial.records}
     requested = {_normalized_order_id(value) for value in order_ids if _normalized_order_id(value)}
     identities = requested or (set(orders) | set(statement_by_order))

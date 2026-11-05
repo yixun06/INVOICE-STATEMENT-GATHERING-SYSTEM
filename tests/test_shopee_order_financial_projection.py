@@ -78,6 +78,18 @@ class _RaisingLegacyInvoiceRepository:
         raise AssertionError("OrderFinancialProjection must not read legacy Invoice data.")
 
 
+@pytest.mark.parametrize("context", [SHOPEE_MY, SHOPEE_SG])
+def test_analysis_reuses_full_order_snapshot(context):
+    from src.invoice_app.services.shopee_analysis import load_shopee_analysis_snapshot
+
+    repository = _PostgresFullOrderRepository(FullOrderCurrentSnapshot(orders=(), items=()))
+    reader = _PostgresStatementReader(context.persisted_platform, CommittedStatementFinancialFacts(
+        platform=context.persisted_platform, order_facts=(), financial_components=(),
+    ))
+    load_shopee_analysis_snapshot(market_context=context, full_order_repository=repository, statement_reader=reader)
+    assert repository.reads == 1
+
+
 def _order(order_id: str, *, market: str, created: date, status: str = "Completed"):
     return FullOrderCurrentOrder(
         market=market,
